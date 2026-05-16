@@ -1,0 +1,692 @@
+import { Ionicons } from '@expo/vector-icons';
+import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { ComponentProps, useEffect, useState } from 'react';
+import {
+  Modal,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+
+import { GlassCard } from '@/components/GlassCard';
+import { StatusPill, StatusVariant } from '@/components/StatusPill';
+import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
+import { formatClock, formatDate, formatDuration } from '@/lib/format';
+import { useData } from '@/lib/store';
+
+type IoniconName = ComponentProps<typeof Ionicons>['name'];
+
+const TABS = ['Transcript', 'Summary', 'Marked', 'Notes'] as const;
+type Tab = (typeof TABS)[number];
+
+const STATUS_INFO: Record<string, { label: string; variant: StatusVariant }> = {
+  local_recorded: { label: 'RECORDED', variant: 'idle' },
+};
+
+/** A study-note style block header: icon tile + label. */
+function BlockHeader({ icon, label }: { icon: IoniconName; label: string }) {
+  return (
+    <View style={styles.blockHeader}>
+      <View style={styles.blockIcon}>
+        <Ionicons name={icon} size={15} color={colors.deepNavy} />
+      </View>
+      <Text style={styles.blockLabel}>{label}</Text>
+    </View>
+  );
+}
+
+export default function LectureDetailScreen() {
+  const router = useRouter();
+  const params = useLocalSearchParams<{ id?: string }>();
+  const { getLecture, getCourse, updateLecture } = useData();
+
+  const lecture = getLecture(params.id);
+  const course = getCourse(lecture?.courseId);
+
+  const [tab, setTab] = useState<Tab>('Transcript');
+  const [notesDraft, setNotesDraft] = useState(lecture?.notes ?? '');
+  const [notesOpen, setNotesOpen] = useState(false);
+
+  if (!lecture) {
+    return (
+      <SafeAreaView style={styles.root} edges={['top', 'left', 'right', 'bottom']}>
+        <View style={styles.notFound}>
+          <Ionicons name="document-outline" size={36} color={colors.mutedBlueGray} />
+          <Text style={styles.notFoundText}>This lecture could not be found.</Text>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => router.replace('/')}
+            style={({ pressed }) => [styles.notFoundBtn, pressed && styles.pressed]}
+          >
+            <Text style={styles.notFoundBtnText}>Back to Home</Text>
+          </Pressable>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  const transcript = lecture.transcript.trim();
+  const summaryEn = lecture.summaryEn.trim();
+  const summaryZh = lecture.summaryZh.trim();
+  const status =
+    lecture.processingStatus === 'ready'
+      ? { label: 'READY', variant: 'done' as StatusVariant }
+      : lecture.processingStatus === 'processing'
+        ? { label: 'PROCESSING', variant: 'processing' as StatusVariant }
+        : lecture.processingStatus === 'failed'
+          ? { label: 'FAILED', variant: 'idle' as StatusVariant }
+          : STATUS_INFO[lecture.status] ?? STATUS_INFO.local_recorded;
+
+  const saveNotes = () => {
+    if (notesDraft !== lecture.notes) updateLecture(lecture.id, { notes: notesDraft });
+    setNotesOpen(false);
+  };
+
+  const audioAvailable = Boolean(lecture.localAudioUri);
+  const player = useAudioPlayer(audioAvailable ? { uri: lecture.localAudioUri! } : null, { updateInterval: 250 });
+  const audioStatus = useAudioPlayerStatus(player);
+  const playbackDuration = audioStatus.duration || lecture.durationMillis / 1000;
+  const playbackProgress = playbackDuration > 0 ? Math.min(audioStatus.currentTime / playbackDuration, 1) : 0;
+
+  useEffect(() => {
+    setNotesDraft(lecture.notes);
+  }, [lecture.notes]);
+
+  const seekToSeconds = async (seconds: number) => {
+    if (!audioAvailable) return;
+    await player.seekTo(Math.max(0, Math.min(seconds, playbackDuration || seconds)));
+  };
+
+  const skipBy = async (delta: number) => {
+    await seekToSeconds(audioStatus.currentTime + delta);
+  };
+
+  return (
+    <SafeAreaView style={styles.root} edges={['top', 'left', 'right', 'bottom']}>
+      {/* Header */}
+      <View style={styles.header}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Back"
+          onPress={() => router.back()}
+          hitSlop={10}
+          style={({ pressed }) => [styles.backBtn, pressed && styles.pressed]}
+        >
+          <Ionicons name="chevron-back" size={24} color={colors.deepNavy} />
+        </Pressable>
+        {course ? (
+          <View style={[styles.courseTile, { backgroundColor: course.tint }]}>
+            <Ionicons
+              name={course.icon as IoniconName}
+              size={20}
+              color={course.accent}
+            />
+          </View>
+        ) : null}
+        <View style={styles.headerText}>
+          <Text style={styles.headerTitle} numberOfLines={1}>
+            {lecture.title}
+          </Text>
+          <Text style={styles.headerMeta} numberOfLines={1}>
+            {course?.name ?? 'Lecture'} · {formatDate(lecture.date)} ·{' '}
+            {formatDuration(lecture.durationMillis)}
+          </Text>
+        </View>
+        <StatusPill label={status.label} variant={status.variant} />
+      </View>
+
+      <View style={styles.playerWrap}>
+        <GlassCard>
+          <BlockHeader icon="play-circle-outline" label="LECTURE AUDIO" />
+          {audioAvailable ? (
+            <>
+              <View style={styles.playerTimes}>
+                <Text style={styles.playerTimeText}>{formatClock(Math.floor(audioStatus.currentTime))}</Text>
+                <Text style={styles.playerTimeText}>{formatClock(Math.floor(playbackDuration))}</Text>
+              </View>
+              <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${playbackProgress * 100}%` }]} /></View>
+              <View style={styles.playerControls}>
+                <Pressable accessibilityRole="button" onPress={() => void skipBy(-10)} style={styles.playerButton}>
+                  <Ionicons name="play-back" size={20} color={colors.deepNavy} />
+                  <Text style={styles.playerButtonText}>10s</Text>
+                </Pressable>
+                <Pressable accessibilityRole="button" onPress={() => audioStatus.playing ? player.pause() : player.play()} style={styles.playPauseButton}>
+                  <Ionicons name={audioStatus.playing ? 'pause' : 'play'} size={24} color={colors.textOnNavy} />
+                </Pressable>
+                <Pressable accessibilityRole="button" onPress={() => void skipBy(10)} style={styles.playerButton}>
+                  <Text style={styles.playerButtonText}>10s</Text>
+                  <Ionicons name="play-forward" size={20} color={colors.deepNavy} />
+                </Pressable>
+              </View>
+            </>
+          ) : (
+            <Text style={styles.emptyInline}>
+              {lecture.storagePath ? 'Audio playback from cloud storage is coming soon.' : 'Audio playback is not available for this lecture.'}
+            </Text>
+          )}
+        </GlassCard>
+      </View>
+
+      {/* Tab bar */}
+      <View style={styles.tabBar}>
+        {TABS.map((t) => {
+          const active = t === tab;
+          return (
+            <Pressable
+              key={t}
+              accessibilityRole="tab"
+              accessibilityState={{ selected: active }}
+              onPress={() => setTab(t)}
+              style={[styles.tab, active && styles.tabActive]}
+            >
+              <Text
+                style={[styles.tabLabel, active && styles.tabLabelActive]}
+                numberOfLines={1}
+              >
+                {t}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+      >
+        <View style={styles.content}>
+          {/* ---- Transcript timeline ---- */}
+          {tab === 'Transcript' && (
+            <GlassCard>
+              <BlockHeader icon="document-text-outline" label="TRANSCRIPT" />
+              {transcript ? <Text style={styles.bodyText}>{transcript}</Text> : <Text style={styles.emptyInline}>Transcript is not ready yet.</Text>}
+            </GlassCard>
+          )}
+
+          {/* ---- Summary ---- */}
+          {tab === 'Summary' && (
+            <>
+              {summaryEn || summaryZh ? (
+                <>
+                  {summaryEn ? <GlassCard><BlockHeader icon="language-outline" label="ENGLISH SUMMARY" /><Text style={styles.bodyText}>{summaryEn}</Text></GlassCard> : null}
+                  {summaryZh ? <GlassCard><BlockHeader icon="chatbubbles-outline" label="中文总结" /><Text style={[styles.bodyText, styles.bodyZh]}>{summaryZh}</Text></GlassCard> : null}
+                </>
+              ) : (
+                <GlassCard><Text style={styles.emptyInline}>Summary will appear after processing.</Text></GlassCard>
+              )}
+            </>
+          )}
+
+          {/* ---- Marked ---- */}
+          {tab === 'Marked' && (
+            <GlassCard>
+              <BlockHeader icon="star-outline" label="MARKED IMPORTANT" />
+              {lecture.markedTimestamps.length > 0 ? (
+                <View style={styles.momentList}>
+                  {lecture.markedTimestamps.map((ms, i) => (
+                    <Pressable
+                      key={i}
+                      accessibilityRole="button"
+                      disabled={!audioAvailable}
+                      onPress={() => void seekToSeconds(ms / 1000)}
+                      style={({ pressed }) => [styles.momentRow, !audioAvailable && styles.momentRowDisabled, pressed && audioAvailable && styles.pressed]}
+                    >
+                      <View style={styles.momentTime}><Text style={styles.momentTimeText}>{formatClock(Math.floor(ms / 1000))}</Text></View>
+                      <Text style={styles.momentLabel}>Important moment</Text>
+                      <Ionicons name="star" size={15} color={colors.deepNavy} />
+                    </Pressable>
+                  ))}
+                </View>
+              ) : (
+                <Text style={styles.emptyInline}>No important moments were marked during this lecture.</Text>
+              )}
+              {!audioAvailable ? <Text style={styles.markedHint}>Audio playback is not available for this lecture.</Text> : null}
+            </GlassCard>
+          )}
+
+          {/* ---- Notes ---- */}
+          {tab === 'Notes' && (
+            <Pressable accessibilityRole="button" onPress={() => setNotesOpen(true)} style={({ pressed }) => [styles.noteSheet, pressed && styles.pressed]}>
+              <View style={styles.foldedCorner} />
+              <BlockHeader icon="create-outline" label="LECTURE NOTES" />
+              <Text style={lecture.notes ? styles.notePreviewText : styles.notePreviewEmpty} numberOfLines={5}>
+                {lecture.notes || 'Tap to add your own notes after class.'}
+              </Text>
+            </Pressable>
+          )}
+        </View>
+      </ScrollView>
+
+      <Modal visible={notesOpen} animationType="slide" presentationStyle="formSheet" onRequestClose={() => setNotesOpen(false)}>
+        <SafeAreaView style={styles.modalRoot} edges={['top', 'bottom', 'left', 'right']}>
+          <View style={styles.modalHeader}>
+            <Pressable accessibilityRole="button" onPress={() => setNotesOpen(false)} style={styles.modalAction}><Text style={styles.modalActionText}>Cancel</Text></Pressable>
+            <Text style={styles.modalTitle}>Lecture Notes</Text>
+            <Pressable accessibilityRole="button" onPress={saveNotes} style={styles.modalAction}><Text style={styles.modalActionText}>Save</Text></Pressable>
+          </View>
+          <TextInput
+            style={styles.modalInput}
+            value={notesDraft}
+            onChangeText={setNotesDraft}
+            multiline
+            placeholder="Write your own notes for this lecture…"
+            placeholderTextColor={colors.textTertiary}
+            textAlignVertical="top"
+          />
+          <Text style={styles.notesHint}>Notes are saved on this device with the lecture.</Text>
+        </SafeAreaView>
+      </Modal>
+
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+    backgroundColor: colors.background,
+  },
+
+  // ---- Not found ----
+  notFound: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.md,
+    paddingHorizontal: spacing.xl,
+  },
+  notFoundText: {
+    fontSize: fontSize.lg,
+    fontWeight: '600',
+    color: colors.textSecondary,
+  },
+  notFoundBtn: {
+    marginTop: spacing.sm,
+    paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.md,
+    borderRadius: radius.pill,
+    backgroundColor: colors.deepNavy,
+  },
+  notFoundBtnText: {
+    color: colors.textOnNavy,
+    fontWeight: '700',
+    fontSize: fontSize.md,
+  },
+
+  // ---- Header ----
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+  },
+  backBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pressed: {
+    opacity: 0.85,
+    transform: [{ scale: 0.96 }],
+  },
+  courseTile: {
+    width: 40,
+    height: 40,
+    borderRadius: radius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  headerText: {
+    flex: 1,
+    gap: 2,
+  },
+  headerTitle: {
+    fontSize: fontSize.xl,
+    fontWeight: '800',
+    color: colors.textPrimary,
+  },
+  headerMeta: {
+    fontSize: fontSize.sm,
+    color: colors.textTertiary,
+    fontWeight: '500',
+  },
+
+  playerWrap: {
+    paddingHorizontal: spacing.lg,
+    marginBottom: spacing.md,
+    maxWidth: layout.content,
+    width: '100%',
+    alignSelf: 'center',
+  },
+  playerTimes: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: spacing.sm },
+  playerTimeText: { color: colors.textSecondary, fontSize: fontSize.sm, fontWeight: '600' },
+  progressTrack: { height: 8, borderRadius: radius.pill, backgroundColor: colors.surfaceMuted, overflow: 'hidden' },
+  progressFill: { height: '100%', borderRadius: radius.pill, backgroundColor: colors.deepNavy },
+  playerControls: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xl, marginTop: spacing.lg },
+  playerButton: { minWidth: 72, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs },
+  playerButtonText: { color: colors.deepNavy, fontSize: fontSize.sm, fontWeight: '700' },
+  playPauseButton: { width: 52, height: 52, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.deepNavy },
+
+  // ---- Tabs ----
+  tabBar: {
+    flexDirection: 'row',
+    gap: spacing.xs,
+    marginHorizontal: spacing.lg,
+    marginBottom: spacing.md,
+    padding: spacing.xs,
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: radius.md,
+    maxWidth: layout.content,
+    alignSelf: 'center',
+    width: '100%',
+  },
+  tab: {
+    flex: 1,
+    paddingVertical: spacing.md,
+    borderRadius: radius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tabActive: {
+    backgroundColor: colors.surface,
+    shadowColor: '#0A2342',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
+    elevation: 2,
+  },
+  tabLabel: {
+    fontSize: fontSize.sm,
+    fontWeight: '600',
+    color: colors.textTertiary,
+  },
+  tabLabelActive: {
+    color: colors.deepNavy,
+    fontWeight: '700',
+  },
+
+  scroll: {
+    paddingHorizontal: spacing.xl,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.xxxl,
+  },
+  content: {
+    width: '100%',
+    maxWidth: layout.content,
+    alignSelf: 'center',
+    gap: spacing.md,
+  },
+
+  // ---- Mock notice ----
+  mockNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    backgroundColor: colors.iceTint,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm + 2,
+  },
+  mockNoticeText: {
+    flex: 1,
+    fontSize: fontSize.sm,
+    color: colors.textSecondary,
+    fontWeight: '500',
+  },
+
+  // ---- Transcript timeline ----
+  timeline: {
+    paddingTop: spacing.xs,
+  },
+  tlRow: {
+    flexDirection: 'row',
+  },
+  tlTimeCol: {
+    width: 50,
+    paddingTop: 1,
+  },
+  tlTime: {
+    fontSize: fontSize.xs,
+    fontWeight: '700',
+    color: colors.mutedBlueGray,
+    fontVariant: ['tabular-nums'],
+  },
+  tlRail: {
+    width: 26,
+  },
+  tlDot: {
+    position: 'absolute',
+    top: 5,
+    left: 7,
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: colors.surface,
+    borderWidth: 2,
+    borderColor: colors.mutedBlueGray,
+  },
+  tlDotImportant: {
+    backgroundColor: colors.deepNavy,
+    borderColor: colors.deepNavy,
+  },
+  tlLineUp: {
+    position: 'absolute',
+    top: 0,
+    height: 5,
+    left: 12,
+    width: 2,
+    backgroundColor: colors.borderStrong,
+  },
+  tlLineDown: {
+    position: 'absolute',
+    top: 17,
+    bottom: 0,
+    left: 12,
+    width: 2,
+    backgroundColor: colors.borderStrong,
+  },
+  tlContent: {
+    flex: 1,
+    paddingBottom: spacing.xl,
+  },
+  plainSegment: {
+    gap: spacing.xs,
+    paddingTop: 1,
+  },
+  importantCard: {
+    backgroundColor: colors.iceTint,
+    borderRadius: radius.md,
+    borderLeftWidth: 3,
+    borderLeftColor: colors.deepNavy,
+    padding: spacing.lg,
+    gap: spacing.xs,
+  },
+  importantTag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginBottom: 2,
+  },
+  importantTagText: {
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+    color: colors.deepNavy,
+  },
+  speaker: {
+    fontSize: fontSize.xs,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+    color: colors.textTertiary,
+    textTransform: 'uppercase',
+  },
+  segText: {
+    fontSize: fontSize.md,
+    lineHeight: fontSize.md * 1.5,
+    color: colors.textPrimary,
+    fontWeight: '500',
+  },
+
+  // ---- Study-note blocks ----
+  blockHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: spacing.lg,
+  },
+  blockIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: radius.sm,
+    backgroundColor: colors.iceTint,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  blockLabel: {
+    fontSize: fontSize.xs,
+    fontWeight: '700',
+    letterSpacing: 1.2,
+    color: colors.textSecondary,
+  },
+  bodyText: {
+    fontSize: fontSize.md,
+    lineHeight: fontSize.md * 1.6,
+    color: colors.textPrimary,
+    fontWeight: '500',
+  },
+  bodyZh: {
+    color: colors.secondaryNavy,
+    lineHeight: fontSize.md * 1.7,
+  },
+
+  // ---- Key points ----
+  pointList: {
+    gap: spacing.md,
+  },
+  pointRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.md,
+  },
+  pointBullet: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: colors.deepNavy,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 1,
+  },
+  pointNum: {
+    color: colors.pearlWhite,
+    fontSize: fontSize.xs,
+    fontWeight: '700',
+  },
+  pointText: {
+    flex: 1,
+    fontSize: fontSize.md,
+    lineHeight: fontSize.md * 1.5,
+    color: colors.textPrimary,
+    fontWeight: '500',
+  },
+  momentList: {
+    gap: spacing.sm,
+  },
+  markedHint: { marginTop: spacing.md, color: colors.textSecondary, fontSize: fontSize.sm },
+  momentRowDisabled: { opacity: 0.55 },
+  momentRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+  },
+  momentTime: {
+    backgroundColor: colors.iceTint,
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4,
+  },
+  momentTimeText: {
+    fontSize: fontSize.xs,
+    fontWeight: '700',
+    color: colors.deepNavy,
+    fontVariant: ['tabular-nums'],
+  },
+  momentLabel: {
+    flex: 1,
+    fontSize: fontSize.md,
+    color: colors.textPrimary,
+    fontWeight: '600',
+  },
+  emptyInline: {
+    fontSize: fontSize.md,
+    color: colors.textTertiary,
+    fontWeight: '500',
+  },
+
+  // ---- Notes ----
+  noteSheet: {
+    minHeight: 180,
+    borderRadius: radius.xl,
+    backgroundColor: colors.paper,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.xl,
+    overflow: 'hidden',
+  },
+  foldedCorner: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    width: 34,
+    height: 34,
+    backgroundColor: colors.iceTint,
+    borderBottomLeftRadius: radius.md,
+  },
+  notePreviewText: { color: colors.textPrimary, fontSize: fontSize.md, lineHeight: 23 },
+  notePreviewEmpty: { color: colors.textTertiary, fontSize: fontSize.md, lineHeight: 23 },
+  modalRoot: { flex: 1, backgroundColor: colors.background, padding: spacing.xl, gap: spacing.lg },
+  modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  modalTitle: { color: colors.textPrimary, fontSize: fontSize.xl, fontWeight: '800' },
+  modalAction: { minWidth: 64, minHeight: 44, justifyContent: 'center' },
+  modalActionText: { color: colors.deepNavy, fontSize: fontSize.md, fontWeight: '700' },
+  modalInput: { flex: 1, borderRadius: radius.xl, borderWidth: 1, borderColor: colors.borderStrong, backgroundColor: colors.paper, padding: spacing.xl, color: colors.textPrimary, fontSize: fontSize.lg, lineHeight: 26 },
+  notesInput: {
+    minHeight: 240,
+    fontSize: fontSize.md,
+    lineHeight: fontSize.md * 1.6,
+    color: colors.textPrimary,
+    fontWeight: '500',
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.lg,
+  },
+  notesFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs + 2,
+    marginTop: spacing.md,
+  },
+  notesHint: {
+    fontSize: fontSize.sm,
+    color: colors.textTertiary,
+    fontWeight: '500',
+  },
+});
