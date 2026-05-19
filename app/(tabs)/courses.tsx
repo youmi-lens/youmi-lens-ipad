@@ -1,7 +1,9 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
+import { useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -13,27 +15,59 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { CourseCard } from '@/components/CourseCard';
 import { GlassCard } from '@/components/GlassCard';
 import { PrimaryButton } from '@/components/PrimaryButton';
+import { SwipeDeleteRow } from '@/components/SwipeDeleteRow';
 import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
 import { formatShortDate } from '@/lib/format';
 import { useData } from '@/lib/store';
 
 export default function CoursesScreen() {
   const router = useRouter();
-  const { loaded, courses, lectures, lecturesForCourse, setSelectedCourseId } = useData();
+  const { loaded, courses, lectures, lecturesForCourse, setSelectedCourseId, deleteCourse } =
+    useData();
+
+  // Only one swipe-delete row may be open at a time.
+  const [openCourseId, setOpenCourseId] = useState<string | null>(null);
 
   const openCreateCourse = () => router.push('/create-course');
 
   const openCourse = (courseId: string) => {
+    setOpenCourseId(null);
     setSelectedCourseId(courseId);
-    const list = [...lecturesForCourse(courseId)].sort((a, b) =>
-      b.date.localeCompare(a.date),
+    router.push({ pathname: '/course/[id]', params: { id: courseId } });
+  };
+
+  const showCourseNotEmptyAlert = () => {
+    Alert.alert(
+      'Course is not empty',
+      'This course contains lectures. Delete or move them first.',
+      [{ text: 'OK', onPress: () => setOpenCourseId(null) }],
     );
-    if (list.length > 0) {
-      router.push({ pathname: '/lecture/[id]', params: { id: list[0].id } });
-    } else {
-      // No lectures yet — jump to Record Home to capture the first one.
-      router.push('/');
+  };
+
+  const confirmDeleteCourse = (courseId: string, activeLectureCount: number) => {
+    // Only an empty course can be deleted — a course with lectures keeps its
+    // lectures, so the user must remove them first.
+    if (activeLectureCount > 0) {
+      showCourseNotEmptyAlert();
+      return;
     }
+    Alert.alert(
+      'Delete course',
+      'This empty course will move to Recently Deleted. You can restore it anytime.',
+      [
+        { text: 'Cancel', style: 'cancel', onPress: () => setOpenCourseId(null) },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            const result = deleteCourse(courseId);
+            setOpenCourseId(null);
+            // Defensive: a lecture could have been added between render and tap.
+            if (!result.ok) showCourseNotEmptyAlert();
+          },
+        },
+      ],
+    );
   };
 
   return (
@@ -41,6 +75,7 @@ export default function CoursesScreen() {
       <ScrollView
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
+        onScrollBeginDrag={() => setOpenCourseId(null)}
       >
         <View style={styles.content}>
           <View style={styles.header}>
@@ -92,14 +127,27 @@ export default function CoursesScreen() {
                 const latest = [...courseLectures].sort((a, b) =>
                   b.date.localeCompare(a.date),
                 )[0];
+                const lastActivity = latest
+                  ? `Last ${formatShortDate(latest.date)}`
+                  : undefined;
+
+                // Any course can be swipe-deleted — delete is now a safe,
+                // recoverable move to Recently Deleted (see store.deleteCourse).
                 return (
-                  <CourseCard
+                  <SwipeDeleteRow
                     key={course.id}
-                    course={course}
-                    lectureCount={courseLectures.length}
-                    lastActivity={latest ? `Last ${formatShortDate(latest.date)}` : undefined}
-                    onPress={() => openCourse(course.id)}
-                  />
+                    open={openCourseId === course.id}
+                    onOpen={() => setOpenCourseId(course.id)}
+                    onClose={() => setOpenCourseId(null)}
+                    onDelete={() => confirmDeleteCourse(course.id, courseLectures.length)}
+                  >
+                    <CourseCard
+                      course={course}
+                      lectureCount={courseLectures.length}
+                      lastActivity={lastActivity}
+                      onPress={() => openCourse(course.id)}
+                    />
+                  </SwipeDeleteRow>
                 );
               })}
             </View>

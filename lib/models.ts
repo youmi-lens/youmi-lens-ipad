@@ -22,6 +22,21 @@ export type TranscriptSegment = {
   important?: boolean;
 };
 
+/** A single freehand handwriting point, in canvas pixel coordinates. */
+export type NotePoint = { x: number; y: number };
+
+/** One freehand handwriting stroke on a notebook page. */
+export type NoteStroke = {
+  id: string;
+  /** Stroke ink colour (hex). */
+  color: string;
+  /** Stroke width in points. */
+  width: number;
+  points: NotePoint[];
+  /** ISO timestamp. */
+  createdAt: string;
+};
+
 /** A user-created course. */
 export type Course = {
   id: string;
@@ -34,6 +49,10 @@ export type Course = {
   accent: string;
   /** ISO timestamp. */
   createdAt: string;
+  /** Soft-delete timestamp (ISO). Absent or null = active; set = in Recently Deleted. */
+  deletedAt?: string | null;
+  /** Why the course was soft-deleted (e.g. 'manual'). */
+  deletedReason?: string | null;
 };
 
 /** A recorded lecture belonging to a course. */
@@ -65,13 +84,35 @@ export type Lecture = {
   status: LectureStatus;
 
   // ---- Remote study content (filled in after backend processing) ----
-  transcript: string;
-  summaryEn: string;
-  summaryZh: string;
+  // Youmi Lens V1: English lecture audio with Chinese study support. The
+  // backend produces an English transcript, a Chinese transcript translated
+  // from it, and English + Chinese summaries. All optional — content arrives
+  // after post-class processing, and older lectures may lack newer fields.
+  /** English transcript. */
+  transcript?: string;
+  /** Chinese transcript, translated backend-side from the English transcript. */
+  transcriptZh?: string;
+  /** English summary. */
+  summaryEn?: string;
+  /** Chinese summary. */
+  summaryZh?: string;
   keyPoints: string[];
   /** Draft transcript captured from live captions during recording, when available. */
   liveTranscript?: string;
+
+  // ---- Local lecture notes (typed + handwritten) ----
+  /** Typed notes for this lecture. */
   notes: string;
+  /** Handwritten strokes for this lecture's notebook page. */
+  noteStrokes?: NoteStroke[];
+  /** ISO timestamp of the last notes edit. */
+  noteUpdatedAt?: string;
+
+  // ---- Soft delete (Recently Deleted / recovery) ----
+  /** Soft-delete timestamp (ISO). Absent or null = active; set = in Recently Deleted. */
+  deletedAt?: string | null;
+  /** Why the lecture was soft-deleted (e.g. 'manual'). */
+  deletedReason?: string | null;
 };
 
 /** A soft academic colour + icon preset offered when creating a course. */

@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { ComponentProps, ReactNode, useCallback, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -85,6 +85,7 @@ function PlanLine({ label, value }: { label: string; value: string }) {
 }
 
 export default function SettingsScreen() {
+  const router = useRouter();
   const { courses, lectures, clearAll } = useData();
   const { user, username, signOut, session } = useAuth();
 
@@ -304,6 +305,19 @@ export default function SettingsScreen() {
                 Your lectures, transcripts, summaries, and notes are saved to your Youmi Lens account.
               </Text>
             </View>
+          </Section>
+
+          {/* Recently Deleted — recovery for deleted courses & lectures */}
+          <Section
+            title="RECENTLY DELETED"
+            footer="Items in Recently Deleted can be restored or permanently deleted."
+          >
+            <Row
+              icon="trash-outline"
+              label="View deleted items"
+              onPress={() => router.push('/recently-deleted')}
+              last
+            />
           </Section>
 
           {/* Developer — local testing tools */}

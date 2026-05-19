@@ -2,11 +2,13 @@ import 'expo-dev-client';
 import { Redirect, Stack, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { ActivityIndicator, View } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { colors } from '@/constants/theme';
 import { AuthProvider, useAuth } from '@/lib/auth';
 import { LiveCaptionsProvider } from '@/lib/liveCaptions';
+import { RecordingNotesProvider } from '@/lib/recordingNotes';
 import { DataProvider } from '@/lib/store';
 
 export const unstable_settings = {
@@ -22,32 +24,38 @@ export const unstable_settings = {
  */
 export default function RootLayout() {
   return (
-    <SafeAreaProvider>
-      <AuthProvider>
-        <LiveCaptionsProvider>
-          <DataProvider>
-            <AuthGate>
-            <Stack
-              screenOptions={{
-                headerShown: false,
-                contentStyle: { backgroundColor: colors.background },
-              }}
-            >
-              <Stack.Screen name="auth" />
-              <Stack.Screen name="auth/callback" />
-              <Stack.Screen name="(tabs)" />
-              <Stack.Screen name="create-course" options={{ presentation: 'modal' }} />
-              <Stack.Screen name="recording" />
-              <Stack.Screen name="mini-caption" options={{ animation: 'fade' }} />
-              <Stack.Screen name="processing" />
-              <Stack.Screen name="lecture/[id]" />
-            </Stack>
-            </AuthGate>
-            <StatusBar style="dark" />
-          </DataProvider>
-        </LiveCaptionsProvider>
-      </AuthProvider>
-    </SafeAreaProvider>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaProvider>
+        <AuthProvider>
+          <LiveCaptionsProvider>
+            <DataProvider>
+              <RecordingNotesProvider>
+                <AuthGate>
+                  <Stack
+                    screenOptions={{
+                      headerShown: false,
+                      contentStyle: { backgroundColor: colors.background },
+                    }}
+                  >
+                    <Stack.Screen name="auth" />
+                    <Stack.Screen name="auth/callback" />
+                    <Stack.Screen name="(tabs)" />
+                    <Stack.Screen name="create-course" options={{ presentation: 'modal' }} />
+                    <Stack.Screen name="recording" />
+                    <Stack.Screen name="mini-caption" options={{ animation: 'fade' }} />
+                    <Stack.Screen name="processing" />
+                    <Stack.Screen name="lecture/[id]" />
+                    <Stack.Screen name="course/[id]" />
+                    <Stack.Screen name="recently-deleted" />
+                  </Stack>
+                </AuthGate>
+              </RecordingNotesProvider>
+              <StatusBar style="dark" />
+            </DataProvider>
+          </LiveCaptionsProvider>
+        </AuthProvider>
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }
 
