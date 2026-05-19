@@ -17,11 +17,14 @@ import { PrimaryButton } from '@/components/PrimaryButton';
 import { SecondaryButton } from '@/components/SecondaryButton';
 import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
+import { checkEmailExists } from '@/lib/checkEmail';
 
 type EntryMode = 'createProfile' | 'signIn';
 type AuthStep = 'entry' | 'signupCode' | 'signInCodeEmail' | 'signInCodeVerify';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const EXISTING_ACCOUNT_MESSAGE =
+  'This email already has a Youmi Lens account. Please sign in or use an email verification code.';
 
 export default function AuthScreen() {
   const router = useRouter();
@@ -81,6 +84,24 @@ export default function AuthScreen() {
     setBusyAction('send');
     setError(null);
     setPersistentError(null);
+
+    // One email = one account. Check BEFORE signUp: with email enumeration
+    // protection on, Supabase signUp returns a fake success for an existing
+    // email, so this pre-check is what blocks duplicates before Verify Email.
+    const emailCheck = await checkEmailExists(trimmedEmail);
+    if (!emailCheck.ok) {
+      setBusyAction(null);
+      setError(emailCheck.message);
+      return;
+    }
+    if (emailCheck.exists) {
+      setBusyAction(null);
+      setEntryMode('signIn');
+      setStep('entry');
+      setPersistentError(EXISTING_ACCOUNT_MESSAGE);
+      return;
+    }
+
     const { error: createError, session: nextSession } = await createProfileWithPassword(
       trimmedEmail,
       password,
