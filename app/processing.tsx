@@ -148,11 +148,13 @@ export default function ProcessingScreen() {
         const remote = await fetchRemoteRecording({
           remoteRecordingId: lecture.remoteRecordingId!,
           accessToken: session.access_token,
+          userId: session.user.id,
         });
         if (cancelled) return;
 
         const patch = {
           transcript: remote.transcript ?? '',
+          transcriptZh: remote.transcript_zh ?? '',
           summaryEn: remote.summary_en ?? '',
           summaryZh: remote.summary_zh ?? '',
           remoteAiStatus: remote.ai_status ?? undefined,

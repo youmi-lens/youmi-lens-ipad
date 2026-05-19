@@ -1,22 +1,30 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { ComponentProps, useEffect, useState } from 'react';
+import { ComponentProps, useState } from 'react';
 import {
   Modal,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { GlassCard } from '@/components/GlassCard';
+import { HandwritingPreview, NotebookCanvas } from '@/components/NotebookCanvas';
+import { RenameModal } from '@/components/RenameModal';
 import { StatusPill, StatusVariant } from '@/components/StatusPill';
 import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
 import { formatClock, formatDate, formatDuration } from '@/lib/format';
+import {
+  getLectureSummaryByLanguage,
+  getLectureTranscriptByLanguage,
+  getSummarySectionLabel,
+  getTranscriptSectionLabel,
+} from '@/lib/languageContent';
+import type { NoteStroke } from '@/lib/models';
 import { useData } from '@/lib/store';
 
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
@@ -43,14 +51,16 @@ function BlockHeader({ icon, label }: { icon: IoniconName; label: string }) {
 export default function LectureDetailScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string }>();
-  const { getLecture, getCourse, updateLecture } = useData();
+  const { getLecture, getCourse, updateLecture, renameLecture } = useData();
 
   const lecture = getLecture(params.id);
   const course = getCourse(lecture?.courseId);
 
   const [tab, setTab] = useState<Tab>('Transcript');
   const [notesDraft, setNotesDraft] = useState(lecture?.notes ?? '');
+  const [strokesDraft, setStrokesDraft] = useState<NoteStroke[]>(lecture?.noteStrokes ?? []);
   const [notesOpen, setNotesOpen] = useState(false);
+  const [renameVisible, setRenameVisible] = useState(false);
 
   if (!lecture) {
     return (
@@ -70,9 +80,14 @@ export default function LectureDetailScreen() {
     );
   }
 
-  const transcript = lecture.transcript.trim();
-  const summaryEn = lecture.summaryEn.trim();
-  const summaryZh = lecture.summaryZh.trim();
+  // V1 transcript + summary are fixed English-first / Chinese-second.
+  const transcriptEn = getLectureTranscriptByLanguage(lecture, 'en');
+  const transcriptZh = getLectureTranscriptByLanguage(lecture, 'zh');
+  const summaryEn = getLectureSummaryByLanguage(lecture, 'en');
+  const summaryZh = getLectureSummaryByLanguage(lecture, 'zh');
+  const typedNotes = lecture.notes.trim();
+  const strokeCount = lecture.noteStrokes?.length ?? 0;
+  const notesHasContent = typedNotes.length > 0 || strokeCount > 0;
   const status =
     lecture.processingStatus === 'ready'
       ? { label: 'READY', variant: 'done' as StatusVariant }
@@ -82,8 +97,18 @@ export default function LectureDetailScreen() {
           ? { label: 'FAILED', variant: 'idle' as StatusVariant }
           : STATUS_INFO[lecture.status] ?? STATUS_INFO.local_recorded;
 
+  const openNotesEditor = () => {
+    setNotesDraft(lecture.notes);
+    setStrokesDraft(lecture.noteStrokes ?? []);
+    setNotesOpen(true);
+  };
+
   const saveNotes = () => {
-    if (notesDraft !== lecture.notes) updateLecture(lecture.id, { notes: notesDraft });
+    updateLecture(lecture.id, {
+      notes: notesDraft,
+      noteStrokes: strokesDraft,
+      noteUpdatedAt: new Date().toISOString(),
+    });
     setNotesOpen(false);
   };
 
@@ -92,10 +117,6 @@ export default function LectureDetailScreen() {
   const audioStatus = useAudioPlayerStatus(player);
   const playbackDuration = audioStatus.duration || lecture.durationMillis / 1000;
   const playbackProgress = playbackDuration > 0 ? Math.min(audioStatus.currentTime / playbackDuration, 1) : 0;
-
-  useEffect(() => {
-    setNotesDraft(lecture.notes);
-  }, [lecture.notes]);
 
   const seekToSeconds = async (seconds: number) => {
     if (!audioAvailable) return;
@@ -138,6 +159,15 @@ export default function LectureDetailScreen() {
           </Text>
         </View>
         <StatusPill label={status.label} variant={status.variant} />
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Rename lecture"
+          onPress={() => setRenameVisible(true)}
+          hitSlop={8}
+          style={({ pressed }) => [styles.renameBtn, pressed && styles.pressed]}
+        >
+          <Ionicons name="pencil-outline" size={20} color={colors.deepNavy} />
+        </Pressable>
       </View>
 
       <View style={styles.playerWrap}>
@@ -201,24 +231,63 @@ export default function LectureDetailScreen() {
         keyboardShouldPersistTaps="handled"
       >
         <View style={styles.content}>
-          {/* ---- Transcript timeline ---- */}
+          {/* ---- Transcript — English then Chinese (fixed for V1) ---- */}
           {tab === 'Transcript' && (
-            <GlassCard>
-              <BlockHeader icon="document-text-outline" label="TRANSCRIPT" />
-              {transcript ? <Text style={styles.bodyText}>{transcript}</Text> : <Text style={styles.emptyInline}>Transcript is not ready yet.</Text>}
-            </GlassCard>
+            <>
+              <GlassCard>
+                <BlockHeader
+                  icon="document-text-outline"
+                  label={getTranscriptSectionLabel('en')}
+                />
+                {transcriptEn ? (
+                  <Text style={styles.bodyText}>{transcriptEn}</Text>
+                ) : (
+                  <Text style={styles.emptyInline}>Transcript is not ready yet.</Text>
+                )}
+              </GlassCard>
+              <GlassCard>
+                <BlockHeader icon="language-outline" label={getTranscriptSectionLabel('zh')} />
+                {transcriptZh ? (
+                  <Text style={[styles.bodyText, styles.bodyZh]}>{transcriptZh}</Text>
+                ) : (
+                  <Text style={styles.emptyInline}>
+                    Chinese transcript has not been generated yet.
+                  </Text>
+                )}
+              </GlassCard>
+            </>
           )}
 
-          {/* ---- Summary ---- */}
+          {/* ---- Summary — English then Chinese (fixed for V1) ---- */}
           {tab === 'Summary' && (
             <>
               {summaryEn || summaryZh ? (
                 <>
-                  {summaryEn ? <GlassCard><BlockHeader icon="language-outline" label="ENGLISH SUMMARY" /><Text style={styles.bodyText}>{summaryEn}</Text></GlassCard> : null}
-                  {summaryZh ? <GlassCard><BlockHeader icon="chatbubbles-outline" label="中文总结" /><Text style={[styles.bodyText, styles.bodyZh]}>{summaryZh}</Text></GlassCard> : null}
+                  <GlassCard>
+                    <BlockHeader icon="language-outline" label={getSummarySectionLabel('en')} />
+                    {summaryEn ? (
+                      <Text style={styles.bodyText}>{summaryEn}</Text>
+                    ) : (
+                      <Text style={styles.emptyInline}>
+                        English summary has not been generated yet.
+                      </Text>
+                    )}
+                  </GlassCard>
+                  <GlassCard>
+                    <BlockHeader icon="chatbubbles-outline" label={getSummarySectionLabel('zh')} />
+                    {summaryZh ? (
+                      <Text style={[styles.bodyText, styles.bodyZh]}>{summaryZh}</Text>
+                    ) : (
+                      <Text style={styles.emptyInline}>
+                        Chinese summary has not been generated yet.
+                      </Text>
+                    )}
+                  </GlassCard>
                 </>
               ) : (
-                <GlassCard><Text style={styles.emptyInline}>Summary will appear after processing.</Text></GlassCard>
+                <GlassCard>
+                  <Text style={styles.emptyInline}>Summary will appear after processing.</Text>
+                </GlassCard>
               )}
             </>
           )}
@@ -252,34 +321,78 @@ export default function LectureDetailScreen() {
 
           {/* ---- Notes ---- */}
           {tab === 'Notes' && (
-            <Pressable accessibilityRole="button" onPress={() => setNotesOpen(true)} style={({ pressed }) => [styles.noteSheet, pressed && styles.pressed]}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Open lecture notes"
+              onPress={openNotesEditor}
+              style={({ pressed }) => [styles.noteSheet, pressed && styles.pressed]}
+            >
               <View style={styles.foldedCorner} />
               <BlockHeader icon="create-outline" label="LECTURE NOTES" />
-              <Text style={lecture.notes ? styles.notePreviewText : styles.notePreviewEmpty} numberOfLines={5}>
-                {lecture.notes || 'Tap to add your own notes after class.'}
-              </Text>
+              {notesHasContent ? (
+                <View style={styles.notePreview}>
+                  {typedNotes ? (
+                    <Text style={styles.notePreviewText} numberOfLines={6}>
+                      {typedNotes}
+                    </Text>
+                  ) : null}
+                  {strokeCount > 0 ? (
+                    <View style={styles.handwritingBlock}>
+                      <View style={styles.handwritingLabelRow}>
+                        <Ionicons name="brush-outline" size={13} color={colors.textTertiary} />
+                        <Text style={styles.handwritingLabel}>
+                          Handwriting · {strokeCount} {strokeCount === 1 ? 'stroke' : 'strokes'}
+                        </Text>
+                      </View>
+                      <HandwritingPreview strokes={lecture.noteStrokes ?? []} />
+                    </View>
+                  ) : null}
+                  <Text style={styles.noteEditHint}>Tap to open the full notebook editor.</Text>
+                </View>
+              ) : (
+                <Text style={styles.notePreviewEmpty}>Tap to add notes for this lecture.</Text>
+              )}
             </Pressable>
           )}
         </View>
       </ScrollView>
 
-      <Modal visible={notesOpen} animationType="slide" presentationStyle="formSheet" onRequestClose={() => setNotesOpen(false)}>
+      <RenameModal
+        visible={renameVisible}
+        title="Rename Lecture"
+        label="Lecture title"
+        initialValue={lecture.title}
+        placeholder="e.g. Week 3 — Cell Division"
+        onCancel={() => setRenameVisible(false)}
+        onSave={(title) => {
+          renameLecture(lecture.id, title);
+          setRenameVisible(false);
+        }}
+      />
+
+      <Modal
+        visible={notesOpen}
+        animationType="slide"
+        presentationStyle="fullScreen"
+        onRequestClose={() => setNotesOpen(false)}
+      >
         <SafeAreaView style={styles.modalRoot} edges={['top', 'bottom', 'left', 'right']}>
           <View style={styles.modalHeader}>
-            <Pressable accessibilityRole="button" onPress={() => setNotesOpen(false)} style={styles.modalAction}><Text style={styles.modalActionText}>Cancel</Text></Pressable>
+            <Pressable accessibilityRole="button" onPress={() => setNotesOpen(false)} style={styles.modalAction}>
+              <Text style={styles.modalActionText}>Cancel</Text>
+            </Pressable>
             <Text style={styles.modalTitle}>Lecture Notes</Text>
-            <Pressable accessibilityRole="button" onPress={saveNotes} style={styles.modalAction}><Text style={styles.modalActionText}>Save</Text></Pressable>
+            <Pressable accessibilityRole="button" onPress={saveNotes} style={styles.modalAction}>
+              <Text style={styles.modalActionText}>Done</Text>
+            </Pressable>
           </View>
-          <TextInput
-            style={styles.modalInput}
-            value={notesDraft}
-            onChangeText={setNotesDraft}
-            multiline
-            placeholder="Write your own notes for this lecture…"
-            placeholderTextColor={colors.textTertiary}
-            textAlignVertical="top"
+          <NotebookCanvas
+            style={styles.modalCanvas}
+            strokes={strokesDraft}
+            text={notesDraft}
+            onStrokesChange={setStrokesDraft}
+            onTextChange={setNotesDraft}
           />
-          <Text style={styles.notesHint}>Notes are saved on this device with the lecture.</Text>
         </SafeAreaView>
       </Modal>
 
@@ -328,6 +441,16 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.md,
   },
   backBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  renameBtn: {
     width: 44,
     height: 44,
     borderRadius: radius.pill,
@@ -660,8 +783,28 @@ const styles = StyleSheet.create({
   },
   notePreviewText: { color: colors.textPrimary, fontSize: fontSize.md, lineHeight: 23 },
   notePreviewEmpty: { color: colors.textTertiary, fontSize: fontSize.md, lineHeight: 23 },
-  modalRoot: { flex: 1, backgroundColor: colors.background, padding: spacing.xl, gap: spacing.lg },
-  modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  notePreview: { gap: spacing.lg },
+  handwritingBlock: { gap: spacing.sm },
+  handwritingLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  handwritingLabel: {
+    fontSize: fontSize.xs,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+    color: colors.textTertiary,
+    textTransform: 'uppercase',
+  },
+  noteEditHint: { fontSize: fontSize.sm, fontWeight: '600', color: colors.textTertiary },
+  modalRoot: { flex: 1, backgroundColor: colors.background },
+  modalCanvas: { flex: 1 },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
   modalTitle: { color: colors.textPrimary, fontSize: fontSize.xl, fontWeight: '800' },
   modalAction: { minWidth: 64, minHeight: 44, justifyContent: 'center' },
   modalActionText: { color: colors.deepNavy, fontSize: fontSize.md, fontWeight: '700' },
