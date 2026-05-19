@@ -278,7 +278,7 @@ export default function AuthScreen() {
                   <TextInput
                     keyboardType="number-pad"
                     maxLength={8}
-                    placeholder="123456"
+                    placeholder="Verification code"
                     placeholderTextColor={colors.textTertiary}
                     style={[styles.input, styles.codeInput]}
                     value={code}
@@ -319,7 +319,7 @@ export default function AuthScreen() {
                   <TextInput
                     keyboardType="number-pad"
                     maxLength={8}
-                    placeholder="123456"
+                    placeholder="Verification code"
                     placeholderTextColor={colors.textTertiary}
                     style={[styles.input, styles.codeInput]}
                     value={code}

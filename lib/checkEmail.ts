@@ -15,23 +15,53 @@ export type CheckEmailResult =
 
 const CHECK_FAILED_MESSAGE =
   'Could not verify whether this email is available. Please try again.';
+const NETWORK_FAILED_MESSAGE =
+  'Could not connect. Please check your network and try again.';
+const RETRY_DELAY_MS = 900;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientNetworkError(error: unknown): boolean {
+  if (error instanceof TypeError) return true;
+  if (error instanceof Error) {
+    return /network request failed|networkerror|failed to fetch|load failed/i.test(error.message);
+  }
+  return false;
+}
+
+async function requestEmailCheck(email: string): Promise<CheckEmailResult> {
+  const response = await fetch(`${API_BASE_URL}/api/auth/check-email`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  });
+  const payload = (await response.json().catch(() => null)) as { exists?: boolean } | null;
+  if (response.ok && payload && typeof payload.exists === 'boolean') {
+    return { ok: true, exists: payload.exists };
+  }
+  return { ok: false, message: CHECK_FAILED_MESSAGE };
+}
 
 export async function checkEmailExists(email: string): Promise<CheckEmailResult> {
   if (!API_BASE_URL) {
     return { ok: false, message: 'Account creation is temporarily unavailable.' };
   }
+
   try {
-    const response = await fetch(`${API_BASE_URL}/api/auth/check-email`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email }),
-    });
-    const payload = (await response.json().catch(() => null)) as { exists?: boolean } | null;
-    if (response.ok && payload && typeof payload.exists === 'boolean') {
-      return { ok: true, exists: payload.exists };
+    return await requestEmailCheck(email);
+  } catch (error) {
+    if (!isTransientNetworkError(error)) {
+      return { ok: false, message: CHECK_FAILED_MESSAGE };
     }
-    return { ok: false, message: CHECK_FAILED_MESSAGE };
+  }
+
+  await sleep(RETRY_DELAY_MS);
+
+  try {
+    return await requestEmailCheck(email);
   } catch {
-    return { ok: false, message: CHECK_FAILED_MESSAGE };
+    return { ok: false, message: NETWORK_FAILED_MESSAGE };
   }
 }
