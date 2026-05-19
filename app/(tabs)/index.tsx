@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
-import { ComponentProps, useState } from 'react';
+import { useFocusEffect, useRouter } from 'expo-router';
+import { ComponentProps, useCallback, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -18,9 +18,11 @@ import { LectureListItem } from '@/components/LectureListItem';
 import { PrimaryButton } from '@/components/PrimaryButton';
 import { SecondaryButton } from '@/components/SecondaryButton';
 import { colors, fontSize, layout, radius, shadows, spacing } from '@/constants/theme';
-import { plan, user } from '@/data/mockData';
+import { user } from '@/data/mockData';
+import { useAuth } from '@/lib/auth';
 import { greetingForNow } from '@/lib/format';
 import { COURSE_PRESETS } from '@/lib/models';
+import { fetchPlanStatus, PlanStatus } from '@/lib/planStatus';
 import { useData } from '@/lib/store';
 
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
@@ -30,6 +32,31 @@ const VALUE_POINTS: { icon: IoniconName; label: string }[] = [
   { icon: 'language-outline', label: 'Bilingual summary' },
   { icon: 'document-text-outline', label: 'Smart notes' },
 ];
+
+/** Current Plan card text, derived from the live /api/quota/status response. */
+function planCardDisplay(
+  planStatus: PlanStatus | null,
+  planLoading: boolean,
+): { rightValue: string; subtitle: string } {
+  if (planStatus) {
+    if (planStatus.status === 'suspended') {
+      return { rightValue: 'Suspended', subtitle: 'Contact support for access.' };
+    }
+    if (planStatus.unlimited) {
+      return { rightValue: planStatus.displayName, subtitle: 'Unlimited access' };
+    }
+    const used = planStatus.recordingsUsedToday ?? 0;
+    const perDay = planStatus.maxRecordingsPerDay ?? 0;
+    const minutes = planStatus.maxRecordingMinutes ?? 0;
+    return {
+      rightValue: planStatus.displayName,
+      subtitle: `Today: ${used} / ${perDay} recordings used · ${minutes} min per recording`,
+    };
+  }
+  return planLoading
+    ? { rightValue: '—', subtitle: 'Loading plan…' }
+    : { rightValue: '—', subtitle: 'Plan unavailable' };
+}
 
 export default function RecordHomeScreen() {
   const router = useRouter();
@@ -45,6 +72,37 @@ export default function RecordHomeScreen() {
 
   const [lectureTitle, setLectureTitle] = useState('');
 
+  // Live plan/quota — same backend source as the Settings Plan section.
+  const { session } = useAuth();
+  const [planStatus, setPlanStatus] = useState<PlanStatus | null>(null);
+  const [planLoading, setPlanLoading] = useState(true);
+
+  const loadPlan = useCallback(async () => {
+    const token = session?.access_token;
+    if (!token) {
+      setPlanStatus(null);
+      setPlanLoading(false);
+      return;
+    }
+    setPlanLoading(true);
+    try {
+      setPlanStatus(await fetchPlanStatus(token));
+    } catch {
+      // Keep any previously loaded plan; a first-load failure shows
+      // "Plan unavailable" (planStatus null, not loading).
+    } finally {
+      setPlanLoading(false);
+    }
+  }, [session?.access_token]);
+
+  // Refetch when the Record tab regains focus — the plan may change in the DB.
+  useFocusEffect(
+    useCallback(() => {
+      void loadPlan();
+    }, [loadPlan]),
+  );
+
+  const planCard = planCardDisplay(planStatus, planLoading);
   const selectedCourse = getCourse(selectedCourseId) ?? courses[0];
   const recentLectures = [...lectures]
     .sort((a, b) => b.date.localeCompare(a.date))
@@ -263,24 +321,16 @@ export default function RecordHomeScreen() {
                 </GlassCard>
               )}
 
-              {/* ---- Current Plan ---- */}
+              {/* ---- Current Plan — live from the backend (same as Settings) ---- */}
               <GlassCard>
                 <View style={styles.planHeader}>
                   <View style={styles.planLabelRow}>
                     <Ionicons name="diamond-outline" size={15} color={colors.mutedBlueGray} />
                     <Text style={styles.cardLabel}>CURRENT PLAN</Text>
                   </View>
-                  <Text style={styles.planName}>{plan.name}</Text>
+                  <Text style={styles.planName}>{planCard.rightValue}</Text>
                 </View>
-                <View style={styles.progressTrack}>
-                  <View style={[styles.progressFill, { width: `${plan.progress * 100}%` }]} />
-                </View>
-                <View style={styles.planMetaRow}>
-                  <Text style={styles.planUsage}>
-                    {plan.usedMinutes.toLocaleString()} mins used · {plan.totalLabel}
-                  </Text>
-                  <Text style={styles.planRenew}>{plan.renewLabel}</Text>
-                </View>
+                <Text style={styles.planSubtitle}>{planCard.subtitle}</Text>
               </GlassCard>
             </>
           )}
@@ -555,30 +605,10 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: colors.textPrimary,
   },
-  progressTrack: {
-    height: 8,
-    borderRadius: radius.pill,
-    backgroundColor: colors.surfaceMuted,
-    overflow: 'hidden',
-  },
-  progressFill: {
-    height: '100%',
-    borderRadius: radius.pill,
-    backgroundColor: colors.deepNavy,
-  },
-  planMetaRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: spacing.sm,
-  },
-  planUsage: {
+  planSubtitle: {
     fontSize: fontSize.sm,
+    lineHeight: fontSize.sm * 1.5,
     color: colors.textSecondary,
-    fontWeight: '600',
-  },
-  planRenew: {
-    fontSize: fontSize.sm,
-    color: colors.textTertiary,
     fontWeight: '500',
   },
 });
