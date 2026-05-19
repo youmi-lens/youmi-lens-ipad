@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Animated,
+  AppState,
   Linking,
   Pressable,
   ScrollView,
@@ -19,19 +20,28 @@ import { SecondaryButton } from '@/components/SecondaryButton';
 import { StatusPill } from '@/components/StatusPill';
 import { colors, fontSize, layout, radius, shadows, spacing } from '@/constants/theme';
 import { formatClock } from '@/lib/format';
+import { logLiveCaptionEvent, logLiveCaptionUnavailable } from '@/lib/liveCaptionDiagnostics';
 import { useLiveCaptions } from '@/lib/liveCaptions';
-import {
-  getLiveMicStreamStatus,
-  startMicStream,
-  stopMicStream,
-} from '@/lib/liveMicStream';
+import { getLiveMicStreamStatus, startMicStream, stopMicStream } from '@/lib/liveMicStream';
+import { useRecordingNotes } from '@/lib/recordingNotes';
 import { useData } from '@/lib/store';
 import { useLectureRecorder } from '@/lib/useLectureRecorder';
+
+/** Calm, user-facing line shown when live captions cannot run. Diagnostics stay in the console. */
+const LIVE_CAPTIONS_UNAVAILABLE_MESSAGE = 'Live captions unavailable. Audio recording is still active.';
 
 export default function RecordingScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ courseId?: string; lectureTitle?: string }>();
   const { getCourse, createLecture } = useData();
+  const {
+    draftNotes,
+    draftStrokes,
+    marks,
+    addMarkMillis,
+    setCurrentDurationMillis,
+    resetDraft,
+  } = useRecordingNotes();
   const course = getCourse(params.courseId);
   const courseName = course?.name ?? 'Lecture';
 
@@ -53,6 +63,9 @@ export default function RecordingScreen() {
     error: liveCaptionError,
     latestCaption,
     partialCaption,
+    partialTranslationZh,
+    captionLines,
+    latestFinalLine,
     finalCaptions,
     startLiveCaptions,
     stopLiveCaptions,
@@ -60,37 +73,73 @@ export default function RecordingScreen() {
     sendAudioChunk,
   } = useLiveCaptions();
 
-  const [marks, setMarks] = useState<number[]>([]);
-  const [pcmFramesReceived, setPcmFramesReceived] = useState(0);
   const [micStreamError, setMicStreamError] = useState<string | null>(null);
-  const [lastCaptionAt, setLastCaptionAt] = useState<string | null>(null);
   const [finishing, setFinishing] = useState(false);
   const toast = useRef(new Animated.Value(0)).current;
   const autoStarted = useRef(false);
+  const isRecordingRef = useRef(false);
+  const recoverCaptionsRef = useRef<() => void>(() => {});
 
   const granted = permissionStatus === 'granted';
   const seconds = Math.floor(durationMillis / 1000);
+  const latestFinalEnglish = latestFinalLine?.text ?? captionLines[captionLines.length - 1]?.text ?? '';
+  const visibleEnglishCaption = partialCaption || latestFinalEnglish || latestCaption;
+  const visibleChineseCaption = partialTranslationZh || latestFinalLine?.translationZh || '';
 
-  useEffect(() => {
-    if (latestCaption) setLastCaptionAt(new Date().toLocaleTimeString());
-  }, [latestCaption]);
-
+  // Start live captions, then the live PCM mic stream. The local lecture
+  // recorder is already running by this point (recorder-first order), so the
+  // mic stream configures the iOS audio session and attaches its tap last.
+  // The no-PCM watchdog and single defensive retry live inside liveMicStream.
   const startCaptionPipeline = async () => {
     resetCaptions();
-    setPcmFramesReceived(0);
     setMicStreamError(null);
     await startLiveCaptions(48_000);
     const micStatus = await startMicStream({
       sampleRate: 48_000,
       onPcm16Frame: (frame) => {
         sendAudioChunk(frame);
-        setPcmFramesReceived(getLiveMicStreamStatus().framesReceived);
+      },
+      onUnavailable: () => {
+        setMicStreamError(LIVE_CAPTIONS_UNAVAILABLE_MESSAGE);
+        const mic = getLiveMicStreamStatus();
+        logLiveCaptionUnavailable('no_pcm_callbacks', {
+          micStarted: Boolean(mic.nativeRecorderStarted),
+          micFramesReceived: mic.framesReceived,
+          retryAttempted: Boolean(mic.retryAttempted),
+          localRecordingActive: isRecordingRef.current,
+        });
       },
     });
-    if (micStatus.error) setMicStreamError(micStatus.error);
+    if (micStatus.error) {
+      // The "needs a development build" note is fine to show as-is; any other
+      // startup failure is collapsed to the calm user-facing line.
+      setMicStreamError(
+        micStatus.isSupported ? LIVE_CAPTIONS_UNAVAILABLE_MESSAGE : micStatus.error,
+      );
+    }
   };
 
-  // Begin recording automatically when the screen opens with permission granted.
+  // Stop the live mic stream + live caption WebSocket (and their timers) when
+  // the recording screen is left. Pushing Mini does not unmount this screen.
+  useEffect(() => () => {
+    stopMicStream();
+    stopLiveCaptions();
+  }, [stopLiveCaptions]);
+
+  // Start each recording session with an empty Mini Workspace draft.
+  useEffect(() => {
+    resetDraft();
+  }, [resetDraft]);
+
+  // Recording is the authoritative clock. Mini mirrors this value rather than
+  // maintaining its own mark timeline, so marks from either surface align.
+  useEffect(() => {
+    setCurrentDurationMillis(durationMillis);
+  }, [durationMillis, setCurrentDurationMillis]);
+
+  // Begin recording automatically when the screen opens with permission
+  // granted. The local recorder starts first so it owns the audio session;
+  // the live caption mic stream then attaches on top without being clobbered.
   useEffect(() => {
     if (autoStarted.current || !granted) return;
     autoStarted.current = true;
@@ -99,12 +148,33 @@ export default function RecordingScreen() {
     });
   }, [granted]);
 
+  // Keep this fresh for the mount-once AppState listener below.
+  isRecordingRef.current = isRecording;
+  recoverCaptionsRef.current = () => {
+    if (!granted || finishing || isPaused || !isRecording) return;
+    if (
+      liveCaptionStatus === 'unavailable' ||
+      liveCaptionStatus === 'error' ||
+      liveCaptionStatus === 'idle'
+    ) {
+      logLiveCaptionEvent('foreground_caption_recovery', { liveCaptionStatus });
+      void startCaptionPipeline();
+    }
+  };
+
+  // When the app returns to the foreground, recover Live Caption if it failed
+  // while backgrounded. This restarts ONLY captions + mic — never the recorder.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') recoverCaptionsRef.current();
+    });
+    return () => sub.remove();
+  }, []);
+
   const handleAllow = async () => {
     autoStarted.current = true;
     const started = await startRecording();
-    if (started) {
-      await startCaptionPipeline();
-    }
+    if (started) await startCaptionPipeline();
   };
 
   const togglePause = () => {
@@ -119,7 +189,7 @@ export default function RecordingScreen() {
   };
 
   const markImportant = () => {
-    setMarks((m) => [...m, durationMillis]);
+    addMarkMillis(durationMillis);
     toast.setValue(1);
     Animated.timing(toast, {
       toValue: 0,
@@ -140,9 +210,12 @@ export default function RecordingScreen() {
       title: (params.lectureTitle ?? '').trim() || 'Untitled Lecture',
       durationMillis: finalDuration,
       localAudioUri: uri,
-      markedTimestamps: marks,
+      markedTimestamps: marks.map((mark) => mark.timestampMillis),
       liveTranscript: finalCaptions.join('\n'),
+      notes: draftNotes,
+      noteStrokes: draftStrokes,
     });
+    resetDraft();
     router.replace({ pathname: '/processing', params: { lectureId: lecture.id } });
   };
 
@@ -280,31 +353,45 @@ export default function RecordingScreen() {
                   </View>
                 </View>
 
-                {liveCaptionStatus === 'active' || liveCaptionStatus === 'listening' ? (
-                  <>
-                    <Text style={styles.captionLead}>
-                      {partialCaption || latestCaption || 'Listening for speech…'}
-                    </Text>
-                    {finalCaptions.length > 0 ? (
-                      <View style={styles.captionHistory}>
-                        {finalCaptions.slice(-4).map((caption, index) => (
-                          <Text key={`${caption}-${index}`} style={styles.captionHistoryLine}>
-                            {caption}
-                          </Text>
-                        ))}
+                {liveCaptionStatus === 'active' || liveCaptionStatus === 'listening' || visibleEnglishCaption ? (
+                  <View style={styles.captionBody}>
+                    {/* English — primary live caption: large, bold */}
+                    <View style={styles.captionSection}>
+                      <Text style={styles.captionLabel}>ENGLISH</Text>
+                      <Text style={styles.captionPrimary}>
+                        {visibleEnglishCaption || 'Listening for speech…'}
+                      </Text>
+                    </View>
+                    {/* Chinese — translation support: smaller, lighter. Shown
+                        when it has text, or briefly while a finalised English
+                        line is still being translated. */}
+                    {visibleChineseCaption ? (
+                      <View style={styles.captionSection}>
+                        <Text style={styles.captionLabel}>中文</Text>
+                        <Text style={styles.captionSecondary}>{visibleChineseCaption}</Text>
+                      </View>
+                    ) : latestFinalLine && !partialCaption ? (
+                      <View style={styles.captionSection}>
+                        <Text style={styles.captionLabel}>中文</Text>
+                        <Text style={styles.captionTranslating}>Translating…</Text>
                       </View>
                     ) : null}
-                  </>
+                  </View>
+                ) : liveCaptionStatus === 'connecting' ? (
+                  <Text style={styles.stateBody}>Connecting live captions…</Text>
                 ) : (
-                  <Text style={styles.stateBody}>
-                    {micStreamError ?? liveCaptionError ?? 'Live captions are unavailable. Audio recording is still active.'}
-                  </Text>
+                  <View style={styles.captionFallback}>
+                    <Text style={styles.stateBody}>
+                      {micStreamError ?? liveCaptionError ?? LIVE_CAPTIONS_UNAVAILABLE_MESSAGE}
+                    </Text>
+                    <SecondaryButton
+                      label="Retry captions"
+                      icon="refresh-outline"
+                      onPress={() => void startCaptionPipeline()}
+                      style={styles.retryCaptionsButton}
+                    />
+                  </View>
                 )}
-                <View style={styles.liveDebugRow}>
-                  <Text style={styles.liveDebugText}>WS: {liveCaptionStatus}</Text>
-                  <Text style={styles.liveDebugText}>PCM frames: {pcmFramesReceived}</Text>
-                  {lastCaptionAt ? <Text style={styles.liveDebugText}>Last caption: {lastCaptionAt}</Text> : null}
-                </View>
               </GlassCard>
             </View>
           </ScrollView>
@@ -523,38 +610,35 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: colors.textTertiary,
   },
-  captionLead: {
-    fontSize: fontSize.xl,
-    lineHeight: fontSize.xl * 1.45,
+  // ---- Live caption body: English primary, Chinese secondary ----
+  captionBody: {
+    gap: spacing.lg,
+  },
+  captionSection: {
+    gap: spacing.xs,
+  },
+  captionLabel: {
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+    color: colors.textTertiary,
+  },
+  captionPrimary: {
+    fontSize: fontSize.xxl,
+    lineHeight: fontSize.xxl * 1.34,
     color: colors.textPrimary,
-    fontWeight: '600',
+    fontWeight: '700',
   },
-  captionHistory: {
-    gap: spacing.sm,
-    marginTop: spacing.lg,
-    paddingTop: spacing.lg,
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
-  },
-  captionHistoryLine: {
-    fontSize: fontSize.md,
-    lineHeight: fontSize.md * 1.45,
+  captionSecondary: {
+    fontSize: fontSize.lg,
+    lineHeight: fontSize.lg * 1.55,
     color: colors.textSecondary,
     fontWeight: '500',
   },
-  liveDebugRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.md,
-    marginTop: spacing.lg,
-    paddingTop: spacing.md,
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
-  },
-  liveDebugText: {
-    fontSize: fontSize.xs,
-    fontWeight: '600',
+  captionTranslating: {
+    fontSize: fontSize.sm,
     color: colors.textTertiary,
+    fontWeight: '600',
   },
   stateBody: {
     fontSize: fontSize.md,
@@ -562,16 +646,11 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontWeight: '500',
   },
-  cardDivider: {
-    height: 1,
-    backgroundColor: colors.border,
-    marginVertical: spacing.lg,
+  captionFallback: {
+    gap: spacing.md,
   },
-  stateZh: {
-    fontSize: fontSize.md,
-    lineHeight: fontSize.md * 1.6,
-    color: colors.secondaryNavy,
-    fontWeight: '500',
+  retryCaptionsButton: {
+    alignSelf: 'flex-start',
   },
 
   // ---- Actions ----
