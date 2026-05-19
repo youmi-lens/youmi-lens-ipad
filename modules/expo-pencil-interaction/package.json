@@ -1,0 +1,7 @@
+{
+  "name": "expo-pencil-interaction",
+  "version": "1.0.0",
+  "description": "Optional Apple Pencil double-tap support for Youmi Lens (iOS dev/standalone builds only).",
+  "main": "index.ts",
+  "private": true
+}
