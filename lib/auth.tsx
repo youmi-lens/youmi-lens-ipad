@@ -36,6 +36,9 @@ type AuthContextValue = {
   session: Session | null;
   loading: boolean;
   username: string | null;
+  createProfileWithPassword: (email: string, password: string, username: string) => Promise<VerifySignupResult>;
+  verifySignupCode: (email: string, code: string, username: string) => Promise<VerifySignupResult>;
+  resendSignupCode: (email: string) => Promise<AuthResult>;
   sendSignInCode: (email: string) => Promise<AuthResult>;
   verifySignInCode: (email: string, code: string) => Promise<VerifySignupResult>;
   signInWithPassword: (email: string, password: string) => Promise<AuthResult>;
@@ -177,6 +180,95 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [applySessionState]);
 
+  const upsertProfileUsername = useCallback(async (nextUser: User, nextUsername: string) => {
+    const { error } = await supabase.from('profiles').upsert({
+      id: nextUser.id,
+      username: nextUsername,
+      updated_at: new Date().toISOString(),
+    });
+    if (error) {
+      console.warn('[auth] unable to save profile username', error.message);
+      return;
+    }
+    setUsername(nextUsername);
+  }, []);
+
+  // Create Profile, step 1: Supabase signUp. With email confirmation enabled,
+  // Supabase emails a verification code (Confirm sign up template → {{ .Token }})
+  // and returns no session — the code is verified in step 2.
+  const createProfileWithPassword = useCallback(
+    async (email: string, password: string, nextUsername: string): Promise<VerifySignupResult> => {
+      if (supabaseConfigError) return { error: supabaseConfigError, session: null };
+
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: { data: { username: nextUsername } },
+      });
+
+      if (error) {
+        if (error.message.toLowerCase().includes('already registered')) {
+          return {
+            error: 'This email already has a Youmi Lens account. Please sign in or use an email verification code.',
+            session: null,
+          };
+        }
+        return { error: error.message, session: null };
+      }
+      if (!data.user) {
+        return { error: 'We could not create your account. Please try again.', session: null };
+      }
+
+      // If email confirmation is disabled, signUp returns a session immediately.
+      if (data.session) {
+        await upsertProfileUsername(data.user, nextUsername);
+        await applySessionState(data.session);
+      }
+      return { error: null, session: data.session };
+    },
+    [applySessionState, upsertProfileUsername],
+  );
+
+  // Create Profile, step 2: verify the Supabase signup confirmation code.
+  const verifySignupCode = useCallback(
+    async (email: string, code: string, nextUsername: string): Promise<VerifySignupResult> => {
+      if (supabaseConfigError) return { error: supabaseConfigError, session: null };
+
+      const { data, error } = await supabase.auth.verifyOtp({
+        email,
+        token: code,
+        type: 'signup',
+      });
+
+      if (error) {
+        const normalized = error.message.toLowerCase();
+        if (
+          normalized.includes('expired') ||
+          normalized.includes('invalid') ||
+          normalized.includes('token')
+        ) {
+          return { error: 'Invalid or expired code. Please try again or resend a new code.', session: null };
+        }
+        return { error: error.message, session: null };
+      }
+      if (!data.session || !data.user) {
+        return { error: 'Verification succeeded, but no session was created. Please try again.', session: null };
+      }
+
+      await upsertProfileUsername(data.user, nextUsername);
+      await applySessionState(data.session);
+      return { error: null, session: data.session };
+    },
+    [applySessionState, upsertProfileUsername],
+  );
+
+  /** Re-send the Supabase signup confirmation email (carries a fresh code). */
+  const resendSignupCode = useCallback(async (email: string): Promise<AuthResult> => {
+    if (supabaseConfigError) return { error: supabaseConfigError };
+    const { error } = await supabase.auth.resend({ type: 'signup', email });
+    return { error: error?.message ?? null };
+  }, []);
+
   const sendSignInCode = useCallback(async (email: string): Promise<AuthResult> => {
     if (supabaseConfigError) return { error: supabaseConfigError };
 
@@ -263,6 +355,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       session,
       loading,
       username,
+      createProfileWithPassword,
+      verifySignupCode,
+      resendSignupCode,
       sendSignInCode,
       verifySignInCode,
       signInWithPassword,
@@ -274,6 +369,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       session,
       loading,
       username,
+      createProfileWithPassword,
+      verifySignupCode,
+      resendSignupCode,
       sendSignInCode,
       verifySignInCode,
       signInWithPassword,

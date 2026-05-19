@@ -16,7 +16,6 @@ import { PrimaryButton } from '@/components/PrimaryButton';
 import { SecondaryButton } from '@/components/SecondaryButton';
 import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
-import { sendSignupCode, verifySignupCodeAndCreateUser } from '@/lib/signupApi';
 
 type EntryMode = 'createProfile' | 'signIn';
 type AuthStep = 'entry' | 'signupCode' | 'signInCodeEmail' | 'signInCodeVerify';
@@ -25,7 +24,15 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export default function AuthScreen() {
   const router = useRouter();
-  const { session, sendSignInCode, verifySignInCode, signInWithPassword } = useAuth();
+  const {
+    session,
+    createProfileWithPassword,
+    verifySignupCode,
+    resendSignupCode,
+    sendSignInCode,
+    verifySignInCode,
+    signInWithPassword,
+  } = useAuth();
   const [entryMode, setEntryMode] = useState<EntryMode>('signIn');
   const [step, setStep] = useState<AuthStep>('entry');
   const [username, setUsername] = useState('');
@@ -54,8 +61,8 @@ export default function AuthScreen() {
     setCode('');
   };
 
-  // ── Create Profile: step 1 — send the verification code ─────────────────────
-  const handleSendSignupCode = async () => {
+  // ── Create Profile: step 1 — Supabase signUp, which emails the code ─────────
+  const handleCreateProfile = async () => {
     const trimmedUsername = username.trim();
     const trimmedEmail = email.trim();
 
@@ -73,70 +80,64 @@ export default function AuthScreen() {
     setBusyAction('send');
     setError(null);
     setPersistentError(null);
-    const result = await sendSignupCode(trimmedEmail, trimmedUsername);
+    const { error: createError, session: nextSession } = await createProfileWithPassword(
+      trimmedEmail,
+      password,
+      trimmedUsername,
+    );
     setBusyAction(null);
 
-    if (!result.ok) {
-      if (result.emailExists) {
+    if (createError) {
+      if (createError.includes('already has a Youmi Lens account')) {
         setEntryMode('signIn');
         setStep('entry');
-        setPersistentError(result.message);
+        setPersistentError(createError);
         return;
       }
-      setError(result.message);
+      setError(createError);
       return;
     }
 
+    // Email confirmation disabled → signed in immediately.
+    if (nextSession) {
+      router.replace('/(tabs)');
+      return;
+    }
+
+    // Email confirmation enabled → verify the emailed code next.
     setPendingEmail(trimmedEmail);
     setCode('');
     setStep('signupCode');
   };
 
-  // ── Create Profile: step 2 — verify the code, then create the account ───────
+  // ── Create Profile: step 2 — verify the Supabase signup code ────────────────
   const handleVerifyAndCreate = async () => {
     const trimmedCode = code.replace(/\s/g, '');
     if (!trimmedCode) return setError('Please enter the verification code.');
-    if (!/^\d{8}$/.test(trimmedCode)) return setError('Enter the full 8-digit code.');
+    if (!/^\d{6,8}$/.test(trimmedCode)) return setError('Enter the verification code from your email.');
 
     setBusyAction('verify');
     setError(null);
-    const result = await verifySignupCodeAndCreateUser({
-      username: username.trim(),
-      email: email.trim(),
-      password,
-      code: trimmedCode,
-    });
-
-    if (!result.ok) {
-      setBusyAction(null);
-      if (result.emailExists) {
-        setEntryMode('signIn');
-        setStep('entry');
-        setPersistentError(result.message);
-        return;
-      }
-      setError(result.message);
-      return;
-    }
-
-    // Account created — sign in with the email + password the user just set.
-    const { error: signInError } = await signInWithPassword(email.trim(), password);
+    const { error: verifyError, session: nextSession } = await verifySignupCode(
+      email.trim(),
+      trimmedCode,
+      username.trim(),
+    );
     setBusyAction(null);
-    if (signInError) {
-      setEntryMode('signIn');
-      setStep('entry');
-      setPersistentError('Your account is ready. Please sign in with your email and password.');
+
+    if (verifyError) {
+      setError(verifyError);
       return;
     }
-    router.replace('/(tabs)');
+    if (nextSession) router.replace('/(tabs)');
   };
 
   const handleResendSignupCode = async () => {
     setBusyAction('resend');
     setError(null);
-    const result = await sendSignupCode(email.trim(), username.trim());
+    const { error: resendError } = await resendSignupCode(email.trim());
     setBusyAction(null);
-    if (!result.ok) setError(result.message);
+    if (resendError) setError(resendError);
   };
 
   const backToCreateProfile = () => {
@@ -176,9 +177,7 @@ export default function AuthScreen() {
   const handleVerifySignInCode = async () => {
     const trimmedCode = code.replace(/\s/g, '');
     if (!trimmedCode) return setError('Please enter the verification code.');
-    if (!/^\d+$/.test(trimmedCode)) return setError('Verification code must contain only digits.');
-    if (trimmedCode.length < 8) return setError('Enter the full 8-digit code.');
-    if (trimmedCode.length > 8) return setError('Verification code must be 8 digits.');
+    if (!/^\d{6,8}$/.test(trimmedCode)) return setError('Enter the verification code from your email.');
 
     setBusyAction('verify');
     setError(null);
@@ -245,14 +244,14 @@ export default function AuthScreen() {
               <View style={styles.codeWrap}>
                 <View style={styles.headerCopy}>
                   <Text style={styles.cardTitle}>Verify your email</Text>
-                  <Text style={styles.cardSubtitle}>Enter the 8-digit code we sent to your email.</Text>
+                  <Text style={styles.cardSubtitle}>Enter the verification code we sent to your email.</Text>
                 </View>
                 <View style={styles.fieldGroup}>
                   <Text style={styles.label}>Verification code</Text>
                   <TextInput
                     keyboardType="number-pad"
                     maxLength={8}
-                    placeholder="12345678"
+                    placeholder="123456"
                     placeholderTextColor={colors.textTertiary}
                     style={[styles.input, styles.codeInput]}
                     value={code}
@@ -286,14 +285,14 @@ export default function AuthScreen() {
               <View style={styles.codeWrap}>
                 <View style={styles.headerCopy}>
                   <Text style={styles.cardTitle}>Check your email</Text>
-                  <Text style={styles.cardSubtitle}>Enter the 8-digit code we sent to your email.</Text>
+                  <Text style={styles.cardSubtitle}>Enter the verification code we sent to your email.</Text>
                 </View>
                 <View style={styles.fieldGroup}>
                   <Text style={styles.label}>Verification code</Text>
                   <TextInput
                     keyboardType="number-pad"
                     maxLength={8}
-                    placeholder="12345678"
+                    placeholder="123456"
                     placeholderTextColor={colors.textTertiary}
                     style={[styles.input, styles.codeInput]}
                     value={code}
@@ -361,8 +360,8 @@ export default function AuthScreen() {
 
                 {entryMode === 'createProfile' ? (
                   <>
-                    <PrimaryButton label="Send verification code" onPress={handleSendSignupCode} loading={busyAction === 'send'} disabled={busyAction !== null} />
-                    <Text style={styles.helper}>We’ll verify your email before creating your account.</Text>
+                    <PrimaryButton label="Send verification code" onPress={handleCreateProfile} loading={busyAction === 'send'} disabled={busyAction !== null} />
+                    <Text style={styles.helper}>We’ll email you a verification code to confirm your email.</Text>
                     <Pressable accessibilityRole="button" onPress={() => switchMode('signIn')} style={styles.textButton}>
                       <Text style={styles.textButtonLabel}>Already have an account? Sign in</Text>
                     </Pressable>
