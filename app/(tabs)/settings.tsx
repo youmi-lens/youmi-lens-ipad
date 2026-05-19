@@ -291,23 +291,6 @@ export default function SettingsScreen() {
             />
           </Section>
 
-          {/* Sync */}
-          <Section title="SYNC">
-            <View style={styles.syncBox}>
-              <View style={styles.syncTop}>
-                <View style={styles.rowIcon}>
-                  <Ionicons name="cloud-done-outline" size={19} color={colors.deepNavy} />
-                </View>
-                <View style={styles.syncText}>
-                  <Text style={styles.rowLabel}>iCloud Sync</Text>
-                  <Text style={styles.syncMeta}>Last synced 2 minutes ago</Text>
-                </View>
-                <StatusPill label="SYNCED" variant="synced" />
-              </View>
-              <SecondaryButton label="Sync Now" icon="sync-outline" style={styles.planButton} />
-            </View>
-          </Section>
-
           {/* Developer — local testing tools */}
           <Section title="DEVELOPER">
             <View style={styles.devMetaWrap}>
@@ -477,9 +460,6 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontWeight: '600',
   },
-  planButton: {
-    marginTop: spacing.lg,
-  },
   planHeadText: {
     flex: 1,
   },
@@ -535,23 +515,6 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     letterSpacing: 0.4,
     color: '#C0392B',
-  },
-  syncBox: {
-    padding: spacing.lg,
-  },
-  syncTop: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-  },
-  syncText: {
-    flex: 1,
-    gap: 2,
-  },
-  syncMeta: {
-    fontSize: fontSize.sm,
-    color: colors.textTertiary,
-    fontWeight: '500',
   },
   devMetaWrap: {
     flexDirection: 'row',
