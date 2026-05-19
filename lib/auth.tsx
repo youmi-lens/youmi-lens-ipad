@@ -38,14 +38,16 @@ type AuthContextValue = {
   session: Session | null;
   loading: boolean;
   username: string | null;
-  sendSignupCode: (email: string) => Promise<AuthResult>;
-  verifySignupCodeAndSetPassword: (
+  createProfileWithPassword: (email: string, password: string, username: string) => Promise<VerifySignupResult>;
+  resendSignupCode: (email: string) => Promise<AuthResult>;
+  sendSignInCode: (email: string) => Promise<AuthResult>;
+  verifySignupCodeAndCreateProfile: (
     email: string,
     code: string,
     username: string,
-    password: string,
     createProfileStartedAt: number,
   ) => Promise<VerifySignupResult>;
+  verifySignInCode: (email: string, code: string) => Promise<VerifySignupResult>;
   signInWithPassword: (email: string, password: string) => Promise<AuthResult>;
   savePendingUsername: (username: string) => Promise<void>;
   clearPendingUsername: () => Promise<void>;
@@ -210,25 +212,111 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUsername(nextUsername);
   }, []);
 
-  const sendSignupCode = useCallback(async (email: string): Promise<AuthResult> => {
+  const createProfileWithPassword = useCallback(
+    async (email: string, password: string, nextUsername: string): Promise<VerifySignupResult> => {
+      if (supabaseConfigError) return { error: supabaseConfigError, session: null };
+
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: { username: nextUsername },
+        },
+      });
+
+      if (error) {
+        if (error.message.toLowerCase().includes('already registered')) {
+          return {
+            error: 'This email already has a Youmi Lens account. Please sign in or use an email verification code.',
+            session: null,
+          };
+        }
+        return { error: error.message, session: null };
+      }
+      if (!data.user) {
+        return { error: 'We could not create your account. Please try again.', session: null };
+      }
+
+      if (data.session) {
+        setUsername(nextUsername);
+        await upsertProfileUsername(data.user, nextUsername);
+        await clearPendingUsername();
+        await applySessionState(data.session);
+      }
+
+      return { error: null, session: data.session };
+    },
+    [applySessionState, clearPendingUsername, upsertProfileUsername],
+  );
+
+  const resendSignupCode = useCallback(async (email: string): Promise<AuthResult> => {
     if (supabaseConfigError) return { error: supabaseConfigError };
 
-    const { error } = await supabase.auth.signInWithOtp({
+    const { error } = await supabase.auth.resend({
+      type: 'signup',
       email,
-      options: {
-        shouldCreateUser: true,
-      },
     });
 
     return { error: error?.message ?? null };
   }, []);
 
-  const verifySignupCodeAndSetPassword = useCallback(
+  const sendSignInCode = useCallback(async (email: string): Promise<AuthResult> => {
+    if (supabaseConfigError) return { error: supabaseConfigError };
+
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: {
+        shouldCreateUser: false,
+      },
+    });
+
+    if (error) {
+      const normalizedMessage = error.message.toLowerCase();
+      if (
+        normalizedMessage.includes('signup') ||
+        normalizedMessage.includes('user not found') ||
+        normalizedMessage.includes('not found')
+      ) {
+        return { error: 'No account found for this email. Please create a profile first.' };
+      }
+    }
+
+    return { error: error?.message ?? null };
+  }, []);
+
+  const verifySignInCode = useCallback(async (email: string, code: string): Promise<VerifySignupResult> => {
+    if (supabaseConfigError) return { error: supabaseConfigError, session: null };
+
+    const { data, error } = await supabase.auth.verifyOtp({
+      email,
+      token: code,
+      type: 'email',
+    });
+
+    if (error) {
+      const normalizedMessage = error.message.toLowerCase();
+      if (
+        normalizedMessage.includes('expired') ||
+        normalizedMessage.includes('invalid') ||
+        normalizedMessage.includes('token')
+      ) {
+        return { error: 'Invalid or expired code. Please try again or resend a new code.', session: null };
+      }
+      return { error: error.message, session: null };
+    }
+    if (!data.session) {
+      return { error: 'Verification succeeded, but no session was created. Please try again.', session: null };
+    }
+
+    await applySessionState(data.session);
+    return { error: null, session: data.session };
+  }, [applySessionState]);
+
+  const verifySignupCodeAndCreateProfile = useCallback(
     async (
       email: string,
       code: string,
       nextUsername: string,
-      password: string,
       createProfileStartedAt: number,
     ): Promise<VerifySignupResult> => {
       if (supabaseConfigError) return { error: supabaseConfigError, session: null };
@@ -236,7 +324,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const { data: otpData, error: otpError } = await supabase.auth.verifyOtp({
         email,
         token: code,
-        type: 'email',
+        type: 'signup',
       });
 
       if (otpError) return { error: otpError.message, session: null };
@@ -273,26 +361,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         await clearPendingUsername();
         await applySessionState(null);
         return {
-          error: 'This email already has a Youmi Lens account. Please sign in instead.',
+          error: 'This email already has a Youmi Lens account. Please sign in or use an email verification code.',
           session: null,
         };
       }
 
-      const { data: updateData, error: updateError } = await supabase.auth.updateUser({
-        password,
-        data: { username: nextUsername },
-      });
-
-      if (updateError) {
-        return {
-          error: `Your email was verified, but we could not set your password: ${updateError.message}`,
-          session: otpData.session,
-        };
-      }
-
-      const updatedUser = updateData.user ?? otpData.user;
       setUsername(nextUsername);
-      await upsertProfileUsername(updatedUser, nextUsername);
+      await upsertProfileUsername(otpData.user, nextUsername);
       await clearPendingUsername();
       await applySessionState(otpData.session);
 
@@ -310,7 +385,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (error.message.toLowerCase().includes('invalid login credentials')) {
       return {
         error:
-          'Invalid email or password. If this account was created with an older magic-link-only flow and has no password, contact support for account recovery.',
+          'Invalid email or password. If you forgot your password or created your account without one, use an email verification code.',
       };
     }
 
@@ -325,8 +400,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signOut = useCallback(async (): Promise<AuthResult> => {
     const { error } = await supabase.auth.signOut();
+    if (!error) await applySessionState(null);
     return { error: error?.message ?? null };
-  }, []);
+  }, [applySessionState]);
 
   const value = useMemo<AuthContextValue>(
     () => ({
@@ -334,8 +410,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       session,
       loading,
       username,
-      sendSignupCode,
-      verifySignupCodeAndSetPassword,
+      createProfileWithPassword,
+      resendSignupCode,
+      sendSignInCode,
+      verifySignupCodeAndCreateProfile,
+      verifySignInCode,
       signInWithPassword,
       savePendingUsername,
       clearPendingUsername,
@@ -347,8 +426,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       session,
       loading,
       username,
-      sendSignupCode,
-      verifySignupCodeAndSetPassword,
+      createProfileWithPassword,
+      resendSignupCode,
+      sendSignInCode,
+      verifySignupCodeAndCreateProfile,
+      verifySignInCode,
       signInWithPassword,
       savePendingUsername,
       clearPendingUsername,

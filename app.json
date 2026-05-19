@@ -2,7 +2,7 @@
   "expo": {
     "name": "Youmi Lens for iPad",
     "slug": "youmi-lens-ipad",
-    "version": "1.0.0",
+    "version": "0.1.0",
     "orientation": "default",
     "icon": "./assets/images/icon.png",
     "scheme": "youmilens",
@@ -11,8 +11,11 @@
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
-        "NSMicrophoneUsageDescription": "Allow Youmi Lens to access your microphone so it can record lectures and provide live captions."
-      }
+        "NSMicrophoneUsageDescription": "Allow Youmi Lens to access your microphone so it can record lectures, provide live captions, and generate study notes.",
+        "ITSAppUsesNonExemptEncryption": false
+      },
+      "bundleIdentifier": "com.aydenz.youmilensipad",
+      "buildNumber": "1"
     },
     "android": {
       "adaptiveIcon": {
@@ -46,21 +49,22 @@
       [
         "expo-audio",
         {
-          "microphonePermission": "Allow Youmi Lens to access your microphone so it can record lectures and generate study notes."
+          "microphonePermission": "Allow Youmi Lens to access your microphone so it can record lectures, provide live captions, and generate study notes."
         }
       ],
       [
         "react-native-audio-api",
         {
           "iosBackgroundMode": false,
-          "iosMicrophonePermission": "Allow Youmi Lens to access your microphone so it can record lectures and provide live captions.",
+          "iosMicrophonePermission": "Allow Youmi Lens to access your microphone so it can record lectures, provide live captions, and generate study notes.",
           "androidPermissions": [
             "android.permission.RECORD_AUDIO"
           ],
           "androidForegroundService": false,
           "androidFSTypes": []
         }
-      ]
+      ],
+      "expo-asset"
     ],
     "experiments": {
       "typedRoutes": true,
