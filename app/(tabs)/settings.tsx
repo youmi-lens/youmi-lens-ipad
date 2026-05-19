@@ -1,43 +1,63 @@
 import { Ionicons } from '@expo/vector-icons';
-import { ComponentProps, ReactNode } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useFocusEffect } from 'expo-router';
+import { ComponentProps, ReactNode, useCallback, useState } from 'react';
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { GlassCard } from '@/components/GlassCard';
 import { SecondaryButton } from '@/components/SecondaryButton';
 import { StatusPill } from '@/components/StatusPill';
 import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
-import { plan } from '@/data/mockData';
 import { useAuth } from '@/lib/auth';
+import { fetchPlanStatus, PlanStatus } from '@/lib/planStatus';
 import { useData } from '@/lib/store';
 
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
 
-/** A section heading + a frosted card wrapping its rows. */
-function Section({ title, children }: { title: string; children: ReactNode }) {
+/** A section heading + a frosted card wrapping its rows, with optional footer copy. */
+function Section({
+  title,
+  children,
+  footer,
+}: {
+  title: string;
+  children: ReactNode;
+  footer?: string;
+}) {
   return (
     <View style={styles.section}>
       <Text style={styles.sectionTitle}>{title}</Text>
       <GlassCard padding={spacing.xs}>{children}</GlassCard>
+      {footer ? <Text style={styles.sectionFooter}>{footer}</Text> : null}
     </View>
   );
 }
 
-/** A single tappable settings row: icon, label, trailing value, chevron. */
+/**
+ * A settings row: icon, label, trailing value. `readOnly` hides the chevron
+ * for fixed V1 rows; a row with `onPress` stays tappable (e.g. to show an
+ * info alert) and keeps press feedback.
+ */
 function Row({
   icon,
   label,
   value,
   last = false,
+  onPress,
+  readOnly = false,
 }: {
   icon: IoniconName;
   label: string;
   value?: string;
   last?: boolean;
+  onPress?: () => void;
+  readOnly?: boolean;
 }) {
   return (
     <Pressable
       accessibilityRole="button"
+      onPress={onPress}
+      disabled={!onPress}
       style={({ pressed }) => [styles.row, !last && styles.rowDivider, pressed && styles.rowPressed]}
     >
       <View style={styles.rowIcon}>
@@ -46,18 +66,93 @@ function Row({
       <Text style={styles.rowLabel}>{label}</Text>
       <View style={styles.rowRight}>
         {value ? <Text style={styles.rowValue}>{value}</Text> : null}
-        <Ionicons name="chevron-forward" size={17} color={colors.textTertiary} />
+        {!readOnly ? (
+          <Ionicons name="chevron-forward" size={17} color={colors.textTertiary} />
+        ) : null}
       </View>
     </Pressable>
   );
 }
 
+/** A label + value line inside the Plan card (e.g. "Today · 0 / 2 recordings used"). */
+function PlanLine({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.planLine}>
+      <Text style={styles.planLineLabel}>{label}</Text>
+      <Text style={styles.planLineValue}>{value}</Text>
+    </View>
+  );
+}
+
 export default function SettingsScreen() {
   const { courses, lectures, clearAll } = useData();
-  const { user, username, signOut } = useAuth();
+  const { user, username, signOut, session } = useAuth();
+
+  const [planStatus, setPlanStatus] = useState<PlanStatus | null>(null);
+  const [planLoading, setPlanLoading] = useState(true);
+  const [planError, setPlanError] = useState<string | null>(null);
+
+  // Load the live plan from the backend. Any previously loaded plan stays
+  // visible if a refresh fails, so Settings never blocks on a network error.
+  const loadPlan = useCallback(async () => {
+    const token = session?.access_token;
+    if (!token) {
+      setPlanStatus(null);
+      setPlanError('Plan unavailable.');
+      setPlanLoading(false);
+      return;
+    }
+    setPlanLoading(true);
+    setPlanError(null);
+    try {
+      setPlanStatus(await fetchPlanStatus(token));
+    } catch {
+      setPlanError('Plan unavailable.');
+    } finally {
+      setPlanLoading(false);
+    }
+  }, [session?.access_token]);
+
+  // Refetch whenever the Settings tab regains focus — the plan may be changed
+  // directly in the database, so it is never cached for the whole session.
+  useFocusEffect(
+    useCallback(() => {
+      void loadPlan();
+    }, [loadPlan]),
+  );
+
+  /**
+   * V1 caption language is fixed to English — the live pipeline only has
+   * English realtime ASR plus Chinese translation of English text. Tapping
+   * the row explains that honestly rather than offering an unsupported choice.
+   */
+  const showCaptionLanguageInfo = () => {
+    Alert.alert(
+      'Caption Language',
+      'English is the current supported lecture caption language. More caption languages are coming later.',
+    );
+  };
 
   const email = user?.email ?? 'Signed in';
-  const initials = email.slice(0, 2).toUpperCase();
+
+  // Display name: username first, email second.
+  const displayName = username ?? email;
+
+  // Avatar initials: first letter(s) of username words, else first letter of
+  // email, else 'U'.
+  const initials = (() => {
+    if (username) {
+      const words = username.trim().split(/\s+/);
+      if (words.length >= 2) {
+        return (words[0][0] + words[1][0]).toUpperCase();
+      }
+      return words[0][0].toUpperCase();
+    }
+    if (user?.email) {
+      return user.email[0].toUpperCase();
+    }
+    return 'U';
+  })();
 
   const handleClearData = () => {
     Alert.alert(
@@ -93,7 +188,7 @@ export default function SettingsScreen() {
                 <Text style={styles.avatarText}>{initials}</Text>
               </View>
               <View style={styles.accountText}>
-                <Text style={styles.accountName}>{username ?? 'No username set'}</Text>
+                <Text style={styles.accountName}>{displayName}</Text>
                 <Text style={styles.accountEmail}>{email}</Text>
               </View>
             </View>
@@ -106,36 +201,94 @@ export default function SettingsScreen() {
             />
           </Section>
 
-          {/* Plan */}
+          {/* Plan — live from the backend user_quota table */}
           <Section title="PLAN">
-            <View style={styles.planBox}>
-              <View style={styles.planTop}>
-                <View>
-                  <Text style={styles.planName}>Youmi Plan · {plan.name}</Text>
-                  <Text style={styles.planSub}>{plan.renewLabel}</Text>
+            {planStatus ? (
+              <View style={styles.planBox}>
+                <View style={styles.planTop}>
+                  <View style={styles.planHeadText}>
+                    <Text style={styles.planName}>{planStatus.displayName}</Text>
+                    <Text style={styles.planSub}>Youmi Lens plan</Text>
+                  </View>
+                  {planStatus.status === 'suspended' ? (
+                    <View style={styles.suspendedPill}>
+                      <Text style={styles.suspendedPillText}>SUSPENDED</Text>
+                    </View>
+                  ) : (
+                    <StatusPill label="ACTIVE" variant="live" />
+                  )}
                 </View>
-                <StatusPill label="ACTIVE" variant="live" />
+
+                {planStatus.unlimited ? (
+                  <Text style={styles.planUsage}>Usage · Unlimited</Text>
+                ) : (
+                  <View style={styles.planLines}>
+                    <PlanLine
+                      label="Today"
+                      value={`${planStatus.recordingsUsedToday ?? 0} / ${planStatus.maxRecordingsPerDay ?? 0} recordings used`}
+                    />
+                    <PlanLine
+                      label="Limit"
+                      value={`${planStatus.maxRecordingMinutes ?? 0} min per recording`}
+                    />
+                    {typeof planStatus.recordingsRemainingToday === 'number' ? (
+                      <PlanLine
+                        label="Remaining"
+                        value={`${planStatus.recordingsRemainingToday} recording${
+                          planStatus.recordingsRemainingToday === 1 ? '' : 's'
+                        } today`}
+                      />
+                    ) : null}
+                  </View>
+                )}
+
+                {planStatus.status === 'suspended' ? (
+                  <Text style={styles.planHelper}>Contact support for access.</Text>
+                ) : null}
               </View>
-              <View style={styles.progressTrack}>
-                <View style={[styles.progressFill, { width: `${plan.progress * 100}%` }]} />
+            ) : planLoading ? (
+              <View style={styles.planStateBox}>
+                <ActivityIndicator color={colors.deepNavy} />
+                <Text style={styles.planStateText}>Loading plan…</Text>
               </View>
-              <Text style={styles.planUsage}>
-                {plan.usedMinutes.toLocaleString()} minutes used · {plan.totalLabel} remaining
-              </Text>
-              <SecondaryButton
-                label="Upgrade Plan"
-                tone="ice"
-                icon="arrow-up-circle-outline"
-                style={styles.planButton}
-              />
-            </View>
+            ) : (
+              <View style={styles.planStateBox}>
+                <Text style={styles.planStateText}>{planError ?? 'Plan unavailable.'}</Text>
+                <SecondaryButton
+                  label="Retry"
+                  icon="refresh-outline"
+                  onPress={() => void loadPlan()}
+                  style={styles.planRetry}
+                />
+              </View>
+            )}
           </Section>
 
-          {/* Language */}
-          <Section title="LANGUAGE">
-            <Row icon="mic-outline" label="Caption Language" value="English" />
-            <Row icon="language-outline" label="Translation Language" value="中文 (简体)" />
-            <Row icon="globe-outline" label="App Language" value="English" last />
+          {/* Language — English captions + Chinese study support, fixed for V1 */}
+          <Section
+            title="LANGUAGE"
+            footer="Youmi Lens is currently optimized for English lectures with Chinese study support. More caption languages are coming later."
+          >
+            <Row
+              icon="mic-outline"
+              label="Caption Language"
+              value="English"
+              onPress={showCaptionLanguageInfo}
+              readOnly
+            />
+            <Row
+              icon="language-outline"
+              label="Translation Language"
+              value="中文（简体）"
+              readOnly
+            />
+            <Row
+              icon="globe-outline"
+              label="App Language"
+              value="English"
+              readOnly
+              last
+            />
           </Section>
 
           {/* Sync */}
@@ -216,6 +369,14 @@ const styles = StyleSheet.create({
     letterSpacing: 1.2,
     color: colors.textTertiary,
     marginLeft: spacing.xs,
+  },
+  sectionFooter: {
+    fontSize: fontSize.xs,
+    lineHeight: fontSize.xs * 1.5,
+    fontWeight: '500',
+    color: colors.textTertiary,
+    marginLeft: spacing.xs,
+    marginTop: 2,
   },
   account: {
     flexDirection: 'row',
@@ -311,25 +472,69 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     marginTop: 2,
   },
-  progressTrack: {
-    height: 8,
-    borderRadius: radius.pill,
-    backgroundColor: colors.surfaceMuted,
-    overflow: 'hidden',
-  },
-  progressFill: {
-    height: '100%',
-    borderRadius: radius.pill,
-    backgroundColor: colors.deepNavy,
-  },
   planUsage: {
-    fontSize: fontSize.sm,
+    fontSize: fontSize.md,
     color: colors.textSecondary,
-    fontWeight: '500',
-    marginTop: spacing.sm,
+    fontWeight: '600',
   },
   planButton: {
     marginTop: spacing.lg,
+  },
+  planHeadText: {
+    flex: 1,
+  },
+  planLines: {
+    gap: spacing.sm,
+  },
+  planLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.md,
+  },
+  planLineLabel: {
+    fontSize: fontSize.sm,
+    color: colors.textTertiary,
+    fontWeight: '600',
+  },
+  planLineValue: {
+    flex: 1,
+    textAlign: 'right',
+    fontSize: fontSize.sm,
+    color: colors.textPrimary,
+    fontWeight: '600',
+  },
+  planHelper: {
+    fontSize: fontSize.sm,
+    color: colors.textSecondary,
+    fontWeight: '500',
+    marginTop: spacing.md,
+  },
+  planStateBox: {
+    padding: spacing.lg,
+    alignItems: 'center',
+    gap: spacing.md,
+  },
+  planStateText: {
+    fontSize: fontSize.md,
+    color: colors.textSecondary,
+    fontWeight: '600',
+  },
+  planRetry: {
+    alignSelf: 'center',
+  },
+  suspendedPill: {
+    borderRadius: radius.pill,
+    backgroundColor: colors.recordingTint,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 6,
+    alignSelf: 'flex-start',
+  },
+  suspendedPillText: {
+    fontSize: fontSize.xs,
+    fontWeight: '700',
+    letterSpacing: 0.4,
+    color: '#C0392B',
   },
   syncBox: {
     padding: spacing.lg,
