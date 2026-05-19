@@ -291,6 +291,21 @@ export default function SettingsScreen() {
             />
           </Section>
 
+          {/* Account Storage — honest, informational only (no sync UI) */}
+          <Section
+            title="ACCOUNT STORAGE"
+            footer="Data is kept separate for each signed-in account."
+          >
+            <View style={styles.storageNote}>
+              <View style={styles.rowIcon}>
+                <Ionicons name="folder-outline" size={19} color={colors.deepNavy} />
+              </View>
+              <Text style={styles.storageText}>
+                Your lectures, transcripts, summaries, and notes are saved to your Youmi Lens account.
+              </Text>
+            </View>
+          </Section>
+
           {/* Developer — local testing tools */}
           <Section title="DEVELOPER">
             <View style={styles.devMetaWrap}>
@@ -515,6 +530,19 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     letterSpacing: 0.4,
     color: '#C0392B',
+  },
+  storageNote: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    padding: spacing.lg,
+  },
+  storageText: {
+    flex: 1,
+    fontSize: fontSize.sm,
+    lineHeight: fontSize.sm * 1.5,
+    color: colors.textSecondary,
+    fontWeight: '500',
   },
   devMetaWrap: {
     flexDirection: 'row',
