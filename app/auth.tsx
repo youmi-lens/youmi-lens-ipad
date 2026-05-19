@@ -4,6 +4,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -226,6 +227,11 @@ export default function AuthScreen() {
   return (
     <SafeAreaView style={styles.root}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.keyboardAvoider}>
+        <ScrollView
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
         <View style={styles.content}>
           <View style={styles.brandBlock}>
             <View style={styles.logo}><Text style={styles.logoText}>Y</Text></View>
@@ -383,6 +389,7 @@ export default function AuthScreen() {
             )}
           </GlassCard>
         </View>
+        </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -406,7 +413,16 @@ function ModeButton({ label, active, onPress }: { label: string; active: boolean
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.background },
-  keyboardAvoider: { flex: 1, justifyContent: 'center', paddingHorizontal: spacing.xl },
+  keyboardAvoider: { flex: 1 },
+  // flexGrow keeps the card vertically centered when it fits, and lets the
+  // page scroll once the fields (or the keyboard) exceed the available height.
+  scrollContent: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    paddingHorizontal: spacing.xl,
+    paddingTop: spacing.xxl,
+    paddingBottom: spacing.xxxl,
+  },
   content: { width: '100%', maxWidth: layout.content, alignSelf: 'center', gap: spacing.xxl },
   brandBlock: { alignItems: 'center', gap: spacing.sm },
   logo: { width: 72, height: 72, borderRadius: radius.pill, backgroundColor: colors.deepNavy, alignItems: 'center', justifyContent: 'center', marginBottom: spacing.sm },
