@@ -16,27 +16,16 @@ import { PrimaryButton } from '@/components/PrimaryButton';
 import { SecondaryButton } from '@/components/SecondaryButton';
 import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
+import { sendSignupCode, verifySignupCodeAndCreateUser } from '@/lib/signupApi';
 
 type EntryMode = 'createProfile' | 'signIn';
 type AuthStep = 'entry' | 'signupCode' | 'signInCodeEmail' | 'signInCodeVerify';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL?.replace(/\/$/, '');
-const EXISTING_ACCOUNT_MESSAGE = 'This email already has a Youmi Lens account. Please sign in or use an email verification code.';
 
 export default function AuthScreen() {
   const router = useRouter();
-  const {
-    session,
-    createProfileWithPassword,
-    resendSignupCode,
-    sendSignInCode,
-    verifySignupCodeAndCreateProfile,
-    verifySignInCode,
-    signInWithPassword,
-    savePendingUsername,
-    clearPendingUsername,
-  } = useAuth();
+  const { session, sendSignInCode, verifySignInCode, signInWithPassword } = useAuth();
   const [entryMode, setEntryMode] = useState<EntryMode>('signIn');
   const [step, setStep] = useState<AuthStep>('entry');
   const [username, setUsername] = useState('');
@@ -44,8 +33,6 @@ export default function AuthScreen() {
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [pendingEmail, setPendingEmail] = useState('');
-  const [pendingUsername, setPendingUsername] = useState('');
-  const [createProfileStartedAt, setCreateProfileStartedAt] = useState<number | null>(null);
   const [code, setCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [persistentError, setPersistentError] = useState<string | null>(null);
@@ -59,16 +46,16 @@ export default function AuthScreen() {
     return null;
   };
 
-  const switchMode = async (nextMode: EntryMode) => {
+  const switchMode = (nextMode: EntryMode) => {
     setEntryMode(nextMode);
     setStep('entry');
     setError(null);
     setPersistentError(null);
     setCode('');
-    if (nextMode === 'signIn') await clearPendingUsername();
   };
 
-  const handleCreateProfile = async () => {
+  // ── Create Profile: step 1 — send the verification code ─────────────────────
+  const handleSendSignupCode = async () => {
     const trimmedUsername = username.trim();
     const trimmedEmail = email.trim();
 
@@ -86,91 +73,79 @@ export default function AuthScreen() {
     setBusyAction('send');
     setError(null);
     setPersistentError(null);
-
-    if (!API_BASE_URL) {
-      setBusyAction(null);
-      setError('Account creation is temporarily unavailable. Missing API configuration.');
-      return;
-    }
-
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/auth/check-email`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: trimmedEmail }),
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const payload = (await response.json()) as { exists?: boolean };
-      if (payload.exists) {
-        setBusyAction(null);
-        setEntryMode('signIn');
-        setPersistentError(EXISTING_ACCOUNT_MESSAGE);
-        await clearPendingUsername();
-        return;
-      }
-    } catch (checkError) {
-      console.warn('[auth] unable to check existing account before signup', checkError);
-      setBusyAction(null);
-      setError('Could not verify whether this email is available. Please try again.');
-      return;
-    }
-
-    await savePendingUsername(trimmedUsername);
-    const startedAt = Date.now();
-    const { error: createError, session: nextSession } = await createProfileWithPassword(trimmedEmail, password, trimmedUsername);
+    const result = await sendSignupCode(trimmedEmail, trimmedUsername);
     setBusyAction(null);
 
-    if (createError) {
-      await clearPendingUsername();
-      setError(createError);
-      return;
-    }
-
-    if (nextSession) {
-      router.replace('/(tabs)');
+    if (!result.ok) {
+      if (result.emailExists) {
+        setEntryMode('signIn');
+        setStep('entry');
+        setPersistentError(result.message);
+        return;
+      }
+      setError(result.message);
       return;
     }
 
     setPendingEmail(trimmedEmail);
-    setPendingUsername(trimmedUsername);
-    setCreateProfileStartedAt(startedAt);
     setCode('');
     setStep('signupCode');
   };
 
-  const handleVerifySignup = async () => {
+  // ── Create Profile: step 2 — verify the code, then create the account ───────
+  const handleVerifyAndCreate = async () => {
     const trimmedCode = code.replace(/\s/g, '');
     if (!trimmedCode) return setError('Please enter the verification code.');
-    if (!/^\d+$/.test(trimmedCode)) return setError('Verification code must contain only digits.');
-    if (trimmedCode.length < 8) return setError('Enter the full 8-digit code.');
-    if (trimmedCode.length > 8) return setError('Verification code must be 8 digits.');
+    if (!/^\d{8}$/.test(trimmedCode)) return setError('Enter the full 8-digit code.');
 
     setBusyAction('verify');
     setError(null);
-    const { error: verifyError, session: nextSession } = await verifySignupCodeAndCreateProfile(
-      pendingEmail,
-      trimmedCode,
-      pendingUsername,
-      createProfileStartedAt ?? Date.now(),
-    );
-    setBusyAction(null);
+    const result = await verifySignupCodeAndCreateUser({
+      username: username.trim(),
+      email: email.trim(),
+      password,
+      code: trimmedCode,
+    });
 
-    if (verifyError) {
-      if (verifyError === EXISTING_ACCOUNT_MESSAGE) {
-        setPersistentError(EXISTING_ACCOUNT_MESSAGE);
+    if (!result.ok) {
+      setBusyAction(null);
+      if (result.emailExists) {
         setEntryMode('signIn');
         setStep('entry');
-        setPendingUsername('');
-        setCreateProfileStartedAt(null);
+        setPersistentError(result.message);
+        return;
       }
-      setError(verifyError);
+      setError(result.message);
       return;
     }
 
-    setCreateProfileStartedAt(null);
-    if (nextSession) router.replace('/(tabs)');
+    // Account created — sign in with the email + password the user just set.
+    const { error: signInError } = await signInWithPassword(email.trim(), password);
+    setBusyAction(null);
+    if (signInError) {
+      setEntryMode('signIn');
+      setStep('entry');
+      setPersistentError('Your account is ready. Please sign in with your email and password.');
+      return;
+    }
+    router.replace('/(tabs)');
   };
 
+  const handleResendSignupCode = async () => {
+    setBusyAction('resend');
+    setError(null);
+    const result = await sendSignupCode(email.trim(), username.trim());
+    setBusyAction(null);
+    if (!result.ok) setError(result.message);
+  };
+
+  const backToCreateProfile = () => {
+    setStep('entry');
+    setError(null);
+    setCode('');
+  };
+
+  // ── Fallback / recovery sign-in with an email verification code ─────────────
   const openVerificationCodeSignIn = () => {
     setStep('signInCodeEmail');
     setError(null);
@@ -217,11 +192,10 @@ export default function AuthScreen() {
     if (nextSession) router.replace('/(tabs)');
   };
 
-  const handleResendCode = async () => {
+  const handleResendSignInCode = async () => {
     setBusyAction('resend');
     setError(null);
-    const resend = step === 'signInCodeVerify' ? sendSignInCode : resendSignupCode;
-    const { error: resendError } = await resend(pendingEmail);
+    const { error: resendError } = await sendSignInCode(pendingEmail);
     setBusyAction(null);
     if (resendError) setError(resendError);
   };
@@ -244,12 +218,10 @@ export default function AuthScreen() {
     router.replace('/(tabs)');
   };
 
-  const changeEmail = async () => {
+  const changeEmail = () => {
     setStep('entry');
     setError(null);
     setCode('');
-    setCreateProfileStartedAt(null);
-    await clearPendingUsername();
   };
 
   return (
@@ -272,11 +244,11 @@ export default function AuthScreen() {
             {step === 'signupCode' ? (
               <View style={styles.codeWrap}>
                 <View style={styles.headerCopy}>
-                  <Text style={styles.cardTitle}>Check your email</Text>
+                  <Text style={styles.cardTitle}>Verify your email</Text>
                   <Text style={styles.cardSubtitle}>Enter the 8-digit code we sent to your email.</Text>
                 </View>
                 <View style={styles.fieldGroup}>
-                  <Text style={styles.label}>Code</Text>
+                  <Text style={styles.label}>Verification code</Text>
                   <TextInput
                     keyboardType="number-pad"
                     maxLength={8}
@@ -284,14 +256,14 @@ export default function AuthScreen() {
                     placeholderTextColor={colors.textTertiary}
                     style={[styles.input, styles.codeInput]}
                     value={code}
-                    onChangeText={(value) => setCode(value.replace(/\s/g, ''))}
+                    onChangeText={(value) => { setCode(value.replace(/\s/g, '')); setError(null); }}
                   />
                 </View>
                 {error ? <Text style={styles.error}>{error}</Text> : null}
-                <PrimaryButton label="Verify and create account" onPress={handleVerifySignup} loading={busyAction === 'verify'} disabled={busyAction !== null} />
-                <SecondaryButton label="Resend code" tone="ice" onPress={handleResendCode} disabled={busyAction !== null} />
-                <Pressable accessibilityRole="button" onPress={changeEmail} style={styles.textButton}>
-                  <Text style={styles.textButtonLabel}>Change email</Text>
+                <PrimaryButton label="Verify and create account" onPress={handleVerifyAndCreate} loading={busyAction === 'verify'} disabled={busyAction !== null} />
+                <SecondaryButton label="Resend code" tone="ice" onPress={handleResendSignupCode} disabled={busyAction !== null} />
+                <Pressable accessibilityRole="button" onPress={backToCreateProfile} style={styles.textButton}>
+                  <Text style={styles.textButtonLabel}>Back to create profile</Text>
                 </Pressable>
               </View>
             ) : step === 'signInCodeEmail' ? (
@@ -317,7 +289,7 @@ export default function AuthScreen() {
                   <Text style={styles.cardSubtitle}>Enter the 8-digit code we sent to your email.</Text>
                 </View>
                 <View style={styles.fieldGroup}>
-                  <Text style={styles.label}>Code</Text>
+                  <Text style={styles.label}>Verification code</Text>
                   <TextInput
                     keyboardType="number-pad"
                     maxLength={8}
@@ -325,12 +297,12 @@ export default function AuthScreen() {
                     placeholderTextColor={colors.textTertiary}
                     style={[styles.input, styles.codeInput]}
                     value={code}
-                    onChangeText={(value) => setCode(value.replace(/\s/g, ''))}
+                    onChangeText={(value) => { setCode(value.replace(/\s/g, '')); setError(null); }}
                   />
                 </View>
                 {error ? <Text style={styles.error}>{error}</Text> : null}
                 <PrimaryButton label="Verify and sign in" onPress={handleVerifySignInCode} loading={busyAction === 'verify'} disabled={busyAction !== null} />
-                <SecondaryButton label="Resend code" tone="ice" onPress={handleResendCode} disabled={busyAction !== null} />
+                <SecondaryButton label="Resend code" tone="ice" onPress={handleResendSignInCode} disabled={busyAction !== null} />
                 <Pressable accessibilityRole="button" onPress={changeEmail} style={styles.textButton}>
                   <Text style={styles.textButtonLabel}>Back to password sign in</Text>
                 </Pressable>
@@ -338,46 +310,60 @@ export default function AuthScreen() {
             ) : (
               <>
                 <View style={styles.modeSwitch}>
-                  <ModeButton label="Create Profile" active={entryMode === 'createProfile'} onPress={() => void switchMode('createProfile')} />
-                  <ModeButton label="Sign In" active={entryMode === 'signIn'} onPress={() => void switchMode('signIn')} />
+                  <ModeButton label="Create Profile" active={entryMode === 'createProfile'} onPress={() => switchMode('createProfile')} />
+                  <ModeButton label="Sign In" active={entryMode === 'signIn'} onPress={() => switchMode('signIn')} />
                 </View>
                 <View style={styles.headerCopy}>
-                  <Text style={styles.cardTitle}>{entryMode === 'createProfile' ? 'Create profile' : 'Welcome back'}</Text>
+                  <Text style={styles.cardTitle}>{entryMode === 'createProfile' ? 'Create your profile' : 'Welcome back'}</Text>
                   <Text style={styles.cardSubtitle}>
                     {entryMode === 'createProfile'
-                      ? 'Create your account with email and password.'
+                      ? 'We’ll send a code to verify your email before creating your account.'
                       : 'Sign in with the email and password on your account.'}
                   </Text>
                   {entryMode === 'signIn' ? (
                     <Text style={styles.macHelper}>Already used Youmi Lens on Mac? Sign in with the same email.</Text>
                   ) : null}
                 </View>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.label}>Email</Text>
-                  <TextInput autoCapitalize="none" autoComplete="email" keyboardType="email-address" placeholder="student@example.com" placeholderTextColor={colors.textTertiary} style={styles.input} value={email} onChangeText={(value) => { setEmail(value); setPersistentError(null); }} />
-                </View>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.label}>Password</Text>
-                  <TextInput autoCapitalize="none" autoComplete={entryMode === 'createProfile' ? 'new-password' : 'current-password'} secureTextEntry placeholder="Password" placeholderTextColor={colors.textTertiary} style={styles.input} value={password} onChangeText={setPassword} />
-                </View>
+
                 {entryMode === 'createProfile' ? (
                   <>
-                    <View style={styles.fieldGroup}>
-                      <Text style={styles.label}>Confirm Password</Text>
-                      <TextInput autoCapitalize="none" autoComplete="new-password" secureTextEntry placeholder="Confirm password" placeholderTextColor={colors.textTertiary} style={styles.input} value={confirmPassword} onChangeText={setConfirmPassword} />
-                    </View>
                     <View style={styles.fieldGroup}>
                       <Text style={styles.label}>Username</Text>
-                      <TextInput autoCapitalize="none" placeholder="yourname" placeholderTextColor={colors.textTertiary} style={styles.input} value={username} onChangeText={setUsername} />
+                      <TextInput autoCapitalize="none" placeholder="yourname" placeholderTextColor={colors.textTertiary} style={styles.input} value={username} onChangeText={(value) => { setUsername(value); setError(null); }} />
+                    </View>
+                    <View style={styles.fieldGroup}>
+                      <Text style={styles.label}>Email</Text>
+                      <TextInput autoCapitalize="none" autoComplete="email" keyboardType="email-address" placeholder="student@example.com" placeholderTextColor={colors.textTertiary} style={styles.input} value={email} onChangeText={(value) => { setEmail(value); setError(null); setPersistentError(null); }} />
+                    </View>
+                    <View style={styles.fieldGroup}>
+                      <Text style={styles.label}>Password</Text>
+                      <TextInput autoCapitalize="none" autoComplete="new-password" secureTextEntry placeholder="Password" placeholderTextColor={colors.textTertiary} style={styles.input} value={password} onChangeText={(value) => { setPassword(value); setError(null); }} />
+                    </View>
+                    <View style={styles.fieldGroup}>
+                      <Text style={styles.label}>Confirm Password</Text>
+                      <TextInput autoCapitalize="none" autoComplete="new-password" secureTextEntry placeholder="Confirm password" placeholderTextColor={colors.textTertiary} style={styles.input} value={confirmPassword} onChangeText={(value) => { setConfirmPassword(value); setError(null); }} />
                     </View>
                   </>
-                ) : null}
+                ) : (
+                  <>
+                    <View style={styles.fieldGroup}>
+                      <Text style={styles.label}>Email</Text>
+                      <TextInput autoCapitalize="none" autoComplete="email" keyboardType="email-address" placeholder="student@example.com" placeholderTextColor={colors.textTertiary} style={styles.input} value={email} onChangeText={(value) => { setEmail(value); setPersistentError(null); setError(null); }} />
+                    </View>
+                    <View style={styles.fieldGroup}>
+                      <Text style={styles.label}>Password</Text>
+                      <TextInput autoCapitalize="none" autoComplete="current-password" secureTextEntry placeholder="Password" placeholderTextColor={colors.textTertiary} style={styles.input} value={password} onChangeText={(value) => { setPassword(value); setError(null); }} />
+                    </View>
+                  </>
+                )}
+
                 {error ? <Text style={styles.error}>{error}</Text> : null}
+
                 {entryMode === 'createProfile' ? (
                   <>
-                    <PrimaryButton label="Create profile" onPress={handleCreateProfile} loading={busyAction === 'send'} disabled={busyAction !== null} />
-                    <Text style={styles.helper}>Already have an account? Sign in instead.</Text>
-                    <Pressable accessibilityRole="button" onPress={() => void switchMode('signIn')} style={styles.textButton}>
+                    <PrimaryButton label="Send verification code" onPress={handleSendSignupCode} loading={busyAction === 'send'} disabled={busyAction !== null} />
+                    <Text style={styles.helper}>We’ll verify your email before creating your account.</Text>
+                    <Pressable accessibilityRole="button" onPress={() => switchMode('signIn')} style={styles.textButton}>
                       <Text style={styles.textButtonLabel}>Already have an account? Sign in</Text>
                     </Pressable>
                   </>
@@ -388,7 +374,7 @@ export default function AuthScreen() {
                     <Pressable accessibilityRole="button" onPress={openVerificationCodeSignIn} style={styles.textButton}>
                       <Text style={styles.textButtonLabel}>Email verification code</Text>
                     </Pressable>
-                    <Pressable accessibilityRole="button" onPress={() => void switchMode('createProfile')} style={styles.textButton}>
+                    <Pressable accessibilityRole="button" onPress={() => switchMode('createProfile')} style={styles.textButton}>
                       <Text style={styles.textButtonLabel}>Create profile</Text>
                     </Pressable>
                   </>

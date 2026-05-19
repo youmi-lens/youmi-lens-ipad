@@ -1,4 +1,3 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { EmailOtpType, Session, User } from '@supabase/supabase-js';
 import * as Linking from 'expo-linking';
 import {
@@ -15,7 +14,6 @@ import { supabase, supabaseConfigError } from './supabase';
 
 export const AUTH_CALLBACK_URL = 'youmilens://auth/callback';
 
-const PENDING_USERNAME_KEY = 'youmi.pendingUsername.v1';
 const EMAIL_OTP_TYPES = new Set<EmailOtpType>([
   'signup',
   'invite',
@@ -38,19 +36,9 @@ type AuthContextValue = {
   session: Session | null;
   loading: boolean;
   username: string | null;
-  createProfileWithPassword: (email: string, password: string, username: string) => Promise<VerifySignupResult>;
-  resendSignupCode: (email: string) => Promise<AuthResult>;
   sendSignInCode: (email: string) => Promise<AuthResult>;
-  verifySignupCodeAndCreateProfile: (
-    email: string,
-    code: string,
-    username: string,
-    createProfileStartedAt: number,
-  ) => Promise<VerifySignupResult>;
   verifySignInCode: (email: string, code: string) => Promise<VerifySignupResult>;
   signInWithPassword: (email: string, password: string) => Promise<AuthResult>;
-  savePendingUsername: (username: string) => Promise<void>;
-  clearPendingUsername: () => Promise<void>;
   refreshSession: () => Promise<Session | null>;
   signOut: () => Promise<AuthResult>;
 };
@@ -189,77 +177,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [applySessionState]);
 
-  const savePendingUsername = useCallback(async (nextUsername: string) => {
-    await AsyncStorage.setItem(PENDING_USERNAME_KEY, nextUsername);
-  }, []);
-
-  const clearPendingUsername = useCallback(async () => {
-    await AsyncStorage.removeItem(PENDING_USERNAME_KEY);
-  }, []);
-
-  const upsertProfileUsername = useCallback(async (nextUser: User, nextUsername: string) => {
-    const { error } = await supabase.from('profiles').upsert({
-      id: nextUser.id,
-      username: nextUsername,
-      updated_at: new Date().toISOString(),
-    });
-
-    if (error) {
-      console.warn('[auth] unable to save profile username', error.message);
-      return;
-    }
-
-    setUsername(nextUsername);
-  }, []);
-
-  const createProfileWithPassword = useCallback(
-    async (email: string, password: string, nextUsername: string): Promise<VerifySignupResult> => {
-      if (supabaseConfigError) return { error: supabaseConfigError, session: null };
-
-      const { data, error } = await supabase.auth.signUp({
-        email,
-        password,
-        options: {
-          data: { username: nextUsername },
-        },
-      });
-
-      if (error) {
-        if (error.message.toLowerCase().includes('already registered')) {
-          return {
-            error: 'This email already has a Youmi Lens account. Please sign in or use an email verification code.',
-            session: null,
-          };
-        }
-        return { error: error.message, session: null };
-      }
-      if (!data.user) {
-        return { error: 'We could not create your account. Please try again.', session: null };
-      }
-
-      if (data.session) {
-        setUsername(nextUsername);
-        await upsertProfileUsername(data.user, nextUsername);
-        await clearPendingUsername();
-        await applySessionState(data.session);
-      }
-
-      return { error: null, session: data.session };
-    },
-    [applySessionState, clearPendingUsername, upsertProfileUsername],
-  );
-
-  const resendSignupCode = useCallback(async (email: string): Promise<AuthResult> => {
-    if (supabaseConfigError) return { error: supabaseConfigError };
-
-    const { error } = await supabase.auth.resend({
-      type: 'signup',
-      email,
-    });
-
-    return { error: error?.message ?? null };
-  }, []);
-
   const sendSignInCode = useCallback(async (email: string): Promise<AuthResult> => {
     if (supabaseConfigError) return { error: supabaseConfigError };
 
@@ -312,70 +229,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return { error: null, session: data.session };
   }, [applySessionState]);
 
-  const verifySignupCodeAndCreateProfile = useCallback(
-    async (
-      email: string,
-      code: string,
-      nextUsername: string,
-      createProfileStartedAt: number,
-    ): Promise<VerifySignupResult> => {
-      if (supabaseConfigError) return { error: supabaseConfigError, session: null };
-
-      const { data: otpData, error: otpError } = await supabase.auth.verifyOtp({
-        email,
-        token: code,
-        type: 'signup',
-      });
-
-      if (otpError) return { error: otpError.message, session: null };
-      if (!otpData.session || !otpData.user) {
-        return { error: 'Verification succeeded, but no session was created. Please try again.', session: null };
-      }
-
-      const createdAtMillis = otpData.user.created_at ? Date.parse(otpData.user.created_at) : Number.NaN;
-      const clearlyExistingAccount =
-        Number.isFinite(createdAtMillis) && createdAtMillis < createProfileStartedAt - 60_000;
-
-      if (!Number.isFinite(createdAtMillis)) {
-        console.warn('[auth] verified user missing created_at during create-profile flow');
-      }
-
-      const metadataUsername =
-        typeof otpData.user.user_metadata?.username === 'string' ? otpData.user.user_metadata.username : null;
-      let existingProfileUsername: string | null = null;
-      if (!Number.isFinite(createdAtMillis)) {
-        const { data: existingProfile, error: existingProfileError } = await supabase
-          .from('profiles')
-          .select('username')
-          .eq('id', otpData.user.id)
-          .maybeSingle();
-        if (existingProfileError) {
-          console.warn('[auth] unable to inspect profile during create-profile flow', existingProfileError.message);
-        } else {
-          existingProfileUsername = existingProfile?.username ?? null;
-        }
-      }
-
-      if (clearlyExistingAccount || (!Number.isFinite(createdAtMillis) && Boolean(metadataUsername || existingProfileUsername))) {
-        await supabase.auth.signOut();
-        await clearPendingUsername();
-        await applySessionState(null);
-        return {
-          error: 'This email already has a Youmi Lens account. Please sign in or use an email verification code.',
-          session: null,
-        };
-      }
-
-      setUsername(nextUsername);
-      await upsertProfileUsername(otpData.user, nextUsername);
-      await clearPendingUsername();
-      await applySessionState(otpData.session);
-
-      return { error: null, session: otpData.session };
-    },
-    [applySessionState, clearPendingUsername, upsertProfileUsername],
-  );
-
   const signInWithPassword = useCallback(async (email: string, password: string): Promise<AuthResult> => {
     if (supabaseConfigError) return { error: supabaseConfigError };
 
@@ -410,14 +263,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       session,
       loading,
       username,
-      createProfileWithPassword,
-      resendSignupCode,
       sendSignInCode,
-      verifySignupCodeAndCreateProfile,
       verifySignInCode,
       signInWithPassword,
-      savePendingUsername,
-      clearPendingUsername,
       refreshSession,
       signOut,
     }),
@@ -426,14 +274,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       session,
       loading,
       username,
-      createProfileWithPassword,
-      resendSignupCode,
       sendSignInCode,
-      verifySignupCodeAndCreateProfile,
       verifySignInCode,
       signInWithPassword,
-      savePendingUsername,
-      clearPendingUsername,
       refreshSession,
       signOut,
     ],
