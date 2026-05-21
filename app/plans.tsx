@@ -1,11 +1,15 @@
 /**
  * Plans / Upgrade screen.
  *
- * Lists the four subscription tiers, marks the active one, and exposes a
+ * Lists the four subscription tiers, marks the local preview selection, and exposes a
  * Restore Purchases action. The actual "subscribe" call goes through the
  * PurchaseService abstraction in lib/purchases.ts — currently a local mock,
  * so this screen is fully usable in an Xcode-installed development build
  * without uploading anything to App Store Connect.
+ *
+ * TODO(subscriptions): once StoreKit is real, do not use local mock state as
+ * plan truth. Fetch the backend effective plan from /api/quota/status, mark
+ * that tier as current, and let Settings + Plans render from the same source.
  */
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
@@ -33,7 +37,7 @@ export default function PlansScreen() {
   const { user } = useAuth();
   const userId = user?.id ?? null;
 
-  const [activePlan, setActivePlan] = useState<PlanId | null>(null);
+  const [mockPreviewPlan, setMockPreviewPlan] = useState<PlanId | null>(null);
   const [loading, setLoading] = useState(true);
   const [busyPlanId, setBusyPlanId] = useState<PlanId | null>(null);
   const [restoring, setRestoring] = useState(false);
@@ -41,7 +45,7 @@ export default function PlansScreen() {
   const loadActive = useCallback(async () => {
     setLoading(true);
     try {
-      setActivePlan(await purchaseService.getActivePlan(userId));
+      setMockPreviewPlan(await purchaseService.getActivePlan(userId));
     } finally {
       setLoading(false);
     }
@@ -53,7 +57,7 @@ export default function PlansScreen() {
 
   const handleSelectPlan = useCallback(
     async (planId: PlanId) => {
-      if (planId === activePlan) return;
+      if (planId === mockPreviewPlan) return;
 
       // Paid plans are not yet purchasable. They show as "Coming Soon" and tap
       // surfaces an informational notice instead of changing the active plan,
@@ -74,13 +78,13 @@ export default function PlansScreen() {
         Alert.alert('Could not switch plan', result.reason);
         return;
       }
-      setActivePlan(result.planId);
+      setMockPreviewPlan(result.planId);
       Alert.alert(
         'Switched to Free',
         'Test mode — your selection has been recorded locally on this device.',
       );
     },
-    [activePlan, userId],
+    [mockPreviewPlan, userId],
   );
 
   const handleRestore = useCallback(async () => {
@@ -91,7 +95,7 @@ export default function PlansScreen() {
       Alert.alert('Restore unavailable', result.reason);
       return;
     }
-    setActivePlan(result.planId);
+    setMockPreviewPlan(result.planId);
     const planName = planById(result.planId).name;
     Alert.alert(
       'Restore Purchases',
@@ -127,14 +131,14 @@ export default function PlansScreen() {
               <View style={styles.testNotice}>
                 <Ionicons name="construct-outline" size={14} color={colors.deepNavy} />
                 <Text style={styles.testNoticeText}>
-                  Test mode — subscriptions are simulated locally on this device. No real payment is
-                  processed.
+                  Test mode — this screen is a local preview only. Your real plan and quota still
+                  come from the backend Settings card.
                 </Text>
               </View>
             ) : null}
           </View>
 
-          {loading || activePlan === null ? (
+          {loading || mockPreviewPlan === null ? (
             <View style={styles.loading}>
               <ActivityIndicator color={colors.deepNavy} />
             </View>
@@ -144,7 +148,7 @@ export default function PlansScreen() {
                 <PlanCard
                   key={plan.id}
                   plan={plan}
-                  isActive={activePlan === plan.id}
+                  isMockActive={mockPreviewPlan === plan.id}
                   isBusy={busyPlanId === plan.id}
                   onSelect={() => void handleSelectPlan(plan.id)}
                 />
@@ -161,7 +165,7 @@ export default function PlansScreen() {
               style={styles.restoreButton}
             />
             <Text style={styles.restoreNote}>
-              Test mode — restore will activate when Apple in-app purchase is live.
+              Test mode — restore will activate when Apple in-app purchase is live. Until then, Settings remains the source of truth for your real plan.
             </Text>
           </View>
 
@@ -178,25 +182,25 @@ export default function PlansScreen() {
 
 function PlanCard({
   plan,
-  isActive,
+  isMockActive,
   isBusy,
   onSelect,
 }: {
   plan: Plan;
-  isActive: boolean;
+  isMockActive: boolean;
   isBusy: boolean;
   onSelect: () => void;
 }) {
   return (
-    <GlassCard style={StyleSheet.flatten([styles.planCard, isActive && styles.planCardActive])}>
+    <GlassCard style={StyleSheet.flatten([styles.planCard, isMockActive && styles.planCardActive])}>
       <View style={styles.planHeader}>
         <View style={styles.planNameBlock}>
           <View style={styles.planNameRow}>
             <Text style={styles.planName}>{plan.name}</Text>
-            {isActive ? (
+            {isMockActive ? (
               <View style={styles.activeChip}>
                 <Ionicons name="checkmark" size={12} color="#157A58" />
-                <Text style={styles.activeChipText}>CURRENT</Text>
+                <Text style={styles.activeChipText}>PREVIEW</Text>
               </View>
             ) : null}
           </View>
@@ -217,8 +221,8 @@ function PlanCard({
         ))}
       </View>
 
-      {isActive ? (
-        <Text style={styles.currentLine}>You're on this plan.</Text>
+      {isMockActive ? (
+        <Text style={styles.currentLine}>Preview selection only — real plan is shown in Settings.</Text>
       ) : plan.id === 'free' ? (
         <SecondaryButton
           label="Switch to Free"
