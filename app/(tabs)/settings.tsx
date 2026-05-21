@@ -265,6 +265,16 @@ export default function SettingsScreen() {
             )}
           </Section>
 
+          {/* Upgrade — entry to the Plans screen (StoreKit testing scaffold) */}
+          <Section title="UPGRADE">
+            <Row
+              icon="diamond-outline"
+              label="See Plans"
+              onPress={() => router.push('/plans')}
+              last
+            />
+          </Section>
+
           {/* Language — English captions + Chinese study support, fixed for V1 */}
           <Section
             title="LANGUAGE"

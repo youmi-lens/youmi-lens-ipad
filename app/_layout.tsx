@@ -47,6 +47,7 @@ export default function RootLayout() {
                     <Stack.Screen name="lecture/[id]" />
                     <Stack.Screen name="course/[id]" />
                     <Stack.Screen name="recently-deleted" />
+                    <Stack.Screen name="plans" />
                   </Stack>
                 </AuthGate>
               </RecordingNotesProvider>
