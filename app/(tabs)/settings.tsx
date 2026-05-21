@@ -5,6 +5,7 @@ import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { GlassCard } from '@/components/GlassCard';
+import { RenameModal } from '@/components/RenameModal';
 import { SecondaryButton } from '@/components/SecondaryButton';
 import { StatusPill } from '@/components/StatusPill';
 import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
@@ -87,11 +88,13 @@ function PlanLine({ label, value }: { label: string; value: string }) {
 export default function SettingsScreen() {
   const router = useRouter();
   const { courses, lectures, clearAll } = useData();
-  const { user, username, signOut, session } = useAuth();
+  const { user, username, signOut, session, updateUsername } = useAuth();
 
   const [planStatus, setPlanStatus] = useState<PlanStatus | null>(null);
   const [planLoading, setPlanLoading] = useState(true);
   const [planError, setPlanError] = useState<string | null>(null);
+  const [usernameModalVisible, setUsernameModalVisible] = useState(false);
+  const [usernameSaving, setUsernameSaving] = useState(false);
 
   // Load the live plan from the backend. Any previously loaded plan stays
   // visible if a refresh fails, so Settings never blocks on a network error.
@@ -173,6 +176,29 @@ export default function SettingsScreen() {
     }
   };
 
+  const handleSaveUsername = async (value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      Alert.alert('Username required', 'Username cannot be empty.');
+      return;
+    }
+    if (trimmed.length < 2 || trimmed.length > 64) {
+      Alert.alert('Username too short or long', 'Username must be 2–64 characters.');
+      return;
+    }
+
+    setUsernameSaving(true);
+    const { error } = await updateUsername(trimmed);
+    setUsernameSaving(false);
+    if (error) {
+      Alert.alert('Unable to update username', error);
+      return;
+    }
+
+    setUsernameModalVisible(false);
+    Alert.alert('Username updated', 'Your profile name has been updated.');
+  };
+
   return (
     <SafeAreaView style={styles.root} edges={['top', 'left', 'right']}>
       <ScrollView
@@ -193,6 +219,12 @@ export default function SettingsScreen() {
                 <Text style={styles.accountEmail}>{email}</Text>
               </View>
             </View>
+            <Row
+              icon="person-outline"
+              label="Edit Username"
+              value={username ?? 'Not set'}
+              onPress={() => setUsernameModalVisible(true)}
+            />
             <SecondaryButton
               label="Sign Out"
               icon="log-out-outline"
@@ -356,6 +388,15 @@ export default function SettingsScreen() {
           <Text style={styles.footer}>Youmi Lens for iPad · Version 1.0.0</Text>
         </View>
       </ScrollView>
+      <RenameModal
+        visible={usernameModalVisible}
+        title="Edit Username"
+        label="Username"
+        initialValue={username ?? ''}
+        placeholder="Your username"
+        onCancel={() => { if (!usernameSaving) setUsernameModalVisible(false); }}
+        onSave={(value) => { void handleSaveUsername(value); }}
+      />
     </SafeAreaView>
   );
 }

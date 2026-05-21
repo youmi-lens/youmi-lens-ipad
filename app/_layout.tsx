@@ -61,7 +61,7 @@ export default function RootLayout() {
 }
 
 function AuthGate({ children }: { children: React.ReactNode }) {
-  const { session, loading } = useAuth();
+  const { session, loading, isResettingPassword } = useAuth();
   const segments = useSegments();
   const inAuthRoute = segments[0] === 'auth';
 
@@ -77,7 +77,7 @@ function AuthGate({ children }: { children: React.ReactNode }) {
     return <Redirect href="/auth" />;
   }
 
-  if (session && inAuthRoute) {
+  if (session && inAuthRoute && !isResettingPassword) {
     return <Redirect href="/(tabs)" />;
   }
 

@@ -1,5 +1,6 @@
+import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   KeyboardAvoidingView,
   Platform,
@@ -20,7 +21,14 @@ import { useAuth } from '@/lib/auth';
 import { checkEmailExists } from '@/lib/checkEmail';
 
 type EntryMode = 'createProfile' | 'signIn';
-type AuthStep = 'entry' | 'signupCode' | 'signInCodeEmail' | 'signInCodeVerify';
+type AuthStep =
+  | 'entry'
+  | 'signupCode'
+  | 'signInCodeEmail'
+  | 'signInCodeVerify'
+  | 'resetEmail'
+  | 'resetVerify'
+  | 'resetNewPassword';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const EXISTING_ACCOUNT_MESSAGE =
@@ -36,6 +44,11 @@ export default function AuthScreen() {
     sendSignInCode,
     verifySignInCode,
     signInWithPassword,
+    sendPasswordResetCode,
+    verifyPasswordResetCode,
+    updatePassword,
+    signOut,
+    isResettingPassword,
   } = useAuth();
   const [entryMode, setEntryMode] = useState<EntryMode>('signIn');
   const [step, setStep] = useState<AuthStep>('entry');
@@ -47,9 +60,21 @@ export default function AuthScreen() {
   const [code, setCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [persistentError, setPersistentError] = useState<string | null>(null);
-  const [busyAction, setBusyAction] = useState<'send' | 'verify' | 'signin' | 'resend' | null>(null);
+  const [resetPassword, setResetPassword] = useState('');
+  const [resetConfirmPassword, setResetConfirmPassword] = useState('');
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [signInPasswordVisible, setSignInPasswordVisible] = useState(false);
+  const [createPasswordVisible, setCreatePasswordVisible] = useState(false);
+  const [createConfirmPasswordVisible, setCreateConfirmPasswordVisible] = useState(false);
+  const [resetPasswordVisible, setResetPasswordVisible] = useState(false);
+  const [resetConfirmPasswordVisible, setResetConfirmPasswordVisible] = useState(false);
+  const [busyAction, setBusyAction] = useState<'send' | 'verify' | 'signin' | 'resend' | 'updatePassword' | null>(null);
 
-  if (session) router.replace('/(tabs)');
+  useEffect(() => {
+    if (session && !isResettingPassword && step !== 'resetNewPassword') {
+      router.replace('/(tabs)');
+    }
+  }, [isResettingPassword, router, session, step]);
 
   const validateEmail = (value: string) => {
     if (!value.trim()) return 'Please enter your email.';
@@ -63,6 +88,9 @@ export default function AuthScreen() {
     setError(null);
     setPersistentError(null);
     setCode('');
+    setResetPassword('');
+    setResetConfirmPassword('');
+    setSuccessMessage(null);
   };
 
   // ── Create Profile: step 1 — Supabase signUp, which emails the code ─────────
@@ -166,6 +194,9 @@ export default function AuthScreen() {
     setStep('entry');
     setError(null);
     setCode('');
+    setResetPassword('');
+    setResetConfirmPassword('');
+    setSuccessMessage(null);
   };
 
   // ── Fallback / recovery sign-in with an email verification code ─────────────
@@ -174,6 +205,9 @@ export default function AuthScreen() {
     setError(null);
     setPersistentError(null);
     setCode('');
+    setResetPassword('');
+    setResetConfirmPassword('');
+    setSuccessMessage(null);
   };
 
   const handleSendSignInCode = async () => {
@@ -243,6 +277,112 @@ export default function AuthScreen() {
     setStep('entry');
     setError(null);
     setCode('');
+    setResetPassword('');
+    setResetConfirmPassword('');
+    setSuccessMessage(null);
+  };
+
+  const openPasswordReset = () => {
+    setStep('resetEmail');
+    setEntryMode('signIn');
+    setError(null);
+    setPersistentError(null);
+    setSuccessMessage(null);
+    setCode('');
+    setResetPassword('');
+    setResetConfirmPassword('');
+  };
+
+  const backToPasswordSignIn = () => {
+    setStep('entry');
+    setEntryMode('signIn');
+    setError(null);
+    setPersistentError(null);
+    setSuccessMessage(null);
+    setCode('');
+    setResetPassword('');
+    setResetConfirmPassword('');
+  };
+
+  const handleSendPasswordResetCode = async () => {
+    const trimmedEmail = email.trim();
+    const emailError = validateEmail(trimmedEmail);
+    if (emailError) return setError(emailError);
+
+    setBusyAction('send');
+    setError(null);
+    setSuccessMessage(null);
+    const { error: sendError } = await sendPasswordResetCode(trimmedEmail);
+    setBusyAction(null);
+
+    if (sendError && !sendError.toLowerCase().includes('user not found')) {
+      setError(sendError);
+      return;
+    }
+
+    setPendingEmail(trimmedEmail);
+    setCode('');
+    setSuccessMessage('If an account exists for this email, we sent a verification code.');
+    setStep('resetVerify');
+  };
+
+  const handleVerifyPasswordResetCode = async () => {
+    const trimmedCode = code.replace(/\s/g, '');
+    if (!trimmedCode) return setError('Please enter the verification code.');
+    if (!/^\d{6,8}$/.test(trimmedCode)) return setError('Enter the verification code from your email.');
+
+    setBusyAction('verify');
+    setError(null);
+    const { error: verifyError, session: recoverySession } = await verifyPasswordResetCode(pendingEmail, trimmedCode);
+    setBusyAction(null);
+    if (verifyError) {
+      setError(verifyError);
+      return;
+    }
+    if (recoverySession) {
+      setResetPassword('');
+      setResetConfirmPassword('');
+      setSuccessMessage(null);
+      setStep('resetNewPassword');
+    }
+  };
+
+  const handleResendPasswordResetCode = async () => {
+    setBusyAction('resend');
+    setError(null);
+    const { error: resendError } = await sendPasswordResetCode(pendingEmail);
+    setBusyAction(null);
+    if (resendError && !resendError.toLowerCase().includes('user not found')) {
+      setError(resendError);
+      return;
+    }
+    setSuccessMessage('If an account exists for this email, we sent a verification code.');
+  };
+
+  const handleUpdatePassword = async () => {
+    if (!resetPassword) return setError('Please enter a new password.');
+    if (resetPassword.length < 8) return setError('Password must be at least 8 characters.');
+    if (!resetConfirmPassword) return setError('Please confirm your new password.');
+    if (resetPassword !== resetConfirmPassword) return setError('Passwords do not match.');
+
+    setBusyAction('updatePassword');
+    setError(null);
+    const { error: updateError } = await updatePassword(resetPassword);
+    if (updateError) {
+      setBusyAction(null);
+      setError(updateError);
+      return;
+    }
+
+    await signOut();
+    setBusyAction(null);
+    setPassword('');
+    setResetPassword('');
+    setResetConfirmPassword('');
+    setCode('');
+    setStep('entry');
+    setEntryMode('signIn');
+    setSuccessMessage('Password updated. Please sign in with your new password.');
   };
 
   return (
@@ -262,7 +402,9 @@ export default function AuthScreen() {
                 ? 'Verify your email to finish creating your profile.'
                 : step === 'signInCodeEmail' || step === 'signInCodeVerify'
                   ? 'Sign in with an email verification code.'
-                  : 'A calm lecture workspace for iPad.'}
+                  : step === 'resetEmail' || step === 'resetVerify' || step === 'resetNewPassword'
+                    ? 'Reset your password with an email verification code.'
+                    : 'A calm lecture workspace for iPad.'}
             </Text>
           </View>
 
@@ -291,6 +433,88 @@ export default function AuthScreen() {
                 <Pressable accessibilityRole="button" onPress={backToCreateProfile} style={styles.textButton}>
                   <Text style={styles.textButtonLabel}>Back to create profile</Text>
                 </Pressable>
+              </View>
+            ) : step === 'resetEmail' ? (
+              <View style={styles.codeWrap}>
+                <View style={styles.headerCopy}>
+                  <Text style={styles.cardTitle}>Reset your password</Text>
+                  <Text style={styles.cardSubtitle}>Enter your email and we’ll send you a verification code.</Text>
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.label}>Email</Text>
+                  <TextInput autoCapitalize="none" autoComplete="email" keyboardType="email-address" placeholder="student@example.com" placeholderTextColor={colors.textTertiary} style={styles.input} value={email} onChangeText={(value) => { setEmail(value); setError(null); setSuccessMessage(null); }} />
+                </View>
+                {successMessage ? <Text style={styles.success}>{successMessage}</Text> : null}
+                {error ? <Text style={styles.error}>{error}</Text> : null}
+                <PrimaryButton label="Send verification code" onPress={handleSendPasswordResetCode} loading={busyAction === 'send'} disabled={busyAction !== null} />
+                <Pressable accessibilityRole="button" onPress={backToPasswordSignIn} style={styles.textButton}>
+                  <Text style={styles.textButtonLabel}>Back to password sign in</Text>
+                </Pressable>
+              </View>
+            ) : step === 'resetVerify' ? (
+              <View style={styles.codeWrap}>
+                <View style={styles.headerCopy}>
+                  <Text style={styles.cardTitle}>Check your email</Text>
+                  <Text style={styles.cardSubtitle}>Enter the verification code we sent to your email.</Text>
+                </View>
+                {successMessage ? <Text style={styles.success}>{successMessage}</Text> : null}
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.label}>Verification code</Text>
+                  <TextInput
+                    keyboardType="number-pad"
+                    maxLength={8}
+                    placeholder="Verification code"
+                    placeholderTextColor={colors.textTertiary}
+                    style={[styles.input, styles.codeInput]}
+                    value={code}
+                    onChangeText={(value) => { setCode(value.replace(/\s/g, '')); setError(null); }}
+                  />
+                </View>
+                {error ? <Text style={styles.error}>{error}</Text> : null}
+                <PrimaryButton label="Verify code" onPress={handleVerifyPasswordResetCode} loading={busyAction === 'verify'} disabled={busyAction !== null} />
+                <SecondaryButton label="Resend code" tone="ice" onPress={handleResendPasswordResetCode} disabled={busyAction !== null} />
+                <Pressable accessibilityRole="button" onPress={backToPasswordSignIn} style={styles.textButton}>
+                  <Text style={styles.textButtonLabel}>Back to password sign in</Text>
+                </Pressable>
+              </View>
+            ) : step === 'resetNewPassword' ? (
+              <View style={styles.codeWrap}>
+                <View style={styles.headerCopy}>
+                  <Text style={styles.cardTitle}>Create a new password</Text>
+                  <Text style={styles.cardSubtitle}>Choose a new password for your Youmi Lens account.</Text>
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.label}>New Password</Text>
+                  <PasswordInput
+                    value={resetPassword}
+                    onChangeText={(value) => { setResetPassword(value); setError(null); }}
+                    placeholder="New password"
+                    visible={resetPasswordVisible}
+                    onToggleVisible={() => setResetPasswordVisible((current) => !current)}
+                    textContentType="newPassword"
+                  />
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.label}>Confirm New Password</Text>
+                  <PasswordInput
+                    value={resetConfirmPassword}
+                    onChangeText={(value) => {
+                      if (__DEV__) console.log('[auth] confirm password changed');
+                      setResetConfirmPassword(value);
+                      setError(null);
+                    }}
+                    onFocus={() => {
+                      if (__DEV__) console.log('[auth] confirm password focused');
+                    }}
+                    placeholder="Confirm new password"
+                    visible={resetConfirmPasswordVisible}
+                    onToggleVisible={() => setResetConfirmPasswordVisible((current) => !current)}
+                    editable={busyAction !== 'updatePassword'}
+                    confirm
+                  />
+                </View>
+                {error ? <Text style={styles.error}>{error}</Text> : null}
+                <PrimaryButton label="Update password" onPress={handleUpdatePassword} loading={busyAction === 'updatePassword'} disabled={busyAction !== null} />
               </View>
             ) : step === 'signInCodeEmail' ? (
               <View style={styles.codeWrap}>
@@ -363,11 +587,11 @@ export default function AuthScreen() {
                     </View>
                     <View style={styles.fieldGroup}>
                       <Text style={styles.label}>Password</Text>
-                      <TextInput autoCapitalize="none" autoComplete="new-password" secureTextEntry placeholder="Password" placeholderTextColor={colors.textTertiary} style={styles.input} value={password} onChangeText={(value) => { setPassword(value); setError(null); }} />
+                      <PasswordInput value={password} onChangeText={(value) => { setPassword(value); setError(null); }} placeholder="Password" visible={createPasswordVisible} onToggleVisible={() => setCreatePasswordVisible((current) => !current)} textContentType="newPassword" />
                     </View>
                     <View style={styles.fieldGroup}>
                       <Text style={styles.label}>Confirm Password</Text>
-                      <TextInput autoCapitalize="none" autoComplete="new-password" secureTextEntry placeholder="Confirm password" placeholderTextColor={colors.textTertiary} style={styles.input} value={confirmPassword} onChangeText={(value) => { setConfirmPassword(value); setError(null); }} />
+                      <PasswordInput value={confirmPassword} onChangeText={(value) => { setConfirmPassword(value); setError(null); }} placeholder="Confirm password" visible={createConfirmPasswordVisible} onToggleVisible={() => setCreateConfirmPasswordVisible((current) => !current)} confirm />
                     </View>
                   </>
                 ) : (
@@ -378,7 +602,7 @@ export default function AuthScreen() {
                     </View>
                     <View style={styles.fieldGroup}>
                       <Text style={styles.label}>Password</Text>
-                      <TextInput autoCapitalize="none" autoComplete="current-password" secureTextEntry placeholder="Password" placeholderTextColor={colors.textTertiary} style={styles.input} value={password} onChangeText={(value) => { setPassword(value); setError(null); }} />
+                      <PasswordInput value={password} onChangeText={(value) => { setPassword(value); setError(null); }} placeholder="Password" visible={signInPasswordVisible} onToggleVisible={() => setSignInPasswordVisible((current) => !current)} textContentType="password" />
                     </View>
                   </>
                 )}
@@ -396,15 +620,15 @@ export default function AuthScreen() {
                 ) : (
                   <>
                     <PrimaryButton label="Sign in" onPress={handleSignIn} loading={busyAction === 'signin'} disabled={busyAction !== null} />
-                    <Text style={styles.helper}>Forgot password or don’t have one?</Text>
-                    <Pressable accessibilityRole="button" onPress={openVerificationCodeSignIn} style={styles.textButton}>
-                      <Text style={styles.textButtonLabel}>Email verification code</Text>
+                    <Pressable accessibilityRole="button" onPress={openPasswordReset} style={styles.textButton}>
+                      <Text style={styles.textButtonLabel}>Forgot password?</Text>
                     </Pressable>
                     <Pressable accessibilityRole="button" onPress={() => switchMode('createProfile')} style={styles.textButton}>
-                      <Text style={styles.textButtonLabel}>Create profile</Text>
+                      <Text style={styles.textButtonLabel}>New to Youmi Lens? Create profile</Text>
                     </Pressable>
                   </>
                 )}
+                {successMessage ? <Text style={styles.success}>{successMessage}</Text> : null}
                 {persistentError ? <ErrorNotice message={persistentError} /> : null}
               </>
             )}
@@ -413,6 +637,67 @@ export default function AuthScreen() {
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
+  );
+}
+
+type PasswordInputProps = {
+  value: string;
+  onChangeText: (value: string) => void;
+  placeholder: string;
+  visible: boolean;
+  onToggleVisible: () => void;
+  confirm?: boolean;
+  editable?: boolean;
+  textContentType?: 'password' | 'newPassword';
+  onFocus?: () => void;
+};
+
+function PasswordInput({
+  value,
+  onChangeText,
+  placeholder,
+  visible,
+  onToggleVisible,
+  confirm = false,
+  editable = true,
+  textContentType,
+  onFocus,
+}: PasswordInputProps) {
+  const accessibilityLabel = visible
+    ? confirm ? 'Hide confirm password' : 'Hide password'
+    : confirm ? 'Show confirm password' : 'Show password';
+
+  return (
+    <View style={styles.passwordWrap}>
+      <TextInput
+        value={value}
+        onChangeText={onChangeText}
+        onFocus={onFocus}
+        placeholder={placeholder}
+        placeholderTextColor={colors.textTertiary}
+        secureTextEntry={!visible}
+        autoCapitalize="none"
+        autoCorrect={false}
+        spellCheck={false}
+        autoComplete={textContentType === 'password' ? 'current-password' : textContentType === 'newPassword' ? 'new-password' : 'off'}
+        textContentType={textContentType ?? 'none'}
+        editable={editable}
+        style={[styles.input, styles.passwordInput]}
+      />
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={accessibilityLabel}
+        hitSlop={10}
+        onPress={onToggleVisible}
+        style={({ pressed }) => [styles.passwordToggle, pressed && styles.pressed]}
+      >
+        <Ionicons
+          name={visible ? 'eye-off-outline' : 'eye-outline'}
+          size={21}
+          color={colors.textTertiary}
+        />
+      </Pressable>
+    </View>
   );
 }
 
@@ -462,10 +747,14 @@ const styles = StyleSheet.create({
   macHelper: { color: colors.deepNavy, fontSize: fontSize.sm, fontWeight: '600', lineHeight: 20 },
   fieldGroup: { gap: spacing.sm },
   label: { color: colors.textPrimary, fontSize: fontSize.sm, fontWeight: '700' },
-  input: { minHeight: 56, borderWidth: 1, borderColor: colors.borderStrong, borderRadius: radius.lg, backgroundColor: colors.pearlWhite, paddingHorizontal: spacing.lg, fontSize: fontSize.lg, color: colors.textPrimary },
+  input: { minHeight: 56, borderWidth: 1, borderColor: colors.borderStrong, borderRadius: radius.lg, backgroundColor: colors.pearlWhite, paddingHorizontal: spacing.lg, fontSize: fontSize.lg, color: colors.textPrimary, letterSpacing: 0, textAlign: 'left' },
+  passwordWrap: { position: 'relative' },
+  passwordInput: { letterSpacing: 0, textAlign: 'left', paddingRight: 54 },
+  passwordToggle: { position: 'absolute', right: spacing.md, top: 0, bottom: 0, width: 40, alignItems: 'center', justifyContent: 'center' },
   codeWrap: { gap: spacing.lg },
   codeInput: { letterSpacing: 8, textAlign: 'center' },
   error: { color: colors.recordingRed, fontSize: fontSize.sm, fontWeight: '600' },
+  success: { color: colors.deepNavy, fontSize: fontSize.sm, fontWeight: '700', lineHeight: 20 },
   helper: { color: colors.textSecondary, fontSize: fontSize.sm, textAlign: 'center' },
   errorNotice: {
     borderWidth: 1,

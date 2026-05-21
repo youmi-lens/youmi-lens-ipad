@@ -36,12 +36,22 @@ type AuthContextValue = {
   session: Session | null;
   loading: boolean;
   username: string | null;
+  /** True while the active session is a recovery session (set new password flow). */
+  isResettingPassword: boolean;
   createProfileWithPassword: (email: string, password: string, username: string) => Promise<VerifySignupResult>;
   verifySignupCode: (email: string, code: string, username: string) => Promise<VerifySignupResult>;
   resendSignupCode: (email: string) => Promise<AuthResult>;
   sendSignInCode: (email: string) => Promise<AuthResult>;
   verifySignInCode: (email: string, code: string) => Promise<VerifySignupResult>;
   signInWithPassword: (email: string, password: string) => Promise<AuthResult>;
+  /** Send a verification code to the email for password reset. Neutral on unknown emails. */
+  sendPasswordResetCode: (email: string) => Promise<AuthResult>;
+  /** Verify the password-reset code; on success, opens a recovery session. */
+  verifyPasswordResetCode: (email: string, code: string) => Promise<VerifySignupResult>;
+  /** Set a new password for the currently signed-in (or recovery-session) user. */
+  updatePassword: (newPassword: string) => Promise<AuthResult>;
+  /** Update the signed-in user's username in the profiles table. */
+  updateUsername: (newUsername: string) => Promise<AuthResult>;
   refreshSession: () => Promise<Session | null>;
   signOut: () => Promise<AuthResult>;
 };
@@ -109,6 +119,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [username, setUsername] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // True between PASSWORD_RECOVERY and the next SIGNED_OUT. Lets the AuthGate
+  // keep the user on /auth long enough to enter a new password.
+  const [isResettingPassword, setIsResettingPassword] = useState(false);
 
   const loadUsername = useCallback(async (nextUser: User | null) => {
     if (!nextUser) {
@@ -158,7 +171,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+    } = supabase.auth.onAuthStateChange((event, nextSession) => {
+      // PASSWORD_RECOVERY fires when verifyOtp({type:'recovery'}) succeeds.
+      // SIGNED_OUT clears the flag so subsequent sign-ins behave normally.
+      if (event === 'PASSWORD_RECOVERY') setIsResettingPassword(true);
+      else if (event === 'SIGNED_OUT') setIsResettingPassword(false);
       void applySessionState(nextSession);
       setLoading(false);
     });
@@ -337,6 +354,98 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return { error: error.message };
   }, []);
 
+  /**
+   * Forgot Password, step 1: ask Supabase to send a verification code by email.
+   * Supabase intentionally does not error on unknown emails — callers should
+   * show the same neutral "if an account exists for this email" message
+   * regardless of the result, so this never reveals account existence.
+   */
+  const sendPasswordResetCode = useCallback(async (email: string): Promise<AuthResult> => {
+    if (supabaseConfigError) return { error: supabaseConfigError };
+    const { error } = await supabase.auth.resetPasswordForEmail(email.trim().toLowerCase());
+    return { error: error?.message ?? null };
+  }, []);
+
+  /**
+   * Forgot Password, step 2: verify the code. Success creates a recovery
+   * session — PASSWORD_RECOVERY fires from onAuthStateChange and sets
+   * isResettingPassword so the AuthGate keeps the user on /auth.
+   */
+  const verifyPasswordResetCode = useCallback(
+    async (email: string, code: string): Promise<VerifySignupResult> => {
+      if (supabaseConfigError) return { error: supabaseConfigError, session: null };
+      const { data, error } = await supabase.auth.verifyOtp({
+        email: email.trim().toLowerCase(),
+        token: code.trim(),
+        type: 'recovery',
+      });
+      if (error) {
+        const m = error.message.toLowerCase();
+        if (m.includes('expired') || m.includes('invalid') || m.includes('token')) {
+          return { error: 'Invalid or expired code. Please request a new code.', session: null };
+        }
+        return { error: error.message, session: null };
+      }
+      if (!data.session) {
+        return { error: 'Verification succeeded, but no session was created. Please try again.', session: null };
+      }
+      setIsResettingPassword(true);
+      await applySessionState(data.session);
+      return { error: null, session: data.session };
+    },
+    [applySessionState],
+  );
+
+  /** Forgot Password, step 3: set the new password on the current Supabase user. */
+  const updatePassword = useCallback(async (newPassword: string): Promise<AuthResult> => {
+    if (supabaseConfigError) return { error: supabaseConfigError };
+    if (!newPassword || newPassword.length < 8) {
+      return { error: 'Password must be at least 8 characters.' };
+    }
+    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    if (!error) setIsResettingPassword(false);
+    return { error: error?.message ?? null };
+  }, []);
+
+  /** Update the signed-in user's username. Honors profiles.username unique index. */
+  const updateUsername = useCallback(
+    async (newUsername: string): Promise<AuthResult> => {
+      if (supabaseConfigError) return { error: supabaseConfigError };
+      if (!user) return { error: 'You are not signed in.' };
+      const trimmed = newUsername.trim();
+      if (!trimmed) return { error: 'Username cannot be empty.' };
+      if (trimmed.length < 2 || trimmed.length > 64) {
+        return { error: 'Username must be 2–64 characters.' };
+      }
+
+      const updateWithTimestamp = await supabase
+        .from('profiles')
+        .update({ username: trimmed, updated_at: new Date().toISOString() })
+        .eq('id', user.id);
+
+      let error = updateWithTimestamp.error;
+      if (error && /updated_at/i.test(error.message)) {
+        const updateWithoutTimestamp = await supabase
+          .from('profiles')
+          .update({ username: trimmed })
+          .eq('id', user.id);
+        error = updateWithoutTimestamp.error;
+      }
+
+      if (error) {
+        const code = (error as { code?: string }).code;
+        const m = error.message.toLowerCase();
+        if (code === '23505' || m.includes('duplicate') || m.includes('unique')) {
+          return { error: 'This username is already taken. Please choose a different one.' };
+        }
+        return { error: error.message };
+      }
+      setUsername(trimmed);
+      return { error: null };
+    },
+    [user],
+  );
+
   const refreshSession = useCallback(async (): Promise<Session | null> => {
     const { data } = await supabase.auth.getSession();
     await applySessionState(data.session);
@@ -355,12 +464,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       session,
       loading,
       username,
+      isResettingPassword,
       createProfileWithPassword,
       verifySignupCode,
       resendSignupCode,
       sendSignInCode,
       verifySignInCode,
       signInWithPassword,
+      sendPasswordResetCode,
+      verifyPasswordResetCode,
+      updatePassword,
+      updateUsername,
       refreshSession,
       signOut,
     }),
@@ -369,12 +483,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       session,
       loading,
       username,
+      isResettingPassword,
       createProfileWithPassword,
       verifySignupCode,
       resendSignupCode,
       sendSignInCode,
       verifySignInCode,
       signInWithPassword,
+      sendPasswordResetCode,
+      verifyPasswordResetCode,
+      updatePassword,
+      updateUsername,
       refreshSession,
       signOut,
     ],
