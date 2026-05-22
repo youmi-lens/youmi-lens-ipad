@@ -179,6 +179,48 @@ export type LectureMaterialLink = {
   deletedReason?: string | null;
 };
 
+export type MaterialAnnotationPoint = { x: number; y: number };
+
+export type MaterialAnnotationTool = 'pen' | 'highlighter';
+
+/**
+ * Stroke coordinate space.
+ *
+ *  - `'viewport'` — points are in screen / view pixel coordinates. Produced
+ *    by the legacy JS/SVG overlay spike (since rejected). Not safe to render
+ *    in the native PDFKit overlay because zoom/scroll changes the mapping.
+ *  - `'pdfPage'` — points are in PDFKit page coordinates and stay glued to
+ *    the page across zoom/pan. Produced by the native PDFKit overlay.
+ *
+ * Absent → treat as `'viewport'` (backward-compat for previously stored data).
+ */
+export type MaterialAnnotationCoordSpace = 'viewport' | 'pdfPage';
+
+export type MaterialAnnotationStroke = {
+  id: string;
+  tool: MaterialAnnotationTool;
+  color: string;
+  width: number;
+  opacity?: number;
+  points: MaterialAnnotationPoint[];
+  /** Coordinate space the points live in. See MaterialAnnotationCoordSpace. */
+  coordSpace?: MaterialAnnotationCoordSpace;
+  createdAt: string;
+};
+
+/** Local-only page annotations for one lecture/material/page tuple. */
+export type MaterialPageAnnotation = {
+  id: string;
+  lectureId: string;
+  materialId: string;
+  pageNumber: number;
+  strokes: MaterialAnnotationStroke[];
+  createdAt: string;
+  updatedAt: string;
+  deletedAt?: string | null;
+  deletedReason?: string | null;
+};
+
 /** A soft academic colour + icon preset offered when creating a course. */
 export type CoursePreset = {
   key: string;

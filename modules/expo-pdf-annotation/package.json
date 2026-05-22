@@ -1,0 +1,7 @@
+{
+  "name": "expo-pdf-annotation",
+  "version": "1.0.0",
+  "description": "Native PDFKit viewer spike for Youmi Lens iPad course materials.",
+  "main": "index.ts",
+  "private": true
+}

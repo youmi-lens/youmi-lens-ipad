@@ -25,6 +25,8 @@ import {
   type CourseMaterial,
   type Lecture,
   type LectureMaterialLink,
+  type MaterialAnnotationStroke,
+  type MaterialPageAnnotation,
   type NoteStroke,
 } from './models';
 import { supabase } from './supabase';
@@ -37,6 +39,7 @@ const scopedCoursesKey = (userId: string) => `youmi.courses.v1.${userId}`;
 const scopedLecturesKey = (userId: string) => `youmi.lectures.v1.${userId}`;
 const scopedMaterialsKey = (userId: string) => `youmi.materials.v1.${userId}`;
 const scopedMaterialLinksKey = (userId: string) => `youmi.materialLinks.v1.${userId}`;
+const scopedMaterialAnnotationsKey = (userId: string) => `youmi.materialAnnotations.v1.${userId}`;
 const UNFILED_COURSE_NAME = 'Unfiled';
 const REMOTE_RECORDING_COLUMNS =
   'id, user_id, course, title, duration_sec, ai_status, ai_error, created_at, updated_at, storage_path, transcript, transcript_zh, summary_en, summary_zh, live_transcript';
@@ -137,6 +140,50 @@ type DataContextValue = {
   removeLectureMaterialLink: (lectureId: string, materialId: string, reason?: string) => void;
   cleanupOrphanMaterialLinks: (validLectureIds: string[]) => void;
 
+  // ---- PDF page annotations (Build 7.x V1 — local-only) ----
+  materialAnnotations: MaterialPageAnnotation[];
+  annotationForPage: (
+    lectureId: string,
+    materialId: string,
+    pageNumber: number,
+  ) => MaterialPageAnnotation | undefined;
+  annotationsForPage: (
+    lectureId: string,
+    materialId: string,
+    pageNumber: number,
+  ) => MaterialAnnotationStroke[];
+  annotationsForMaterialPage: (
+    materialId: string,
+    pageNumber: number,
+  ) => MaterialAnnotationStroke[];
+  countAnnotationsForMaterial: (materialId: string) => number;
+  saveAnnotationStrokes: (
+    lectureId: string,
+    materialId: string,
+    pageNumber: number,
+    strokes: MaterialAnnotationStroke[],
+  ) => void;
+  replaceMaterialPageAnnotationStrokes: (
+    lectureId: string,
+    materialId: string,
+    pageNumber: number,
+    strokes: MaterialAnnotationStroke[],
+  ) => void;
+  replaceMaterialPageAnnotationStrokesForMaterial: (
+    materialId: string,
+    pageNumber: number,
+    strokes: MaterialAnnotationStroke[],
+    materialScopeLectureId: string,
+  ) => void;
+  addAnnotationStroke: (
+    lectureId: string,
+    materialId: string,
+    pageNumber: number,
+    stroke: MaterialAnnotationStroke,
+  ) => void;
+  undoLastAnnotationStroke: (lectureId: string, materialId: string, pageNumber: number) => void;
+  clearAnnotationsForPage: (lectureId: string, materialId: string, pageNumber: number) => void;
+
   clearAll: () => Promise<void>;
 };
 
@@ -222,6 +269,10 @@ function makeUuid(): string {
     const value = char === 'x' ? random : (random & 0x3) | 0x8;
     return value.toString(16);
   });
+}
+
+function makeMaterialAnnotationId(lectureId: string, materialId: string, pageNumber: number): string {
+  return `annotation_${lectureId}_${materialId}_${pageNumber}`.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
 function normalizeLectures(storedLectures: Lecture[]): Lecture[] {
@@ -399,6 +450,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
   const [lectures, setLectures] = useState<Lecture[]>([]);
   const [materials, setMaterials] = useState<CourseMaterial[]>([]);
   const [materialLinks, setMaterialLinks] = useState<LectureMaterialLink[]>([]);
+  const [materialAnnotations, setMaterialAnnotations] = useState<MaterialPageAnnotation[]>([]);
   const [selectedCourseId, setSelectedCourseId] = useState<string | null>(null);
   const hydrateSequence = useRef(0);
   const coursesRef = useRef<Course[]>([]);
@@ -449,6 +501,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
     setLectures([]);
     setMaterials([]);
     setMaterialLinks([]);
+    setMaterialAnnotations([]);
     setSelectedCourseId(null);
 
     if (!currentUserId) {
@@ -461,17 +514,21 @@ export function DataProvider({ children }: { children: ReactNode }) {
 
     (async () => {
       try {
-        const [rawCourses, rawLectures, rawMaterials, rawMaterialLinks] = await Promise.all([
+        const [rawCourses, rawLectures, rawMaterials, rawMaterialLinks, rawMaterialAnnotations] = await Promise.all([
           AsyncStorage.getItem(scopedCoursesKey(currentUserId)),
           AsyncStorage.getItem(scopedLecturesKey(currentUserId)),
           AsyncStorage.getItem(scopedMaterialsKey(currentUserId)),
           AsyncStorage.getItem(scopedMaterialLinksKey(currentUserId)),
+          AsyncStorage.getItem(scopedMaterialAnnotationsKey(currentUserId)),
         ]);
         if (!mounted || hydrateSequence.current !== sequence) return;
         const storedCourses: Course[] = rawCourses ? JSON.parse(rawCourses) : [];
         const storedLectures: Lecture[] = rawLectures ? JSON.parse(rawLectures) : [];
         const storedMaterials: CourseMaterial[] = rawMaterials ? JSON.parse(rawMaterials) : [];
         const storedMaterialLinks: LectureMaterialLink[] = rawMaterialLinks ? JSON.parse(rawMaterialLinks) : [];
+        const storedMaterialAnnotations: MaterialPageAnnotation[] = rawMaterialAnnotations
+          ? JSON.parse(rawMaterialAnnotations)
+          : [];
         const normalizedLocalLectures = normalizeLectures(storedLectures);
         let nextCourses = storedCourses;
         let nextLectures = normalizedLocalLectures;
@@ -491,6 +548,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
         // Materials are local-only in V1.1 — no cloud merge yet.
         setMaterials(Array.isArray(storedMaterials) ? storedMaterials : []);
         setMaterialLinks(Array.isArray(storedMaterialLinks) ? storedMaterialLinks : []);
+        setMaterialAnnotations(Array.isArray(storedMaterialAnnotations) ? storedMaterialAnnotations : []);
         setHydratedUserId(currentUserId);
         setSelectedCourseId(nextCourses.find((course) => !course.deletedAt)?.id ?? null);
       } catch {
@@ -561,6 +619,12 @@ export function DataProvider({ children }: { children: ReactNode }) {
       AsyncStorage.setItem(scopedMaterialLinksKey(currentUserId), JSON.stringify(materialLinks)).catch(() => {});
     }
   }, [materialLinks, currentUserId, hydratedUserId, loaded]);
+
+  useEffect(() => {
+    if (loaded && currentUserId && hydratedUserId === currentUserId) {
+      AsyncStorage.setItem(scopedMaterialAnnotationsKey(currentUserId), JSON.stringify(materialAnnotations)).catch(() => {});
+    }
+  }, [materialAnnotations, currentUserId, hydratedUserId, loaded]);
 
   const createCourse = useCallback((input: NewCourseInput): Course => {
     const course: Course = {
@@ -846,11 +910,171 @@ export function DataProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  const upsertAnnotationPage = useCallback((
+    lectureId: string,
+    materialId: string,
+    pageNumber: number,
+    updater: (strokes: MaterialAnnotationStroke[]) => MaterialAnnotationStroke[],
+  ) => {
+    if (!lectureId || !materialId || pageNumber < 1) return;
+    const normalizedPage = Math.max(1, Math.round(pageNumber));
+    setMaterialAnnotations((prev) => {
+      const existingIndex = prev.findIndex(
+        (annotation) =>
+          annotation.lectureId === lectureId &&
+          annotation.materialId === materialId &&
+          annotation.pageNumber === normalizedPage &&
+          !annotation.deletedAt,
+      );
+      const now = new Date().toISOString();
+      if (existingIndex >= 0) {
+        const existing = prev[existingIndex];
+        const nextStrokes = updater(existing.strokes);
+        if (nextStrokes === existing.strokes) return prev;
+        if (
+          nextStrokes.length === existing.strokes.length &&
+          nextStrokes.every((stroke, index) => stroke === existing.strokes[index])
+        ) {
+          return prev;
+        }
+        const next = [...prev];
+        next[existingIndex] = { ...existing, strokes: nextStrokes, updatedAt: now };
+        return next;
+      }
+
+      const strokes = updater([]);
+      if (strokes.length === 0) return prev;
+      const annotation: MaterialPageAnnotation = {
+        id: makeMaterialAnnotationId(lectureId, materialId, normalizedPage),
+        lectureId,
+        materialId,
+        pageNumber: normalizedPage,
+        strokes,
+        createdAt: now,
+        updatedAt: now,
+      };
+      return [...prev, annotation];
+    });
+  }, []);
+
+  const saveAnnotationStrokes = useCallback((
+    lectureId: string,
+    materialId: string,
+    pageNumber: number,
+    strokes: MaterialAnnotationStroke[],
+  ) => {
+    upsertAnnotationPage(lectureId, materialId, pageNumber, (prev) => {
+      if (
+        prev.length === strokes.length &&
+        prev.every((stroke, index) => stroke === strokes[index])
+      ) {
+        return prev;
+      }
+      return strokes;
+    });
+  }, [upsertAnnotationPage]);
+
+  const replaceMaterialPageAnnotationStrokesForMaterial = useCallback((
+    materialId: string,
+    pageNumber: number,
+    strokes: MaterialAnnotationStroke[],
+    materialScopeLectureId: string,
+  ) => {
+    if (!materialId || pageNumber < 1 || !materialScopeLectureId) return;
+    const normalizedPage = Math.max(1, Math.round(pageNumber));
+    const remainingIds = new Set(strokes.map((stroke) => stroke.id));
+    const incomingById = new Map(strokes.map((stroke) => [stroke.id, stroke]));
+    const now = new Date().toISOString();
+
+    setMaterialAnnotations((prev) => {
+      let mutated = false;
+      const claimedIds = new Set<string>();
+      let materialScopeIndex = -1;
+
+      const next = prev.map((annotation, index) => {
+        if (
+          annotation.materialId !== materialId ||
+          annotation.pageNumber !== normalizedPage ||
+          annotation.deletedAt
+        ) {
+          return annotation;
+        }
+
+        if (annotation.lectureId === materialScopeLectureId) {
+          materialScopeIndex = index;
+        }
+
+        const nextStrokes = annotation.strokes
+          .filter((stroke) => remainingIds.has(stroke.id))
+          .map((stroke) => {
+            claimedIds.add(stroke.id);
+            return incomingById.get(stroke.id) ?? stroke;
+          });
+
+        if (
+          nextStrokes.length === annotation.strokes.length &&
+          nextStrokes.every((stroke, strokeIndex) => stroke === annotation.strokes[strokeIndex])
+        ) {
+          return annotation;
+        }
+
+        mutated = true;
+        return { ...annotation, strokes: nextStrokes, updatedAt: now };
+      });
+
+      const unclaimedStrokes = strokes.filter((stroke) => !claimedIds.has(stroke.id));
+      if (unclaimedStrokes.length > 0) {
+        mutated = true;
+        if (materialScopeIndex >= 0) {
+          const existing = next[materialScopeIndex];
+          next[materialScopeIndex] = {
+            ...existing,
+            strokes: [...existing.strokes, ...unclaimedStrokes],
+            updatedAt: now,
+          };
+        } else {
+          next.push({
+            id: makeMaterialAnnotationId(materialScopeLectureId, materialId, normalizedPage),
+            lectureId: materialScopeLectureId,
+            materialId,
+            pageNumber: normalizedPage,
+            strokes: unclaimedStrokes,
+            createdAt: now,
+            updatedAt: now,
+          });
+        }
+      }
+
+      return mutated ? next : prev;
+    });
+  }, []);
+
+  const addAnnotationStroke = useCallback((
+    lectureId: string,
+    materialId: string,
+    pageNumber: number,
+    stroke: MaterialAnnotationStroke,
+  ) => {
+    upsertAnnotationPage(lectureId, materialId, pageNumber, (prev) => {
+      if (prev.some((existing) => existing.id === stroke.id)) return prev;
+      return [...prev, stroke];
+    });
+  }, [upsertAnnotationPage]);
+
+  const undoLastAnnotationStroke = useCallback((lectureId: string, materialId: string, pageNumber: number) => {
+    upsertAnnotationPage(lectureId, materialId, pageNumber, (prev) => (prev.length > 0 ? prev.slice(0, -1) : prev));
+  }, [upsertAnnotationPage]);
+
+  const clearAnnotationsForPage = useCallback((lectureId: string, materialId: string, pageNumber: number) => {
+    upsertAnnotationPage(lectureId, materialId, pageNumber, (prev) => (prev.length > 0 ? [] : prev));
+  }, [upsertAnnotationPage]);
+
   const clearAll = useCallback(async () => {
     setCourses([]);
     setLectures([]);
     setMaterials([]);
     setMaterialLinks([]);
+    setMaterialAnnotations([]);
     setSelectedCourseId(null);
     if (currentUserId) {
       await AsyncStorage.multiRemove([
@@ -858,6 +1082,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
         scopedLecturesKey(currentUserId),
         scopedMaterialsKey(currentUserId),
         scopedMaterialLinksKey(currentUserId),
+        scopedMaterialAnnotationsKey(currentUserId),
       ]).catch(() => {});
     }
   }, [currentUserId]);
@@ -867,6 +1092,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
   const visibleLectures = visibleStoreReady ? lectures : [];
   const visibleMaterials = visibleStoreReady ? materials : [];
   const visibleMaterialLinks = visibleStoreReady ? materialLinks : [];
+  const visibleMaterialAnnotations = visibleStoreReady ? materialAnnotations : [];
 
   // Active (non-soft-deleted) materials. A material whose parent course is in
   // Recently Deleted is hidden from active views — same pattern as lectures.
@@ -877,6 +1103,10 @@ export function DataProvider({ children }: { children: ReactNode }) {
   const activeMaterialLinks = useMemo(
     () => visibleMaterialLinks.filter((link) => !link.deletedAt),
     [visibleMaterialLinks],
+  );
+  const activeMaterialAnnotations = useMemo(
+    () => visibleMaterialAnnotations.filter((annotation) => !annotation.deletedAt),
+    [visibleMaterialAnnotations],
   );
 
   // Active vs Recently Deleted. A course/lecture with deletedAt set is in
@@ -948,9 +1178,42 @@ export function DataProvider({ children }: { children: ReactNode }) {
         activeMaterialLinks.filter((link) => link.materialId === materialId),
       removeLectureMaterialLink,
       cleanupOrphanMaterialLinks,
+      materialAnnotations: activeMaterialAnnotations,
+      annotationForPage: (lectureId, materialId, pageNumber) =>
+        activeMaterialAnnotations.find(
+          (annotation) =>
+            annotation.lectureId === lectureId &&
+            annotation.materialId === materialId &&
+            annotation.pageNumber === Math.max(1, Math.round(pageNumber)),
+        ),
+      annotationsForPage: (lectureId, materialId, pageNumber) =>
+        activeMaterialAnnotations.find(
+          (annotation) =>
+            annotation.lectureId === lectureId &&
+            annotation.materialId === materialId &&
+            annotation.pageNumber === Math.max(1, Math.round(pageNumber)),
+        )?.strokes ?? [],
+      annotationsForMaterialPage: (materialId, pageNumber) =>
+        activeMaterialAnnotations
+          .filter(
+            (annotation) =>
+              annotation.materialId === materialId &&
+              annotation.pageNumber === Math.max(1, Math.round(pageNumber)),
+          )
+          .flatMap((annotation) => annotation.strokes),
+      countAnnotationsForMaterial: (materialId) =>
+        activeMaterialAnnotations
+          .filter((annotation) => annotation.materialId === materialId)
+          .reduce((total, annotation) => total + annotation.strokes.length, 0),
+      saveAnnotationStrokes,
+      replaceMaterialPageAnnotationStrokes: saveAnnotationStrokes,
+      replaceMaterialPageAnnotationStrokesForMaterial,
+      addAnnotationStroke,
+      undoLastAnnotationStroke,
+      clearAnnotationsForPage,
       clearAll,
     }),
-    [visibleStoreReady, currentUserId, activeCourses, activeLectures, deletedCourses, deletedLectures, selectedCourseId, createCourse, createLecture, updateLecture, deleteLecture, deleteCourse, restoreCourse, restoreLecture, permanentlyDeleteCourse, permanentlyDeleteLecture, renameCourse, renameLecture, activeMaterials, addMaterial, renameMaterial, updateMaterial, deleteMaterial, activeMaterialLinks, reserveLectureId, linkMaterialToLecture, updateLectureMaterialLink, removeLectureMaterialLink, cleanupOrphanMaterialLinks, clearAll],
+    [visibleStoreReady, currentUserId, activeCourses, activeLectures, deletedCourses, deletedLectures, selectedCourseId, createCourse, createLecture, updateLecture, deleteLecture, deleteCourse, restoreCourse, restoreLecture, permanentlyDeleteCourse, permanentlyDeleteLecture, renameCourse, renameLecture, activeMaterials, addMaterial, renameMaterial, updateMaterial, deleteMaterial, activeMaterialLinks, reserveLectureId, linkMaterialToLecture, updateLectureMaterialLink, removeLectureMaterialLink, cleanupOrphanMaterialLinks, activeMaterialAnnotations, saveAnnotationStrokes, replaceMaterialPageAnnotationStrokesForMaterial, addAnnotationStroke, undoLastAnnotationStroke, clearAnnotationsForPage, clearAll],
   );
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;

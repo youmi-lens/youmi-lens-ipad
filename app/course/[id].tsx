@@ -50,6 +50,7 @@ export default function CourseDetailScreen() {
     addMaterial,
     renameMaterial,
     deleteMaterial,
+    countAnnotationsForMaterial,
   } = useData();
 
   const course = getCourse(params.id);
@@ -104,7 +105,10 @@ export default function CourseDetailScreen() {
 
   const openMaterial = (materialId: string) => {
     setOpenMaterialId(null);
-    router.push({ pathname: '/material/[id]', params: { id: materialId } });
+    router.push({
+      pathname: '/lecture-material/[lectureId]/[materialId]',
+      params: { lectureId: '__material_review__', materialId },
+    });
   };
 
   const formatBytes = (bytes?: number): string => {
@@ -235,7 +239,9 @@ export default function CourseDetailScreen() {
               </View>
             ) : (
               <View style={styles.materialList}>
-                {materials.map((material, index) => (
+                {materials.map((material, index) => {
+                  const annotationCount = countAnnotationsForMaterial(material.id);
+                  return (
                   <SwipeDeleteRow
                     key={material.id}
                     open={openMaterialId === material.id}
@@ -270,6 +276,20 @@ export default function CourseDetailScreen() {
                               <Text style={styles.lectureMeta}>{formatBytes(material.fileSize)}</Text>
                             </>
                           ) : null}
+                          {material.lastOpenedPage ? (
+                            <>
+                              <View style={styles.metaDot} />
+                              <Text style={styles.lectureMeta}>Last opened page {material.lastOpenedPage}</Text>
+                            </>
+                          ) : null}
+                          {annotationCount > 0 ? (
+                            <>
+                              <View style={styles.metaDot} />
+                              <Text style={styles.lectureMeta}>
+                                {annotationCount} {annotationCount === 1 ? 'annotation' : 'annotations'}
+                              </Text>
+                            </>
+                          ) : null}
                         </View>
                       </View>
                       <Pressable
@@ -288,7 +308,8 @@ export default function CourseDetailScreen() {
                       <Ionicons name="chevron-forward" size={18} color={colors.textTertiary} />
                     </Pressable>
                   </SwipeDeleteRow>
-                ))}
+                  );
+                })}
               </View>
             )}
             <SecondaryButton

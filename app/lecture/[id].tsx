@@ -3,6 +3,8 @@ import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { ComponentProps, useState } from 'react';
 import {
+  ActivityIndicator,
+  Alert,
   Modal,
   Pressable,
   ScrollView,
@@ -17,6 +19,7 @@ import { HandwritingPreview, NotebookCanvas } from '@/components/NotebookCanvas'
 import { RenameModal } from '@/components/RenameModal';
 import { StatusPill, StatusVariant } from '@/components/StatusPill';
 import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
+import { exportLectureNotesPdf, hasExportableLectureNotes } from '@/lib/exportLectureNotesPdf';
 import { formatClock, formatDate, formatDuration } from '@/lib/format';
 import {
   getLectureSummaryByLanguage,
@@ -61,6 +64,7 @@ export default function LectureDetailScreen() {
   const [strokesDraft, setStrokesDraft] = useState<NoteStroke[]>(lecture?.noteStrokes ?? []);
   const [notesOpen, setNotesOpen] = useState(false);
   const [renameVisible, setRenameVisible] = useState(false);
+  const [exportingPdf, setExportingPdf] = useState(false);
 
   if (!lecture) {
     return (
@@ -110,6 +114,25 @@ export default function LectureDetailScreen() {
       noteUpdatedAt: new Date().toISOString(),
     });
     setNotesOpen(false);
+  };
+
+  const handleExportPdf = async () => {
+    if (!hasExportableLectureNotes(lecture)) {
+      Alert.alert('Nothing to export yet', 'There are no notes to export yet.');
+      return;
+    }
+
+    setExportingPdf(true);
+    try {
+      await exportLectureNotesPdf({ lecture, course });
+    } catch (err) {
+      Alert.alert(
+        'Could not export PDF',
+        err instanceof Error ? err.message : 'Please try again in a moment.',
+      );
+    } finally {
+      setExportingPdf(false);
+    }
   };
 
   const audioAvailable = Boolean(lecture.localAudioUri);
@@ -164,7 +187,7 @@ export default function LectureDetailScreen() {
           accessibilityLabel="Rename lecture"
           onPress={() => setRenameVisible(true)}
           hitSlop={8}
-          style={({ pressed }) => [styles.renameBtn, pressed && styles.pressed]}
+          style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
         >
           <Ionicons name="pencil-outline" size={20} color={colors.deepNavy} />
         </Pressable>
@@ -321,38 +344,65 @@ export default function LectureDetailScreen() {
 
           {/* ---- Notes ---- */}
           {tab === 'Notes' && (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Open lecture notes"
-              onPress={openNotesEditor}
-              style={({ pressed }) => [styles.noteSheet, pressed && styles.pressed]}
-            >
+            <View style={styles.noteSheet}>
               <View style={styles.foldedCorner} />
-              <BlockHeader icon="create-outline" label="LECTURE NOTES" />
-              {notesHasContent ? (
-                <View style={styles.notePreview}>
-                  {typedNotes ? (
-                    <Text style={styles.notePreviewText} numberOfLines={6}>
-                      {typedNotes}
-                    </Text>
-                  ) : null}
-                  {strokeCount > 0 ? (
-                    <View style={styles.handwritingBlock}>
-                      <View style={styles.handwritingLabelRow}>
-                        <Ionicons name="brush-outline" size={13} color={colors.textTertiary} />
-                        <Text style={styles.handwritingLabel}>
-                          Handwriting · {strokeCount} {strokeCount === 1 ? 'stroke' : 'strokes'}
-                        </Text>
-                      </View>
-                      <HandwritingPreview strokes={lecture.noteStrokes ?? []} />
-                    </View>
-                  ) : null}
-                  <Text style={styles.noteEditHint}>Tap to open the full notebook editor.</Text>
+              <View style={styles.noteHeaderRow}>
+                <View style={styles.noteBlockHeader}>
+                  <View style={styles.blockIcon}>
+                    <Ionicons name="create-outline" size={15} color={colors.deepNavy} />
+                  </View>
+                  <Text style={styles.blockLabel}>LECTURE NOTES</Text>
                 </View>
-              ) : (
-                <Text style={styles.notePreviewEmpty}>Tap to add notes for this lecture.</Text>
-              )}
-            </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Export lecture notes as PDF"
+                  onPress={() => void handleExportPdf()}
+                  disabled={exportingPdf}
+                  style={({ pressed }) => [
+                    styles.noteExportBtn,
+                    exportingPdf && styles.noteExportBtnDisabled,
+                    pressed && !exportingPdf && styles.pressed,
+                  ]}
+                >
+                  {exportingPdf ? (
+                    <ActivityIndicator size="small" color={colors.deepNavy} />
+                  ) : (
+                    <Ionicons name="share-outline" size={16} color={colors.deepNavy} />
+                  )}
+                  <Text style={styles.noteExportText}>{exportingPdf ? 'Exporting…' : 'Export PDF'}</Text>
+                </Pressable>
+              </View>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Open lecture notes"
+                onPress={openNotesEditor}
+                style={({ pressed }) => [styles.notePreviewPressable, pressed && styles.pressed]}
+              >
+                {notesHasContent ? (
+                  <View style={styles.notePreview}>
+                    {typedNotes ? (
+                      <Text style={styles.notePreviewText} numberOfLines={6}>
+                        {typedNotes}
+                      </Text>
+                    ) : null}
+                    {strokeCount > 0 ? (
+                      <View style={styles.handwritingBlock}>
+                        <View style={styles.handwritingLabelRow}>
+                          <Ionicons name="brush-outline" size={13} color={colors.textTertiary} />
+                          <Text style={styles.handwritingLabel}>
+                            Handwriting · {strokeCount} {strokeCount === 1 ? 'stroke' : 'strokes'}
+                          </Text>
+                        </View>
+                        <HandwritingPreview strokes={lecture.noteStrokes ?? []} />
+                      </View>
+                    ) : null}
+                    <Text style={styles.noteEditHint}>Tap to open the full notebook editor.</Text>
+                  </View>
+                ) : (
+                  <Text style={styles.notePreviewEmpty}>Tap to add notes for this lecture.</Text>
+                )}
+              </Pressable>
+            </View>
           )}
         </View>
       </ScrollView>
@@ -450,7 +500,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  renameBtn: {
+  iconBtn: {
     width: 44,
     height: 44,
     borderRadius: radius.pill,
@@ -459,6 +509,9 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  iconBtnDisabled: {
+    opacity: 0.55,
   },
   pressed: {
     opacity: 0.85,
@@ -780,6 +833,42 @@ const styles = StyleSheet.create({
     height: 34,
     backgroundColor: colors.iceTint,
     borderBottomLeftRadius: radius.md,
+  },
+  noteHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.md,
+    marginBottom: spacing.lg,
+  },
+  noteBlockHeader: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  noteExportBtn: {
+    minHeight: 38,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+    paddingHorizontal: spacing.md,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  noteExportBtnDisabled: {
+    opacity: 0.6,
+  },
+  noteExportText: {
+    color: colors.deepNavy,
+    fontSize: fontSize.sm,
+    fontWeight: '800',
+  },
+  notePreviewPressable: {
+    borderRadius: radius.lg,
   },
   notePreviewText: { color: colors.textPrimary, fontSize: fontSize.md, lineHeight: 23 },
   notePreviewEmpty: { color: colors.textTertiary, fontSize: fontSize.md, lineHeight: 23 },
