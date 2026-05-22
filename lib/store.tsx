@@ -1005,8 +1005,9 @@ export function DataProvider({ children }: { children: ReactNode }) {
         }
 
         const nextStrokes = annotation.strokes
-          .filter((stroke) => remainingIds.has(stroke.id))
+          .filter((stroke) => stroke.coordSpace !== 'pdfPage' || remainingIds.has(stroke.id))
           .map((stroke) => {
+            if (stroke.coordSpace !== 'pdfPage') return stroke;
             claimedIds.add(stroke.id);
             return incomingById.get(stroke.id) ?? stroke;
           });

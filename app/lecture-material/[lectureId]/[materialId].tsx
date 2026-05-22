@@ -99,13 +99,9 @@ export default function LectureMaterialWorkspaceScreen() {
     linkMaterialToLecture,
     updateLectureMaterialLink,
     materialLinksForLecture,
-    annotationsForPage,
     annotationsForMaterialPage,
     addAnnotationStroke,
-    saveAnnotationStrokes,
-    replaceMaterialPageAnnotationStrokes,
     replaceMaterialPageAnnotationStrokesForMaterial,
-    undoLastAnnotationStroke,
   } = useData();
 
   const lectureId = params.lectureId ?? '';
@@ -184,9 +180,10 @@ export default function LectureMaterialWorkspaceScreen() {
   // viewer to jump every time we persist a new page, which itself fires
   // onPageChanged again and loops.
   const [initialPage] = useState<number>(() => Math.max(1, initialLinkedPage));
-  const pageStrokes = materialReviewMode
-    ? annotationsForMaterialPage(material?.id ?? '', currentPage)
-    : annotationsForPage(lectureId, material?.id ?? '', currentPage);
+  // Display scope is material-wide for every entry point. Recording mode still
+  // writes new strokes to the current lecture id, but the viewer shows the
+  // shared PDF history by default.
+  const pageStrokes = annotationsForMaterialPage(material?.id ?? '', currentPage);
 
   useEffect(() => {
     if (annotationMode === 'pen' || annotationMode === 'highlighter') {
@@ -410,9 +407,7 @@ export default function LectureMaterialWorkspaceScreen() {
     const totalRaw = totalPages > 0 ? totalPages : (material.pageCount ?? 0);
     if (totalRaw <= 0) return grouped;
     for (let page = 1; page <= totalRaw; page += 1) {
-      const strokes = materialReviewMode
-        ? annotationsForMaterialPage(material.id, page)
-        : annotationsForPage(lectureId, material.id, page);
+      const strokes = annotationsForMaterialPage(material.id, page);
       if (!strokes || strokes.length === 0) continue;
       const native: NativePdfAnnotationStroke[] = [];
       for (const stroke of strokes) {
@@ -434,7 +429,7 @@ export default function LectureMaterialWorkspaceScreen() {
       if (native.length > 0) grouped[String(page)] = native;
     }
     return grouped;
-  }, [annotationsForMaterialPage, annotationsForPage, lectureId, material?.id, material?.pageCount, materialReviewMode, totalPages, useNativePdfViewer]);
+  }, [annotationsForMaterialPage, lectureId, material?.id, material?.pageCount, totalPages, useNativePdfViewer]);
 
   const handleNativeModeChange = useCallback((next: NativePdfAnnotationMode) => {
     nativeAnnotationModeRef.current = next;
@@ -478,11 +473,7 @@ export default function LectureMaterialWorkspaceScreen() {
 
       if (event.action === 'replacePage') {
         const nextStrokes = event.strokes.map(toStoreStroke);
-        if (materialReviewMode) {
-          replaceMaterialPageAnnotationStrokesForMaterial(mid, page, nextStrokes, materialScopeLectureId(mid));
-        } else {
-          replaceMaterialPageAnnotationStrokes(lid, mid, page, nextStrokes);
-        }
+        replaceMaterialPageAnnotationStrokesForMaterial(mid, page, nextStrokes, materialScopeLectureId(mid));
         return;
       }
 
@@ -492,7 +483,7 @@ export default function LectureMaterialWorkspaceScreen() {
       };
       addAnnotationStroke(materialReviewMode ? materialScopeLectureId(mid) : lid, mid, page, stroke);
     },
-    [addAnnotationStroke, materialReviewMode, replaceMaterialPageAnnotationStrokes, replaceMaterialPageAnnotationStrokesForMaterial, restoreNativeTemporaryEraserIfNeeded],
+    [addAnnotationStroke, materialReviewMode, replaceMaterialPageAnnotationStrokesForMaterial],
   );
 
   const addPageStroke = useCallback(
@@ -508,42 +499,30 @@ export default function LectureMaterialWorkspaceScreen() {
       if (!lectureId || !material?.id || ids.length === 0) return;
       const idSet = new Set(ids);
       const next = pageStrokes.filter((stroke) => !idSet.has(stroke.id));
-      if (materialReviewMode) {
-        replaceMaterialPageAnnotationStrokesForMaterial(material.id, currentPage, next, materialScopeLectureId(material.id));
-      } else {
-        saveAnnotationStrokes(lectureId, material.id, currentPage, next);
-      }
+      replaceMaterialPageAnnotationStrokesForMaterial(material.id, currentPage, next, materialScopeLectureId(material.id));
     },
-    [currentPage, lectureId, material?.id, materialReviewMode, pageStrokes, replaceMaterialPageAnnotationStrokesForMaterial, saveAnnotationStrokes],
+    [currentPage, lectureId, material?.id, pageStrokes, replaceMaterialPageAnnotationStrokesForMaterial],
   );
 
   const undoCurrentPage = useCallback(() => {
     if (!lectureId || !material?.id) return;
-    if (materialReviewMode) {
-      const next = pageStrokes.slice(0, -1);
-      replaceMaterialPageAnnotationStrokesForMaterial(material.id, currentPage, next, materialScopeLectureId(material.id));
-    } else {
-      undoLastAnnotationStroke(lectureId, material.id, currentPage);
-    }
-  }, [currentPage, lectureId, material?.id, materialReviewMode, pageStrokes, replaceMaterialPageAnnotationStrokesForMaterial, undoLastAnnotationStroke]);
+    const next = pageStrokes.slice(0, -1);
+    replaceMaterialPageAnnotationStrokesForMaterial(material.id, currentPage, next, materialScopeLectureId(material.id));
+  }, [currentPage, lectureId, material?.id, pageStrokes, replaceMaterialPageAnnotationStrokesForMaterial]);
 
   const undoNativeCurrentPage = useCallback(() => {
     const lid = nativeLectureIdRef.current;
     const mid = nativeMaterialIdRef.current;
     const page = nativeCurrentPageRef.current;
     if (!lid || !mid || !Number.isFinite(page) || page <= 0) return;
-    const strokes = materialReviewMode ? annotationsForMaterialPage(mid, page) : annotationsForPage(lid, mid, page);
+    const strokes = annotationsForMaterialPage(mid, page);
     const removeIndex = strokes.map((stroke, index) => ({ stroke, index }))
       .reverse()
       .find(({ stroke }) => stroke.coordSpace === 'pdfPage')?.index;
     if (removeIndex == null) return;
     const next = strokes.filter((_, index) => index !== removeIndex);
-    if (materialReviewMode) {
-      replaceMaterialPageAnnotationStrokesForMaterial(mid, page, next, materialScopeLectureId(mid));
-    } else {
-      replaceMaterialPageAnnotationStrokes(lid, mid, page, next);
-    }
-  }, [annotationsForMaterialPage, annotationsForPage, materialReviewMode, replaceMaterialPageAnnotationStrokes, replaceMaterialPageAnnotationStrokesForMaterial]);
+    replaceMaterialPageAnnotationStrokesForMaterial(mid, page, next, materialScopeLectureId(mid));
+  }, [annotationsForMaterialPage, replaceMaterialPageAnnotationStrokesForMaterial]);
 
   // ---- Empty / error states ----
   if (!material) {
