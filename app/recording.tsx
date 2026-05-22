@@ -5,7 +5,9 @@ import {
   ActivityIndicator,
   Animated,
   AppState,
+  Alert,
   Linking,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -20,6 +22,7 @@ import { SecondaryButton } from '@/components/SecondaryButton';
 import { StatusPill } from '@/components/StatusPill';
 import { colors, fontSize, layout, radius, shadows, spacing } from '@/constants/theme';
 import { formatClock } from '@/lib/format';
+import { pickAndImportPdf } from '@/lib/importMaterial';
 import { logLiveCaptionEvent, logLiveCaptionUnavailable } from '@/lib/liveCaptionDiagnostics';
 import { useLiveCaptions } from '@/lib/liveCaptions';
 import { getLiveMicStreamStatus, startMicStream, stopMicStream } from '@/lib/liveMicStream';
@@ -33,7 +36,17 @@ const LIVE_CAPTIONS_UNAVAILABLE_MESSAGE = 'Live captions unavailable. Audio reco
 export default function RecordingScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ courseId?: string; lectureTitle?: string }>();
-  const { getCourse, createLecture } = useData();
+  const {
+    getCourse,
+    createLecture,
+    currentUserId,
+    lectures,
+    materialsForCourse,
+    addMaterial,
+    reserveLectureId,
+    linkMaterialToLecture,
+    cleanupOrphanMaterialLinks,
+  } = useData();
   const {
     draftNotes,
     draftStrokes,
@@ -75,16 +88,27 @@ export default function RecordingScreen() {
 
   const [micStreamError, setMicStreamError] = useState<string | null>(null);
   const [finishing, setFinishing] = useState(false);
+  const [materialPickerVisible, setMaterialPickerVisible] = useState(false);
+  const [importingMaterial, setImportingMaterial] = useState(false);
+  const [pendingLectureId] = useState(() => reserveLectureId());
   const toast = useRef(new Animated.Value(0)).current;
   const autoStarted = useRef(false);
   const isRecordingRef = useRef(false);
   const recoverCaptionsRef = useRef<() => void>(() => {});
+  const finishedRef = useRef(false);
+  const lecturesRef = useRef(lectures);
 
   const granted = permissionStatus === 'granted';
   const seconds = Math.floor(durationMillis / 1000);
+  const recordingSessionActive = isRecording || isPaused || durationMillis > 0;
   const latestFinalEnglish = latestFinalLine?.text ?? captionLines[captionLines.length - 1]?.text ?? '';
   const visibleEnglishCaption = partialCaption || latestFinalEnglish || latestCaption;
   const visibleChineseCaption = partialTranslationZh || latestFinalLine?.translationZh || '';
+  const courseMaterials = course ? materialsForCourse(course.id) : [];
+
+  useEffect(() => {
+    lecturesRef.current = lectures;
+  }, [lectures]);
 
   // Start live captions, then the live PCM mic stream. The local lecture
   // recorder is already running by this point (recorder-first order), so the
@@ -130,6 +154,16 @@ export default function RecordingScreen() {
   useEffect(() => {
     resetDraft();
   }, [resetDraft]);
+
+  // If the user abandons the recording before Finish creates the Lecture,
+  // discard any temporary material links created against the reserved id.
+  useEffect(() => {
+    return () => {
+      if (!finishedRef.current) {
+        cleanupOrphanMaterialLinks(lecturesRef.current.map((lecture) => lecture.id));
+      }
+    };
+  }, [cleanupOrphanMaterialLinks]);
 
   // Recording is the authoritative clock. Mini mirrors this value rather than
   // maintaining its own mark timeline, so marks from either surface align.
@@ -201,11 +235,13 @@ export default function RecordingScreen() {
   const finish = async () => {
     if (finishing) return;
     setFinishing(true);
+    finishedRef.current = true;
     const finalDuration = durationMillis;
     stopMicStream();
     stopLiveCaptions();
     const uri = await stopRecording();
     const lecture = createLecture({
+      id: pendingLectureId,
       courseId: params.courseId ?? '',
       title: (params.lectureTitle ?? '').trim() || 'Untitled Lecture',
       durationMillis: finalDuration,
@@ -221,6 +257,31 @@ export default function RecordingScreen() {
 
   const openMiniCaption = () => {
     router.push({ pathname: '/mini-caption', params: { elapsed: String(seconds) } });
+  };
+
+  const openLinkedMaterial = (materialId: string) => {
+    if (!course) return;
+    linkMaterialToLecture(pendingLectureId, materialId);
+    setMaterialPickerVisible(false);
+    router.push({
+      pathname: '/lecture-material/[lectureId]/[materialId]',
+      params: { lectureId: pendingLectureId, materialId },
+    });
+  };
+
+  const importAndOpenMaterial = async () => {
+    if (!course || importingMaterial) return;
+    setImportingMaterial(true);
+    const result = await pickAndImportPdf({ courseId: course.id, userId: currentUserId });
+    setImportingMaterial(false);
+    if (result.ok) {
+      addMaterial(result.material);
+      openLinkedMaterial(result.material.id);
+      return;
+    }
+    if (!result.canceled) {
+      Alert.alert('Could not import material', result.reason);
+    }
   };
 
   return (
@@ -326,6 +387,18 @@ export default function RecordingScreen() {
                 {error ? <Text style={styles.errorText}>{error}</Text> : null}
               </View>
 
+              {course ? (
+                <View style={styles.recordingToolRow}>
+                  <SecondaryButton
+                    label="Use Course Material"
+                    icon="document-text-outline"
+                    disabled={!recordingSessionActive || finishing}
+                    onPress={() => setMaterialPickerVisible(true)}
+                    style={styles.recordingToolButton}
+                  />
+                </View>
+              ) : null}
+
               <GlassCard padding={spacing.xl}>
                 <View style={styles.stateHeader}>
                   <View style={[styles.stateIcon, isPaused && styles.stateIconPaused]}>
@@ -427,6 +500,74 @@ export default function RecordingScreen() {
               style={styles.sideAction}
             />
           </View>
+
+          <Modal
+            visible={materialPickerVisible}
+            transparent
+            animationType="fade"
+            onRequestClose={() => setMaterialPickerVisible(false)}
+          >
+            <View style={styles.materialModalOverlay}>
+              <Pressable style={StyleSheet.absoluteFill} onPress={() => setMaterialPickerVisible(false)} />
+              <View style={styles.materialModalCard}>
+                <View style={styles.materialModalHeader}>
+                  <View>
+                    <Text style={styles.materialModalTitle}>Use course material</Text>
+                    <Text style={styles.materialModalSubtitle} numberOfLines={1}>
+                      {course?.name ?? 'Current course'}
+                    </Text>
+                  </View>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Close material picker"
+                    onPress={() => setMaterialPickerVisible(false)}
+                    style={({ pressed }) => [styles.materialModalClose, pressed && styles.pressed]}
+                  >
+                    <Ionicons name="close" size={20} color={colors.deepNavy} />
+                  </Pressable>
+                </View>
+
+                {courseMaterials.length > 0 ? (
+                  <ScrollView style={styles.materialPickerList} contentContainerStyle={styles.materialPickerListContent}>
+                    {courseMaterials.map((material) => (
+                      <Pressable
+                        key={material.id}
+                        accessibilityRole="button"
+                        onPress={() => openLinkedMaterial(material.id)}
+                        style={({ pressed }) => [styles.materialPickerRow, pressed && styles.pressed]}
+                      >
+                        <View style={styles.materialPickerIcon}>
+                          <Ionicons name="document-text-outline" size={19} color={colors.deepNavy} />
+                        </View>
+                        <View style={styles.materialPickerBody}>
+                          <Text style={styles.materialPickerTitle} numberOfLines={1}>{material.title}</Text>
+                          <Text style={styles.materialPickerMeta}>
+                            {material.pageCount ? `${material.pageCount} pages` : 'PDF material'}
+                          </Text>
+                        </View>
+                        <Ionicons name="chevron-forward" size={18} color={colors.textTertiary} />
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                ) : (
+                  <View style={styles.materialEmptyState}>
+                    <Ionicons name="folder-open-outline" size={34} color={colors.mutedBlueGray} />
+                    <Text style={styles.materialEmptyTitle}>No materials in this course yet.</Text>
+                    <Text style={styles.materialEmptyBody}>
+                      Import a PDF into this course, then use it during this lecture.
+                    </Text>
+                  </View>
+                )}
+
+                <SecondaryButton
+                  label={importingMaterial ? 'Importing…' : 'Import PDF'}
+                  icon="cloud-upload-outline"
+                  disabled={importingMaterial}
+                  onPress={importAndOpenMaterial}
+                />
+              </View>
+            </View>
+          </Modal>
         </>
       )}
     </SafeAreaView>
@@ -577,6 +718,12 @@ const styles = StyleSheet.create({
     color: colors.textTertiary,
     fontWeight: '500',
   },
+  recordingToolRow: {
+    alignItems: 'center',
+  },
+  recordingToolButton: {
+    minWidth: 230,
+  },
 
   // ---- Recording-state card ----
   stateHeader: {
@@ -676,5 +823,110 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     ...shadows.button,
+  },
+  materialModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(6, 27, 52, 0.32)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: spacing.xl,
+  },
+  materialModalCard: {
+    width: '100%',
+    maxWidth: 480,
+    maxHeight: '72%',
+    backgroundColor: colors.surface,
+    borderRadius: radius.xl,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.xl,
+    gap: spacing.md,
+    shadowColor: '#0A2342',
+    shadowOffset: { width: 0, height: 18 },
+    shadowOpacity: 0.18,
+    shadowRadius: 30,
+    elevation: 12,
+  },
+  materialModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.md,
+  },
+  materialModalTitle: {
+    fontSize: fontSize.xl,
+    fontWeight: '800',
+    color: colors.textPrimary,
+  },
+  materialModalSubtitle: {
+    marginTop: 2,
+    fontSize: fontSize.sm,
+    color: colors.textTertiary,
+    fontWeight: '600',
+  },
+  materialModalClose: {
+    width: 38,
+    height: 38,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surfaceMuted,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  materialPickerList: {
+    maxHeight: 330,
+  },
+  materialPickerListContent: {
+    gap: spacing.sm,
+    paddingVertical: spacing.xs,
+  },
+  materialPickerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+    borderRadius: radius.md,
+    backgroundColor: colors.surfaceMuted,
+  },
+  materialPickerIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: radius.sm,
+    backgroundColor: colors.iceTint,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  materialPickerBody: {
+    flex: 1,
+    gap: 2,
+  },
+  materialPickerTitle: {
+    fontSize: fontSize.md,
+    fontWeight: '700',
+    color: colors.textPrimary,
+  },
+  materialPickerMeta: {
+    fontSize: fontSize.xs,
+    fontWeight: '600',
+    color: colors.textTertiary,
+  },
+  materialEmptyState: {
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingVertical: spacing.xl,
+    paddingHorizontal: spacing.md,
+  },
+  materialEmptyTitle: {
+    fontSize: fontSize.md,
+    fontWeight: '800',
+    color: colors.textPrimary,
+    textAlign: 'center',
+  },
+  materialEmptyBody: {
+    fontSize: fontSize.sm,
+    lineHeight: fontSize.sm * 1.45,
+    fontWeight: '500',
+    color: colors.textSecondary,
+    textAlign: 'center',
   },
 });

@@ -19,7 +19,14 @@ import {
 import { AppState } from 'react-native';
 
 import { useAuth } from './auth';
-import { COURSE_PRESETS, type Course, type Lecture, type NoteStroke } from './models';
+import {
+  COURSE_PRESETS,
+  type Course,
+  type CourseMaterial,
+  type Lecture,
+  type LectureMaterialLink,
+  type NoteStroke,
+} from './models';
 import { supabase } from './supabase';
 
 // Legacy global keys from pre-account-isolation builds. Deliberately never
@@ -28,9 +35,11 @@ const LEGACY_COURSES_KEY = 'youmi.courses.v1';
 const LEGACY_LECTURES_KEY = 'youmi.lectures.v1';
 const scopedCoursesKey = (userId: string) => `youmi.courses.v1.${userId}`;
 const scopedLecturesKey = (userId: string) => `youmi.lectures.v1.${userId}`;
+const scopedMaterialsKey = (userId: string) => `youmi.materials.v1.${userId}`;
+const scopedMaterialLinksKey = (userId: string) => `youmi.materialLinks.v1.${userId}`;
 const UNFILED_COURSE_NAME = 'Unfiled';
 const REMOTE_RECORDING_COLUMNS =
-  'id, user_id, course, title, duration_sec, ai_status, ai_error, created_at, storage_path, transcript, transcript_zh, summary_en, summary_zh, live_transcript';
+  'id, user_id, course, title, duration_sec, ai_status, ai_error, created_at, updated_at, storage_path, transcript, transcript_zh, summary_en, summary_zh, live_transcript';
 const REMOTE_RECORDING_COLUMNS_LEGACY =
   'id, user_id, course, title, duration_sec, ai_status, ai_error, created_at, storage_path, transcript, summary_en, summary_zh, live_transcript';
 
@@ -42,6 +51,8 @@ export type NewCourseInput = {
 };
 
 export type NewLectureInput = {
+  /** Optional reserved id used by in-progress recording workflows. */
+  id?: string;
   courseId: string;
   title: string;
   durationMillis: number;
@@ -95,6 +106,37 @@ type DataContextValue = {
   getCourse: (id?: string | null) => Course | undefined;
   getLecture: (id?: string | null) => Lecture | undefined;
   lecturesForCourse: (courseId: string) => Lecture[];
+
+  // ---- Course Materials (Build 7 V1.1 — course-level only, local-only) ----
+  /** Active (non-soft-deleted) materials, hydrated from AsyncStorage. */
+  materials: CourseMaterial[];
+  /** Materials belonging to a course, active only, newest first. */
+  materialsForCourse: (courseId: string) => CourseMaterial[];
+  /** Look up a material by id; undefined if missing or soft-deleted. */
+  getMaterial: (id?: string | null) => CourseMaterial | undefined;
+  /** Add a freshly-imported material into the store + persist to scoped cache. */
+  addMaterial: (material: CourseMaterial) => void;
+  /** Rename a material. Trims; no-op if empty after trim. */
+  renameMaterial: (materialId: string, newTitle: string) => void;
+  /** Update fields on a material (e.g. lastOpenedPage, pageCount). Bumps updatedAt. */
+  updateMaterial: (materialId: string, patch: Partial<CourseMaterial>) => void;
+  /** Soft-delete a material (moves to Recently Deleted; file stays in sandbox). */
+  deleteMaterial: (materialId: string) => void;
+
+  // ---- Lecture ↔ Material links (Build 7.x — local-only) ----
+  materialLinks: LectureMaterialLink[];
+  reserveLectureId: () => string;
+  linkMaterialToLecture: (lectureId: string, materialId: string) => LectureMaterialLink;
+  updateLectureMaterialLink: (
+    lectureId: string,
+    materialId: string,
+    patch: Partial<LectureMaterialLink>,
+  ) => void;
+  materialLinksForLecture: (lectureId: string) => LectureMaterialLink[];
+  materialLinksForMaterial: (materialId: string) => LectureMaterialLink[];
+  removeLectureMaterialLink: (lectureId: string, materialId: string, reason?: string) => void;
+  cleanupOrphanMaterialLinks: (validLectureIds: string[]) => void;
+
   clearAll: () => Promise<void>;
 };
 
@@ -281,10 +323,27 @@ function mergeRemoteRecordingsIntoStore(
     const summaryZh = keepLocalIfRemoteMissing(row.summary_zh, local?.summaryZh);
     const liveTranscript = keepLocalIfRemoteMissing(row.live_transcript, local?.liveTranscript);
 
+    // Title freshness: if the local lecture has been renamed more recently
+    // than this remote row was updated, keep the local title — otherwise the
+    // foreground refresh would revert a freshly-renamed lecture back to its
+    // stale remote value before our async rename push has propagated.
+    const remoteTitleTrim = row.title?.trim() ?? '';
+    const localTitleTrim = local?.title?.trim() ?? '';
+    const localTitleUpdatedAt = local?.titleUpdatedAt;
+    const remoteUpdatedAt = row.updated_at;
+    const preferLocalTitle =
+      Boolean(localTitleTrim) &&
+      Boolean(localTitleUpdatedAt) &&
+      (!remoteUpdatedAt || localTitleUpdatedAt! > remoteUpdatedAt);
+    const finalTitle = preferLocalTitle
+      ? localTitleTrim
+      : remoteTitleTrim || localTitleTrim || 'Untitled Lecture';
+
     return {
       id: local?.id ?? makeRemoteLectureId(row.id),
       courseId: course?.id ?? stableIdFromName('cloud_course', UNFILED_COURSE_NAME),
-      title: row.title?.trim() || local?.title || 'Untitled Lecture',
+      title: finalTitle,
+      titleUpdatedAt: localTitleUpdatedAt,
       date,
       durationMillis: parseDurationMillis(row.duration_sec) || local?.durationMillis || 0,
       localAudioUri: local?.localAudioUri ?? null,
@@ -338,10 +397,13 @@ export function DataProvider({ children }: { children: ReactNode }) {
   const [hydratedUserId, setHydratedUserId] = useState<string | null>(null);
   const [courses, setCourses] = useState<Course[]>([]);
   const [lectures, setLectures] = useState<Lecture[]>([]);
+  const [materials, setMaterials] = useState<CourseMaterial[]>([]);
+  const [materialLinks, setMaterialLinks] = useState<LectureMaterialLink[]>([]);
   const [selectedCourseId, setSelectedCourseId] = useState<string | null>(null);
   const hydrateSequence = useRef(0);
   const coursesRef = useRef<Course[]>([]);
   const lecturesRef = useRef<Lecture[]>([]);
+  const materialsRef = useRef<CourseMaterial[]>([]);
 
   useEffect(() => {
     coursesRef.current = courses;
@@ -350,6 +412,10 @@ export function DataProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     lecturesRef.current = lectures;
   }, [lectures]);
+
+  useEffect(() => {
+    materialsRef.current = materials;
+  }, [materials]);
 
   const applyRemoteRecordings = useCallback(
     async (baseCourses: Course[], baseLectures: Lecture[]) => {
@@ -381,6 +447,8 @@ export function DataProvider({ children }: { children: ReactNode }) {
     setHydratedUserId(null);
     setCourses([]);
     setLectures([]);
+    setMaterials([]);
+    setMaterialLinks([]);
     setSelectedCourseId(null);
 
     if (!currentUserId) {
@@ -393,13 +461,17 @@ export function DataProvider({ children }: { children: ReactNode }) {
 
     (async () => {
       try {
-        const [rawCourses, rawLectures] = await Promise.all([
+        const [rawCourses, rawLectures, rawMaterials, rawMaterialLinks] = await Promise.all([
           AsyncStorage.getItem(scopedCoursesKey(currentUserId)),
           AsyncStorage.getItem(scopedLecturesKey(currentUserId)),
+          AsyncStorage.getItem(scopedMaterialsKey(currentUserId)),
+          AsyncStorage.getItem(scopedMaterialLinksKey(currentUserId)),
         ]);
         if (!mounted || hydrateSequence.current !== sequence) return;
         const storedCourses: Course[] = rawCourses ? JSON.parse(rawCourses) : [];
         const storedLectures: Lecture[] = rawLectures ? JSON.parse(rawLectures) : [];
+        const storedMaterials: CourseMaterial[] = rawMaterials ? JSON.parse(rawMaterials) : [];
+        const storedMaterialLinks: LectureMaterialLink[] = rawMaterialLinks ? JSON.parse(rawMaterialLinks) : [];
         const normalizedLocalLectures = normalizeLectures(storedLectures);
         let nextCourses = storedCourses;
         let nextLectures = normalizedLocalLectures;
@@ -416,6 +488,9 @@ export function DataProvider({ children }: { children: ReactNode }) {
         if (!mounted || hydrateSequence.current !== sequence) return;
         setCourses(nextCourses);
         setLectures(nextLectures);
+        // Materials are local-only in V1.1 — no cloud merge yet.
+        setMaterials(Array.isArray(storedMaterials) ? storedMaterials : []);
+        setMaterialLinks(Array.isArray(storedMaterialLinks) ? storedMaterialLinks : []);
         setHydratedUserId(currentUserId);
         setSelectedCourseId(nextCourses.find((course) => !course.deletedAt)?.id ?? null);
       } catch {
@@ -472,6 +547,21 @@ export function DataProvider({ children }: { children: ReactNode }) {
     }
   }, [lectures, currentUserId, hydratedUserId, loaded]);
 
+  // Materials persistence (Build 7 V1.1) — same per-user-scoped pattern.
+  // Local-only; no Supabase mirror in V1.
+  useEffect(() => {
+    if (loaded && currentUserId && hydratedUserId === currentUserId) {
+      AsyncStorage.setItem(scopedMaterialsKey(currentUserId), JSON.stringify(materials)).catch(() => {});
+    }
+  }, [materials, currentUserId, hydratedUserId, loaded]);
+
+  // Lecture/material links are also local-only and scoped per signed-in user.
+  useEffect(() => {
+    if (loaded && currentUserId && hydratedUserId === currentUserId) {
+      AsyncStorage.setItem(scopedMaterialLinksKey(currentUserId), JSON.stringify(materialLinks)).catch(() => {});
+    }
+  }, [materialLinks, currentUserId, hydratedUserId, loaded]);
+
   const createCourse = useCallback((input: NewCourseInput): Course => {
     const course: Course = {
       id: makeId('course'),
@@ -488,7 +578,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
 
   const createLecture = useCallback((input: NewLectureInput): Lecture => {
     const lecture: Lecture = {
-      id: makeId('lecture'),
+      id: input.id ?? makeId('lecture'),
       courseId: input.courseId,
       title: input.title,
       date: new Date().toISOString(),
@@ -529,8 +619,42 @@ export function DataProvider({ children }: { children: ReactNode }) {
   const renameLecture = useCallback((lectureId: string, newTitle: string) => {
     const trimmed = newTitle.trim();
     if (!trimmed) return;
-    setLectures((prev) => prev.map((l) => (l.id === lectureId ? { ...l, title: trimmed } : l)));
-  }, []);
+    const now = new Date().toISOString();
+
+    // Capture the lecture's remoteRecordingId before the state update so we
+    // can decide whether to push to Supabase, without depending on the
+    // updater closure.
+    const target = lecturesRef.current.find((l) => l.id === lectureId);
+    const remoteId = target?.remoteRecordingId ?? null;
+
+    // Local state + the per-user AsyncStorage cache (via the persistence
+    // effect that watches `lectures`) get the new title immediately, plus
+    // a freshness stamp the cloud-merge uses to defeat stale-remote reverts.
+    setLectures((prev) =>
+      prev.map((l) => (l.id === lectureId ? { ...l, title: trimmed, titleUpdatedAt: now } : l)),
+    );
+
+    // Cloud-backed lecture: push the title to public.recordings so other
+    // devices and a future restore both reflect the rename. RLS scopes the
+    // update to the current user; we also constrain by user_id explicitly
+    // as defense in depth. Fire-and-forget: if it fails the local title +
+    // titleUpdatedAt still win the next merge until the push succeeds.
+    if (remoteId && currentUserId) {
+      void supabase
+        .from('recordings')
+        .update({ title: trimmed, updated_at: now })
+        .eq('id', remoteId)
+        .eq('user_id', currentUserId)
+        .then(({ error }) => {
+          if (error) {
+            console.warn('[store] remote lecture rename failed (kept local)', {
+              lectureId,
+              message: error.message,
+            });
+          }
+        });
+    }
+  }, [currentUserId]);
 
   // Deleting moves an item to Recently Deleted (soft delete) — data is never
   // destroyed here. permanentlyDelete* below is the only path that removes data.
@@ -598,14 +722,142 @@ export function DataProvider({ children }: { children: ReactNode }) {
     setLectures((prev) => prev.filter((lecture) => lecture.id !== id));
   }, []);
 
+  // ---- Course Materials CRUD (Build 7 V1.1) ----
+  const addMaterial = useCallback((material: CourseMaterial) => {
+    setMaterials((prev) => [...prev, material]);
+  }, []);
+
+  const renameMaterial = useCallback((materialId: string, newTitle: string) => {
+    const trimmed = newTitle.trim();
+    if (!trimmed) return;
+    const now = new Date().toISOString();
+    setMaterials((prev) =>
+      prev.map((m) => (m.id === materialId ? { ...m, title: trimmed, updatedAt: now } : m)),
+    );
+  }, []);
+
+  /**
+   * Idempotent update. If none of the patched fields actually differ from the
+   * stored material, returns the same `prev` array reference — no state
+   * mutation, no re-render. This is essential because the PDF viewer calls
+   * updateMaterial on every onLoadComplete / debounced page change; without
+   * this guard, a stable value would still bump `updatedAt`, churn material
+   * identity, and produce a "Maximum update depth exceeded" loop in any
+   * effect whose deps include `material`.
+   */
+  const updateMaterial = useCallback((materialId: string, patch: Partial<CourseMaterial>) => {
+    setMaterials((prev) => {
+      let mutated = false;
+      const next = prev.map((m) => {
+        if (m.id !== materialId) return m;
+        let anyDifferent = false;
+        for (const key of Object.keys(patch) as (keyof CourseMaterial)[]) {
+          if (m[key] !== patch[key]) {
+            anyDifferent = true;
+            break;
+          }
+        }
+        if (!anyDifferent) return m;
+        mutated = true;
+        return { ...m, ...patch, updatedAt: new Date().toISOString() };
+      });
+      return mutated ? next : prev;
+    });
+  }, []);
+
+  const deleteMaterial = useCallback((materialId: string) => {
+    const now = new Date().toISOString();
+    setMaterials((prev) =>
+      prev.map((m) => (m.id === materialId ? { ...m, deletedAt: now, deletedReason: 'manual' } : m)),
+    );
+  }, []);
+
+  const reserveLectureId = useCallback(() => makeId('lecture'), []);
+
+  const linkMaterialToLecture = useCallback((lectureId: string, materialId: string): LectureMaterialLink => {
+    const now = new Date().toISOString();
+    let result: LectureMaterialLink | null = null;
+    setMaterialLinks((prev) => {
+      const existing = prev.find((link) => link.lectureId === lectureId && link.materialId === materialId);
+      if (existing) {
+        if (!existing.deletedAt && !existing.deletedReason) {
+          result = existing;
+          return prev;
+        }
+        const revived = { ...existing, deletedAt: null, deletedReason: null, updatedAt: now };
+        result = revived;
+        return prev.map((link) => (link === existing ? revived : link));
+      }
+      const next: LectureMaterialLink = { lectureId, materialId, createdAt: now, updatedAt: now };
+      result = next;
+      return [...prev, next];
+    });
+    return result ?? { lectureId, materialId, createdAt: now, updatedAt: now };
+  }, []);
+
+  const updateLectureMaterialLink = useCallback((
+    lectureId: string,
+    materialId: string,
+    patch: Partial<LectureMaterialLink>,
+  ) => {
+    setMaterialLinks((prev) => {
+      let mutated = false;
+      const now = new Date().toISOString();
+      const next = prev.map((link) => {
+        if (link.lectureId !== lectureId || link.materialId !== materialId || link.deletedAt) return link;
+        let anyDifferent = false;
+        for (const key of Object.keys(patch) as (keyof LectureMaterialLink)[]) {
+          if (key === 'lectureId' || key === 'materialId' || key === 'createdAt' || key === 'updatedAt') continue;
+          if (link[key] !== patch[key]) {
+            anyDifferent = true;
+            break;
+          }
+        }
+        if (!anyDifferent) return link;
+        mutated = true;
+        return { ...link, ...patch, lectureId, materialId, updatedAt: now };
+      });
+      return mutated ? next : prev;
+    });
+  }, []);
+
+  const removeLectureMaterialLink = useCallback((lectureId: string, materialId: string, reason = 'manual') => {
+    const now = new Date().toISOString();
+    setMaterialLinks((prev) =>
+      prev.map((link) =>
+        link.lectureId === lectureId && link.materialId === materialId && !link.deletedAt
+          ? { ...link, deletedAt: now, deletedReason: reason, updatedAt: now }
+          : link,
+      ),
+    );
+  }, []);
+
+  const cleanupOrphanMaterialLinks = useCallback((validLectureIds: string[]) => {
+    const validSet = new Set(validLectureIds);
+    const now = new Date().toISOString();
+    setMaterialLinks((prev) => {
+      let mutated = false;
+      const next = prev.map((link) => {
+        if (link.deletedAt || validSet.has(link.lectureId)) return link;
+        mutated = true;
+        return { ...link, deletedAt: now, deletedReason: 'recording_abandoned', updatedAt: now };
+      });
+      return mutated ? next : prev;
+    });
+  }, []);
+
   const clearAll = useCallback(async () => {
     setCourses([]);
     setLectures([]);
+    setMaterials([]);
+    setMaterialLinks([]);
     setSelectedCourseId(null);
     if (currentUserId) {
       await AsyncStorage.multiRemove([
         scopedCoursesKey(currentUserId),
         scopedLecturesKey(currentUserId),
+        scopedMaterialsKey(currentUserId),
+        scopedMaterialLinksKey(currentUserId),
       ]).catch(() => {});
     }
   }, [currentUserId]);
@@ -613,6 +865,19 @@ export function DataProvider({ children }: { children: ReactNode }) {
   const visibleStoreReady = loaded && hydratedUserId === currentUserId;
   const visibleCourses = visibleStoreReady ? courses : [];
   const visibleLectures = visibleStoreReady ? lectures : [];
+  const visibleMaterials = visibleStoreReady ? materials : [];
+  const visibleMaterialLinks = visibleStoreReady ? materialLinks : [];
+
+  // Active (non-soft-deleted) materials. A material whose parent course is in
+  // Recently Deleted is hidden from active views — same pattern as lectures.
+  const activeMaterials = useMemo(
+    () => visibleMaterials.filter((m) => !m.deletedAt),
+    [visibleMaterials],
+  );
+  const activeMaterialLinks = useMemo(
+    () => visibleMaterialLinks.filter((link) => !link.deletedAt),
+    [visibleMaterialLinks],
+  );
 
   // Active vs Recently Deleted. A course/lecture with deletedAt set is in
   // Recently Deleted. Lectures whose parent course is deleted are hidden from
@@ -663,9 +928,29 @@ export function DataProvider({ children }: { children: ReactNode }) {
       getCourse: (id) => activeCourses.find((c) => c.id === id),
       getLecture: (id) => activeLectures.find((l) => l.id === id),
       lecturesForCourse: (courseId) => activeLectures.filter((l) => l.courseId === courseId),
+      materials: activeMaterials,
+      materialsForCourse: (courseId) =>
+        activeMaterials
+          .filter((m) => m.courseId === courseId)
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+      getMaterial: (id) => activeMaterials.find((m) => m.id === id),
+      addMaterial,
+      renameMaterial,
+      updateMaterial,
+      deleteMaterial,
+      materialLinks: activeMaterialLinks,
+      reserveLectureId,
+      linkMaterialToLecture,
+      updateLectureMaterialLink,
+      materialLinksForLecture: (lectureId) =>
+        activeMaterialLinks.filter((link) => link.lectureId === lectureId),
+      materialLinksForMaterial: (materialId) =>
+        activeMaterialLinks.filter((link) => link.materialId === materialId),
+      removeLectureMaterialLink,
+      cleanupOrphanMaterialLinks,
       clearAll,
     }),
-    [visibleStoreReady, currentUserId, activeCourses, activeLectures, deletedCourses, deletedLectures, selectedCourseId, createCourse, createLecture, updateLecture, deleteLecture, deleteCourse, restoreCourse, restoreLecture, permanentlyDeleteCourse, permanentlyDeleteLecture, renameCourse, renameLecture, clearAll],
+    [visibleStoreReady, currentUserId, activeCourses, activeLectures, deletedCourses, deletedLectures, selectedCourseId, createCourse, createLecture, updateLecture, deleteLecture, deleteCourse, restoreCourse, restoreLecture, permanentlyDeleteCourse, permanentlyDeleteLecture, renameCourse, renameLecture, activeMaterials, addMaterial, renameMaterial, updateMaterial, deleteMaterial, activeMaterialLinks, reserveLectureId, linkMaterialToLecture, updateLectureMaterialLink, removeLectureMaterialLink, cleanupOrphanMaterialLinks, clearAll],
   );
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;

@@ -1,17 +1,19 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { ComponentProps, useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { GlassCard } from '@/components/GlassCard';
 import { PrimaryButton } from '@/components/PrimaryButton';
 import { RenameModal } from '@/components/RenameModal';
+import { SecondaryButton } from '@/components/SecondaryButton';
 import { StatusPill, StatusVariant } from '@/components/StatusPill';
 import { SwipeDeleteRow } from '@/components/SwipeDeleteRow';
 import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
 import { formatDate, formatDuration, formatShortDate } from '@/lib/format';
-import type { Lecture } from '@/lib/models';
+import { pickAndImportPdf } from '@/lib/importMaterial';
+import type { CourseMaterial, Lecture } from '@/lib/models';
 import { useData } from '@/lib/store';
 
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
@@ -36,12 +38,25 @@ function lectureStatus(lecture: Lecture): LectureStatusDisplay {
 export default function CourseDetailScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string }>();
-  const { getCourse, lecturesForCourse, setSelectedCourseId, deleteLecture, renameCourse, renameLecture } = useData();
+  const {
+    getCourse,
+    lecturesForCourse,
+    setSelectedCourseId,
+    deleteLecture,
+    renameCourse,
+    renameLecture,
+    currentUserId,
+    materialsForCourse,
+    addMaterial,
+    renameMaterial,
+    deleteMaterial,
+  } = useData();
 
   const course = getCourse(params.id);
   const lectures = course
     ? [...lecturesForCourse(course.id)].sort((a, b) => b.date.localeCompare(a.date))
     : [];
+  const materials = course ? materialsForCourse(course.id) : [];
   const latestLecture = lectures[0];
   const [openLectureId, setOpenLectureId] = useState<string | null>(null);
 
@@ -50,6 +65,56 @@ export default function CourseDetailScreen() {
 
   // Rename lecture modal
   const [renameLectureTarget, setRenameLectureTarget] = useState<Lecture | null>(null);
+
+  // Materials state
+  const [importing, setImporting] = useState(false);
+  const [openMaterialId, setOpenMaterialId] = useState<string | null>(null);
+  const [renameMaterialTarget, setRenameMaterialTarget] = useState<CourseMaterial | null>(null);
+
+  const handleImportMaterial = async () => {
+    if (!course || importing) return;
+    setImporting(true);
+    const result = await pickAndImportPdf({ courseId: course.id, userId: currentUserId });
+    setImporting(false);
+    if (result.ok) {
+      addMaterial(result.material);
+      return;
+    }
+    if (result.canceled) return; // user dismissed picker — no alert
+    Alert.alert('Could not import material', result.reason);
+  };
+
+  const confirmDeleteMaterial = (materialId: string) => {
+    Alert.alert(
+      'Delete material',
+      'This material will move to Recently Deleted. The file stays on this iPad.',
+      [
+        { text: 'Cancel', style: 'cancel', onPress: () => setOpenMaterialId(null) },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            deleteMaterial(materialId);
+            setOpenMaterialId(null);
+          },
+        },
+      ],
+    );
+  };
+
+  const openMaterial = (materialId: string) => {
+    setOpenMaterialId(null);
+    router.push({ pathname: '/material/[id]', params: { id: materialId } });
+  };
+
+  const formatBytes = (bytes?: number): string => {
+    if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes <= 0) return '';
+    if (bytes < 1024) return `${bytes} B`;
+    const kb = bytes / 1024;
+    if (kb < 1024) return `${kb.toFixed(1)} KB`;
+    const mb = kb / 1024;
+    return `${mb.toFixed(1)} MB`;
+  };
 
   if (!course) {
     return (
@@ -146,6 +211,104 @@ export default function CourseDetailScreen() {
             <PrimaryButton label="Start new lecture" icon="mic" onPress={startLecture} style={styles.startButton} />
           </GlassCard>
 
+          {/* ───── Course Materials (Build 7 V1.1, local-only) ───── */}
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Materials</Text>
+            <Text style={styles.sectionMeta}>
+              {materials.length} {materials.length === 1 ? 'item' : 'items'}
+            </Text>
+          </View>
+
+          <GlassCard style={styles.materialsCard}>
+            <Text style={styles.materialsBanner}>
+              Materials are saved on this iPad only. Cloud backup for materials will come later.
+            </Text>
+            {materials.length === 0 ? (
+              <View style={styles.materialsEmpty}>
+                <View style={styles.materialsEmptyIcon}>
+                  <Ionicons name="document-attach-outline" size={26} color={colors.deepNavy} />
+                </View>
+                <Text style={styles.materialsEmptyTitle}>No materials imported yet.</Text>
+                <Text style={styles.materialsEmptyBody}>
+                  Import a PDF textbook, slide deck, or reading you want available across this course.
+                </Text>
+              </View>
+            ) : (
+              <View style={styles.materialList}>
+                {materials.map((material, index) => (
+                  <SwipeDeleteRow
+                    key={material.id}
+                    open={openMaterialId === material.id}
+                    onOpen={() => setOpenMaterialId(material.id)}
+                    onClose={() => setOpenMaterialId(null)}
+                    onDelete={() => confirmDeleteMaterial(material.id)}
+                    style={index < materials.length - 1 ? styles.materialDivider : undefined}
+                  >
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={() => openMaterial(material.id)}
+                      style={({ pressed }) => [styles.materialRow, pressed && styles.lecturePressed]}
+                    >
+                      <View style={[styles.materialIcon, { backgroundColor: course.tint }]}>
+                        <Ionicons name="document-text-outline" size={20} color={course.accent} />
+                      </View>
+                      <View style={styles.materialBody}>
+                        <Text style={styles.materialTitle} numberOfLines={1}>{material.title}</Text>
+                        <View style={styles.lectureMetaRow}>
+                          <Text style={styles.lectureMeta}>PDF</Text>
+                          {material.pageCount ? (
+                            <>
+                              <View style={styles.metaDot} />
+                              <Text style={styles.lectureMeta}>
+                                {material.pageCount} {material.pageCount === 1 ? 'page' : 'pages'}
+                              </Text>
+                            </>
+                          ) : null}
+                          {formatBytes(material.fileSize) ? (
+                            <>
+                              <View style={styles.metaDot} />
+                              <Text style={styles.lectureMeta}>{formatBytes(material.fileSize)}</Text>
+                            </>
+                          ) : null}
+                        </View>
+                      </View>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel="Rename material"
+                        hitSlop={8}
+                        onPress={(e) => {
+                          e.stopPropagation();
+                          setOpenMaterialId(null);
+                          setRenameMaterialTarget(material);
+                        }}
+                        style={({ pressed }) => [styles.rowMenuButton, pressed && styles.pressed]}
+                      >
+                        <Ionicons name="pencil-outline" size={17} color={colors.textTertiary} />
+                      </Pressable>
+                      <Ionicons name="chevron-forward" size={18} color={colors.textTertiary} />
+                    </Pressable>
+                  </SwipeDeleteRow>
+                ))}
+              </View>
+            )}
+            <SecondaryButton
+              label={importing ? 'Importing…' : 'Import PDF'}
+              icon="cloud-upload-outline"
+              onPress={() => { void handleImportMaterial(); }}
+              disabled={importing}
+              style={styles.materialsImportButton}
+            />
+            {importing ? (
+              <View style={styles.materialsImportingHint}>
+                <ActivityIndicator color={colors.deepNavy} />
+                <Text style={styles.materialsImportingLabel}>
+                  Reading from Files…
+                </Text>
+              </View>
+            ) : null}
+          </GlassCard>
+
+          {/* ───── Lectures ───── */}
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Lectures</Text>
             {latestLecture ? (
@@ -243,6 +406,20 @@ export default function CourseDetailScreen() {
           setRenameLectureTarget(null);
         }}
       />
+
+      {/* Rename material modal (per-row) */}
+      <RenameModal
+        visible={renameMaterialTarget !== null}
+        title="Rename Material"
+        label="Material name"
+        initialValue={renameMaterialTarget?.title ?? ''}
+        placeholder="e.g. Psychology Textbook"
+        onCancel={() => setRenameMaterialTarget(null)}
+        onSave={(title) => {
+          if (renameMaterialTarget) renameMaterial(renameMaterialTarget.id, title);
+          setRenameMaterialTarget(null);
+        }}
+      />
     </SafeAreaView>
   );
 }
@@ -325,6 +502,69 @@ const styles = StyleSheet.create({
   lectureTitle: { fontSize: fontSize.lg, fontWeight: '700', color: colors.textPrimary },
   lectureMetaRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
   lectureMeta: { fontSize: fontSize.sm, color: colors.textTertiary, fontWeight: '500' },
+
+  // ---- Materials (Build 7 V1.1) ----
+  materialsCard: { gap: spacing.md },
+  materialsBanner: {
+    fontSize: fontSize.xs,
+    color: colors.textSecondary,
+    fontWeight: '600',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    backgroundColor: colors.iceTint,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.iceBlue,
+    overflow: 'hidden',
+  },
+  materialsEmpty: { alignItems: 'center', paddingVertical: spacing.lg, gap: spacing.sm },
+  materialsEmptyIcon: {
+    width: 56,
+    height: 56,
+    borderRadius: radius.xl,
+    backgroundColor: colors.iceTint,
+    borderWidth: 1,
+    borderColor: colors.iceBlue,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: spacing.xs,
+  },
+  materialsEmptyTitle: { fontSize: fontSize.md, fontWeight: '700', color: colors.textPrimary, textAlign: 'center' },
+  materialsEmptyBody: {
+    fontSize: fontSize.sm,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    fontWeight: '500',
+    lineHeight: fontSize.sm * 1.5,
+    paddingHorizontal: spacing.md,
+  },
+  materialList: { borderRadius: radius.md, overflow: 'hidden', borderWidth: 1, borderColor: colors.border },
+  materialRow: {
+    minHeight: 64,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm + 2,
+    backgroundColor: colors.surface,
+  },
+  materialDivider: { borderBottomWidth: 1, borderBottomColor: colors.border },
+  materialIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: radius.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  materialBody: { flex: 1, gap: 2 },
+  materialTitle: { fontSize: fontSize.md, fontWeight: '700', color: colors.textPrimary },
+  materialsImportButton: { alignSelf: 'flex-start' },
+  materialsImportingHint: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  materialsImportingLabel: { fontSize: fontSize.xs, color: colors.textTertiary, fontWeight: '600' },
   emptyCard: { alignItems: 'center', paddingVertical: spacing.xxl },
   emptyIcon: {
     width: 72,

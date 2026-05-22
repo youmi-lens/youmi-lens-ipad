@@ -63,6 +63,13 @@ export type Lecture = {
   id: string;
   courseId: string;
   title: string;
+  /**
+   * ISO timestamp of the last local title edit. Used by the cloud-merge logic
+   * to keep a freshly renamed local title from being reverted by a stale
+   * Supabase row before our remote update propagates. Absent for lectures
+   * that have never been renamed.
+   */
+  titleUpdatedAt?: string;
   /** ISO timestamp of when the lecture was recorded. */
   date: string;
   durationMillis: number;
@@ -112,6 +119,63 @@ export type Lecture = {
   /** Soft-delete timestamp (ISO). Absent or null = active; set = in Recently Deleted. */
   deletedAt?: string | null;
   /** Why the lecture was soft-deleted (e.g. 'manual'). */
+  deletedReason?: string | null;
+};
+
+/**
+ * A course-level imported study material (PDF textbooks, slides, readings).
+ *
+ * V1.1 (Build 7) keeps materials local-only — files live under the app's
+ * Documents/materials/ directory and metadata is persisted in user-scoped
+ * AsyncStorage. Cloud backup comes in V1.2. A material belongs to a Course
+ * and is reused across all Lectures in that course; per-lecture metadata
+ * (last opened page, page range) will live on a future LectureMaterialLink.
+ */
+export type CourseMaterial = {
+  id: string;
+  courseId: string;
+  title: string;
+  /** Reserved for future expansion (slides, image, etc.). PDF is the only V1 type. */
+  fileType: 'pdf';
+  /** Path under the app's Documents directory, e.g. 'materials/<id>.pdf'. Resolved at read time. */
+  localPath: string;
+  /** Bytes — surfaced in the UI; absent if the import couldn't read size metadata. */
+  fileSize?: number;
+  /** Number of pages — filled lazily after the PDF viewer reports it. */
+  pageCount?: number;
+  /** 1-based last page the user viewed. Persisted on page change. */
+  lastOpenedPage?: number;
+  /** ISO timestamp. */
+  createdAt: string;
+  /** ISO timestamp. Bumped on rename / last-page update. */
+  updatedAt: string;
+
+  // ---- Soft delete (Recently Deleted / recovery) ----
+  /** Soft-delete timestamp (ISO). Absent or null = active; set = in Recently Deleted. */
+  deletedAt?: string | null;
+  /** Why the material was soft-deleted (e.g. 'manual'). */
+  deletedReason?: string | null;
+};
+
+/**
+ * Per-lecture relationship to a course material.
+ *
+ * Materials themselves are course-level and reusable. This link records that
+ * a specific lecture used a specific material, plus lecture-specific reading
+ * state such as the last page opened during that lecture.
+ */
+export type LectureMaterialLink = {
+  lectureId: string;
+  materialId: string;
+  /** 1-based page number last opened for this lecture/material pair. */
+  lastOpenedPage?: number;
+  /** ISO timestamp. */
+  createdAt: string;
+  /** ISO timestamp. */
+  updatedAt: string;
+  /** Soft-delete timestamp (ISO). Absent or null = active. */
+  deletedAt?: string | null;
+  /** Why the link was removed (e.g. 'recording_abandoned', 'manual'). */
   deletedReason?: string | null;
 };
 
