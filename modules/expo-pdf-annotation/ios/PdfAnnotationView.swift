@@ -84,6 +84,13 @@ public final class PdfAnnotationView: ExpoView {
       if annotationMode != oldValue {
         annotationOverlay.mode = annotationMode
         updateGestureMode()
+        // Drop the eraser cursor the moment the mode leaves "eraser" — this
+        // covers manual tool switches AND the Apple Pencil double-tap path
+        // (temporary eraser returns to Pen / Highlighter by flipping the
+        // annotationMode prop back from JS).
+        if annotationMode != "eraser" {
+          annotationOverlay.hideEraserPreview()
+        }
         #if DEBUG
         print("[PdfAnnotationView] annotationMode → \(annotationMode), pencilGesture.isEnabled=\(pencilGesture.isEnabled)")
         #endif
@@ -152,6 +159,7 @@ public final class PdfAnnotationView: ExpoView {
       annotationOverlay.topAnchor.constraint(equalTo: topAnchor),
       annotationOverlay.bottomAnchor.constraint(equalTo: bottomAnchor)
     ])
+    bringSubviewToFront(annotationOverlay)
 
     // Attach Pencil-only gesture recognizer to PDFView. allowedTouchTypes
     // is the OS-level filter that actually works (vs the hitTest dance).
@@ -190,6 +198,7 @@ public final class PdfAnnotationView: ExpoView {
       applyScaleSettings(forceFit: false)
     }
     applyWorkspaceCanvasColors()
+    bringSubviewToFront(annotationOverlay)
     annotationOverlay.setNeedsDisplay()
   }
 
@@ -345,10 +354,17 @@ public final class PdfAnnotationView: ExpoView {
     switch recognizer.state {
     case .began:
       let p = recognizer.location(in: pdfView)
+      let overlayPoint = recognizer.location(in: annotationOverlay)
       #if DEBUG
       print("[PdfAnnotationView] pencil .began at pdfViewPoint=\(p)")
       #endif
       if annotationMode == "eraser" {
+        #if DEBUG
+        print("[PdfAnnotationView] eraser began location=\(p) overlayLocation=\(overlayPoint)")
+        #endif
+        // The erase hit-test uses PDFView coordinates, while the preview is
+        // drawn directly by the overlay in its own coordinate space.
+        annotationOverlay.showEraserPreview(at: overlayPoint)
         if let replacement = annotationOverlay.eraseStroke(at: p) {
           emitPageReplacement(replacement.strokes, pageNumber: replacement.pageNumber)
         }
@@ -365,7 +381,12 @@ public final class PdfAnnotationView: ExpoView {
 
     case .changed:
       let p = recognizer.location(in: pdfView)
+      let overlayPoint = recognizer.location(in: annotationOverlay)
       if annotationMode == "eraser" {
+        #if DEBUG
+        print("[PdfAnnotationView] eraser changed location=\(p) overlayLocation=\(overlayPoint)")
+        #endif
+        annotationOverlay.showEraserPreview(at: overlayPoint)
         if let replacement = annotationOverlay.eraseStroke(at: p) {
           emitPageReplacement(replacement.strokes, pageNumber: replacement.pageNumber)
         }
@@ -375,7 +396,11 @@ public final class PdfAnnotationView: ExpoView {
 
     case .ended:
       if annotationMode == "eraser" {
+        #if DEBUG
+        print("[PdfAnnotationView] eraser ended")
+        #endif
         annotationOverlay.cancelStroke()
+        annotationOverlay.hideEraserPreview()
         emitEraserGestureEnded(at: recognizer.location(in: pdfView))
       } else if let commit = annotationOverlay.endStroke() {
         #if DEBUG
@@ -390,9 +415,15 @@ public final class PdfAnnotationView: ExpoView {
 
     case .cancelled, .failed:
       if annotationMode == "eraser" {
+        #if DEBUG
+        print("[PdfAnnotationView] eraser ended state=\(recognizer.state.rawValue)")
+        #endif
         emitEraserGestureEnded(at: recognizer.location(in: pdfView))
       }
       annotationOverlay.cancelStroke()
+      // Always clear the cursor on gesture end, regardless of mode at the
+      // moment — defensive in case the mode flipped between .began and now.
+      annotationOverlay.hideEraserPreview()
 
     default:
       break
@@ -626,6 +657,12 @@ final class AnnotationOverlay: UIView {
   private var inProgressWidth: Double = 2.4
   private var inProgressOpacity: Double = 1
 
+  /// Eraser cursor — current Pencil location in overlay coordinates. Drawn as
+  /// a circular outline on top of the ink so the user can see where the
+  /// eraser is and how large its hit area is. Pure presentation: never
+  /// persisted, never emitted to JS, never read by the eraser hit-test path.
+  private var eraserPreviewPoint: CGPoint?
+
   init(pdfView: PDFView) {
     self.pdfView = pdfView
     super.init(frame: .zero)
@@ -708,6 +745,28 @@ final class AnnotationOverlay: UIView {
     inProgressPoints = []
     inProgressTool = "pen"
     inProgressOpacity = 1
+  }
+
+  // MARK: - Eraser cursor preview (no persistence, no JS event)
+
+  /// Position the eraser cursor at the given overlay-space point and trigger
+  /// a redraw. Called on every Pencil `.began` / `.changed` while in eraser
+  /// mode (manual or temporary).
+  func showEraserPreview(at viewPoint: CGPoint) {
+    eraserPreviewPoint = viewPoint
+    #if DEBUG
+    print("[AnnotationOverlay] showEraserPreview point=\(viewPoint) radius=\(eraserRadius) bounds=\(bounds) hidden=\(isHidden) alpha=\(alpha)")
+    #endif
+    setNeedsDisplay()
+  }
+
+  /// Clear the eraser cursor. Called on every Pencil `.ended` / `.cancelled`
+  /// / `.failed`, and when the JS-driven annotationMode leaves "eraser"
+  /// (e.g. tool switch, double-tap returning to Pen).
+  func hideEraserPreview() {
+    guard eraserPreviewPoint != nil else { return }
+    eraserPreviewPoint = nil
+    setNeedsDisplay()
   }
 
   func eraseStroke(at viewPoint: CGPoint) -> (pageNumber: Int, strokes: [AnnotationStroke])? {
@@ -794,6 +853,67 @@ final class AnnotationOverlay: UIView {
       )
       drawStroke(live, page: page, in: ctx)
     }
+
+    // Eraser cursor sits on top of everything else so it's always readable.
+    if let previewPoint = eraserPreviewPoint {
+      #if DEBUG
+      print("[AnnotationOverlay] draw eraserPreviewPoint=\(previewPoint)")
+      #endif
+      drawEraserPreview(
+        at: previewPoint,
+        radius: CGFloat(max(4, eraserRadius)),
+        in: ctx
+      )
+    }
+  }
+
+  /// Soft Youmi-style cursor: light fill so it shows on both the white PDF
+  /// page and the light ice-blue surround, with a deep-navy outline + small
+  /// center dot for precision. Radius matches the eraser hit-test radius
+  /// (`max(4, eraserRadius)`) so the visible circle is exactly the area
+  /// that will be erased.
+  private func drawEraserPreview(at point: CGPoint, radius: CGFloat, in ctx: CGContext) {
+    let rect = CGRect(
+      x: point.x - radius,
+      y: point.y - radius,
+      width: radius * 2,
+      height: radius * 2
+    )
+    ctx.saveGState()
+    ctx.setBlendMode(.normal)
+
+    // Soft blue fill — visible on white PDF pages and Youmi's light canvas.
+    ctx.setFillColor(UIColor(
+      red: 120.0 / 255.0,
+      green: 214.0 / 255.0,
+      blue: 255.0 / 255.0,
+      alpha: 0.22
+    ).cgColor)
+    ctx.fillEllipse(in: rect)
+
+    // Outline — deep navy with enough contrast to read over text.
+    let navy = UIColor(
+      red: 6.0 / 255.0,
+      green: 27.0 / 255.0,
+      blue: 52.0 / 255.0,
+      alpha: 0.88
+    )
+    ctx.setStrokeColor(navy.cgColor)
+    ctx.setLineWidth(2.0)
+    ctx.strokeEllipse(in: rect)
+
+    // Tiny center dot — anchors the cursor visually so the user always
+    // knows the exact Pencil location even when the outer ring is large.
+    let dotRadius: CGFloat = 2.4
+    ctx.setFillColor(navy.cgColor)
+    ctx.fillEllipse(in: CGRect(
+      x: point.x - dotRadius,
+      y: point.y - dotRadius,
+      width: dotRadius * 2,
+      height: dotRadius * 2
+    ))
+
+    ctx.restoreGState()
   }
 
   private func drawStroke(_ stroke: AnnotationStroke, page: PDFPage, in ctx: CGContext) {
