@@ -8,7 +8,9 @@
     "scheme": "youmilens",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
-    "platforms": ["ios"],
+    "platforms": [
+      "ios"
+    ],
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
@@ -66,7 +68,8 @@
         }
       ],
       "expo-asset",
-      "@config-plugins/react-native-pdf"
+      "@config-plugins/react-native-pdf",
+      "expo-iap"
     ],
     "experiments": {
       "typedRoutes": true,
