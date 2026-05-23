@@ -28,10 +28,14 @@ export type NotePoint = { x: number; y: number };
 /** One freehand handwriting stroke on a notebook page. */
 export type NoteStroke = {
   id: string;
+  /** Drawing tool. Absent for old notes; treat as pen. */
+  tool?: 'pen' | 'highlighter';
   /** Stroke ink colour (hex). */
   color: string;
   /** Stroke width in points. */
   width: number;
+  /** Optional stroke opacity. Highlighter uses this to keep content readable. */
+  opacity?: number;
   points: NotePoint[];
   /** ISO timestamp. */
   createdAt: string;

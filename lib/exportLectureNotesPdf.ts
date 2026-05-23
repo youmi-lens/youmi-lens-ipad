@@ -79,23 +79,32 @@ function isFinitePoint(p: unknown): p is NotePoint {
   );
 }
 
-type CleanStroke = { color: string; width: number; points: NotePoint[] };
+type CleanStroke = {
+  color: string;
+  width: number;
+  opacity: number;
+  tool: 'pen' | 'highlighter';
+  points: NotePoint[];
+};
 
 function cleanStroke(stroke: NoteStroke): CleanStroke | null {
   if (!stroke || !Array.isArray(stroke.points)) return null;
   const points = stroke.points.filter(isFinitePoint);
   if (points.length === 0) return null;
-  const width = Number.isFinite(stroke.width) && stroke.width > 0 ? Math.min(stroke.width, 24) : 2;
-  return { color: sanitizeStrokeColor(stroke.color), width, points };
+  const tool = stroke.tool === 'highlighter' ? 'highlighter' : 'pen';
+  const maxWidth = tool === 'highlighter' ? 36 : 24;
+  const width = Number.isFinite(stroke.width) && stroke.width > 0 ? Math.min(stroke.width, maxWidth) : 2;
+  const opacity = Number.isFinite(stroke.opacity) ? Math.max(0, Math.min(stroke.opacity ?? 1, 1)) : (tool === 'highlighter' ? 0.34 : 1);
+  return { color: sanitizeStrokeColor(stroke.color), width, opacity, tool, points };
 }
 
 function strokeToSvgElement(stroke: CleanStroke): string {
   if (stroke.points.length === 1) {
     const p = stroke.points[0];
     const r = Math.max(stroke.width / 2, 1.6);
-    return `<circle cx="${p.x.toFixed(2)}" cy="${p.y.toFixed(2)}" r="${r.toFixed(2)}" fill="${stroke.color}"/>`;
+    return `<circle cx="${p.x.toFixed(2)}" cy="${p.y.toFixed(2)}" r="${r.toFixed(2)}" fill="${stroke.color}" opacity="${stroke.opacity.toFixed(2)}"/>`;
   }
-  return `<path d="${strokeToSvgPathData(stroke.points)}" stroke="${stroke.color}" stroke-width="${stroke.width.toFixed(2)}" stroke-linecap="round" stroke-linejoin="round" fill="none"/>`;
+  return `<path d="${strokeToSvgPathData(stroke.points)}" stroke="${stroke.color}" stroke-width="${stroke.width.toFixed(2)}" stroke-linecap="round" stroke-linejoin="round" opacity="${stroke.opacity.toFixed(2)}" fill="none"/>`;
 }
 
 type Bounds = { minX: number; maxX: number; minY: number; maxY: number };
@@ -118,7 +127,10 @@ function strokeBounds(strokes: CleanStroke[]): Bounds | null {
 }
 
 function svgForViewport(view: { x: number; y: number; w: number; h: number }, strokes: CleanStroke[]): string {
-  const paths = strokes.map(strokeToSvgElement).join('');
+  const paths = [
+    ...strokes.filter((stroke) => stroke.tool === 'highlighter'),
+    ...strokes.filter((stroke) => stroke.tool !== 'highlighter'),
+  ].map(strokeToSvgElement).join('');
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" ` +
     `viewBox="${view.x.toFixed(2)} ${view.y.toFixed(2)} ${view.w.toFixed(2)} ${view.h.toFixed(2)}" ` +

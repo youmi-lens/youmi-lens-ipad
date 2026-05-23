@@ -61,20 +61,42 @@ const PEN_WIDTHS: { key: string; value: number; dot: number }[] = [
   { key: 'Thick', value: 6, dot: 16 },
 ];
 
+const HIGHLIGHTER_COLORS: { key: string; value: string }[] = [
+  { key: 'Yellow', value: '#FFE066' },
+  { key: 'Blue', value: '#78D6FF' },
+  { key: 'Pink', value: '#FF9CCB' },
+  { key: 'Green', value: '#9BE7A6' },
+];
+
+const HIGHLIGHTER_WIDTHS: { key: string; value: number; dot: number }[] = [
+  { key: 'Narrow', value: 12, dot: 8 },
+  { key: 'Medium', value: 18, dot: 12 },
+  { key: 'Wide', value: 26, dot: 17 },
+];
+
+type EraserSizeKey = 'small' | 'medium' | 'large';
+
+const ERASER_SIZES: { key: EraserSizeKey; label: string; radius: number }[] = [
+  { key: 'small', label: 'Small', radius: 12 },
+  { key: 'medium', label: 'Medium', radius: 26 },
+  { key: 'large', label: 'Large', radius: 44 },
+];
+
 const LINE_GAP = 34;
 const MARGIN_X = 56;
 const MIN_POINT_DISTANCE = 1.8;
 /** The notebook is one long ruled page — roughly three iPad screens tall. */
 const PAGE_HEIGHT = 3200;
-const ERASER_RADIUS = 22;
 /** How long the Pen / Eraser badge stays on screen after a double-tap. */
 const TOOL_TOAST_MS = 1100;
 
-export type CanvasMode = 'write' | 'type' | 'erase' | 'scroll';
+export type CanvasMode = 'write' | 'highlight' | 'type' | 'erase' | 'scroll';
+type DrawingMode = 'write' | 'highlight';
 
 /** Primary tools shown in the toolbar segment. Scroll is a fallback action. */
 const DRAW_MODES: { key: CanvasMode; label: string }[] = [
   { key: 'write', label: 'Write' },
+  { key: 'highlight', label: 'Highlight' },
   { key: 'type', label: 'Type' },
   { key: 'erase', label: 'Erase' },
 ];
@@ -98,6 +120,32 @@ function pointerLabel(pointerType: PointerType): PointerLabel {
 
 function makeStrokeId(): string {
   return `stroke_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function distancePointToSegment(point: NotePoint, a: NotePoint, b: NotePoint): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared <= 0.0001) return Math.hypot(point.x - a.x, point.y - a.y);
+  const t = Math.max(0, Math.min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / lengthSquared));
+  const projection = { x: a.x + t * dx, y: a.y + t * dy };
+  return Math.hypot(point.x - projection.x, point.y - projection.y);
+}
+
+function strokeNearPoint(stroke: NoteStroke, x: number, y: number, eraserRadius: number): boolean {
+  const points = stroke.points;
+  if (points.length === 0) return false;
+  const threshold = eraserRadius + Math.max(1, stroke.width / 2);
+  const eraserPoint = { x, y };
+  if (points.length === 1) {
+    return Math.hypot(points[0].x - x, points[0].y - y) <= threshold;
+  }
+  for (let i = 0; i < points.length - 1; i += 1) {
+    if (distancePointToSegment(eraserPoint, points[i], points[i + 1]) <= threshold) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** Build a smooth SVG path (quadratic midpoints) from freehand points. */
@@ -126,13 +174,14 @@ export function strokeToPath(points: NotePoint[]): string {
 function StrokeShape({
   stroke,
 }: {
-  stroke: { points: NotePoint[]; color: string; width: number };
+  stroke: { points: NotePoint[]; color: string; width: number; tool?: 'pen' | 'highlighter'; opacity?: number };
 }) {
   const { points, color, width } = stroke;
+  const opacity = stroke.opacity ?? (stroke.tool === 'highlighter' ? 0.34 : 1);
   if (points.length === 0) return null;
   if (points.length === 1) {
     return (
-      <Circle cx={points[0].x} cy={points[0].y} r={Math.max(width / 2, 1.6)} fill={color} />
+      <Circle cx={points[0].x} cy={points[0].y} r={Math.max(width / 2, 1.6)} fill={color} opacity={opacity} />
     );
   }
   return (
@@ -142,6 +191,7 @@ function StrokeShape({
       strokeWidth={width}
       strokeLinecap="round"
       strokeLinejoin="round"
+      opacity={opacity}
       fill="none"
     />
   );
@@ -150,6 +200,7 @@ function StrokeShape({
 function ModeIcon({ mode, active }: { mode: CanvasMode; active: boolean }) {
   const color = active ? colors.pearlWhite : colors.deepNavy;
   if (mode === 'write') return <Ionicons name="pencil" size={15} color={color} />;
+  if (mode === 'highlight') return <Ionicons name="color-wand-outline" size={15} color={color} />;
   if (mode === 'type') return <Ionicons name="text" size={15} color={color} />;
   if (mode === 'erase') return <MaterialCommunityIcons name="eraser" size={16} color={color} />;
   return <Ionicons name="hand-left-outline" size={15} color={color} />;
@@ -182,11 +233,17 @@ export function NotebookCanvas({
   const [mode, setMode] = useState<CanvasMode>('write');
   const [penColor, setPenColor] = useState(PEN_COLORS[0].value);
   const [penWidth, setPenWidth] = useState(PEN_WIDTHS[1].value);
+  const [highlighterColor, setHighlighterColor] = useState(HIGHLIGHTER_COLORS[0].value);
+  const [highlighterWidth, setHighlighterWidth] = useState(HIGHLIGHTER_WIDTHS[1].value);
+  const [eraserSizeKey, setEraserSizeKey] = useState<EraserSizeKey>('medium');
+  const eraserRadius = ERASER_SIZES.find((option) => option.key === eraserSizeKey)?.radius ?? 26;
+  const [, setTemporaryEraser] = useState(false);
   const [currentPoints, setCurrentPoints] = useState<NotePoint[]>([]);
   const [erasedIds, setErasedIds] = useState<string[]>([]);
   const [erasePoint, setErasePoint] = useState<NotePoint | null>(null);
+  const [undoEraseSnapshot, setUndoEraseSnapshot] = useState<NoteStroke[] | null>(null);
   /** Transient "Pen" / "Eraser" badge shown after a Pencil double-tap. */
-  const [toolToast, setToolToast] = useState<'write' | 'erase' | null>(null);
+  const [toolToast, setToolToast] = useState<DrawingMode | 'erase' | null>(null);
   /** Dev-only diagnostic to verify what real hardware reports in Expo Go. */
   const [lastPointerType, setLastPointerType] = useState<PointerLabel | null>(null);
   const [lastGestureDecision, setLastGestureDecision] = useState<'activated' | 'failed' | null>(
@@ -200,12 +257,20 @@ export function NotebookCanvas({
   penColorRef.current = penColor;
   const penWidthRef = useRef(penWidth);
   penWidthRef.current = penWidth;
+  const highlighterColorRef = useRef(highlighterColor);
+  highlighterColorRef.current = highlighterColor;
+  const highlighterWidthRef = useRef(highlighterWidth);
+  highlighterWidthRef.current = highlighterWidth;
+  const eraserRadiusRef = useRef(eraserRadius);
+  eraserRadiusRef.current = eraserRadius;
   const strokesRef = useRef(strokes);
   strokesRef.current = strokes;
   const onStrokesChangeRef = useRef(onStrokesChange);
   onStrokesChangeRef.current = onStrokesChange;
   const modeRef = useRef(mode);
   modeRef.current = mode;
+  const previousDrawingToolRef = useRef<DrawingMode>('write');
+  const temporaryEraserRef = useRef(false);
   /** Strokes erased during the current erase drag (committed on release). */
   const erasedIdsRef = useRef<string[]>([]);
   /** True between a Pencil touch-down and the drawing gesture finishing. */
@@ -229,18 +294,50 @@ export function NotebookCanvas({
   /** Whether native Apple Pencil double-tap is compiled into this build. */
   const doubleTapAvailable = useMemo(() => isPencilDoubleTapAvailable(), []);
 
+  /** Briefly show the current drawing tool badge with a light haptic tick. */
+  const showToolToast = useCallback((tool: DrawingMode | 'erase') => {
+    setToolToast(tool);
+    Haptics.selectionAsync().catch(() => {});
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToolToast(null), TOOL_TOAST_MS);
+  }, []);
+
+  const changeMode = useCallback((next: CanvasMode) => {
+    modeRef.current = next;
+    temporaryEraserRef.current = false;
+    setTemporaryEraser(false);
+    if (next === 'write' || next === 'highlight') {
+      previousDrawingToolRef.current = next;
+    }
+    setMode(next);
+  }, []);
+
+  const restoreTemporaryEraserIfNeeded = useCallback(() => {
+    if (!temporaryEraserRef.current) return;
+    const restored = previousDrawingToolRef.current;
+    temporaryEraserRef.current = false;
+    setTemporaryEraser(false);
+    modeRef.current = restored;
+    setMode(restored);
+    showToolToast(restored);
+  }, [showToolToast]);
+
   // Commit the in-progress stroke (read synchronously from the ref) as its own
   // new stroke, then clear it. A 1-point stroke is kept — it renders as a dot.
   const commitStroke = useCallback(() => {
     const pts = currentPointsRef.current;
     if (pts.length > 0) {
+      const isHighlighter = modeRef.current === 'highlight';
       const stroke: NoteStroke = {
         id: makeStrokeId(),
-        color: penColorRef.current,
-        width: penWidthRef.current,
+        tool: isHighlighter ? 'highlighter' : 'pen',
+        color: isHighlighter ? highlighterColorRef.current : penColorRef.current,
+        width: isHighlighter ? highlighterWidthRef.current : penWidthRef.current,
+        opacity: isHighlighter ? 0.34 : 1,
         points: pts,
         createdAt: new Date().toISOString(),
       };
+      setUndoEraseSnapshot(null);
       onStrokesChangeRef.current([...strokesRef.current, stroke]);
     }
     currentPointsRef.current = [];
@@ -253,12 +350,9 @@ export function NotebookCanvas({
     let changed = false;
     for (const stroke of strokesRef.current) {
       if (erasedIdsRef.current.includes(stroke.id)) continue;
-      for (const point of stroke.points) {
-        if (Math.hypot(point.x - x, point.y - y) <= ERASER_RADIUS) {
-          erasedIdsRef.current.push(stroke.id);
-          changed = true;
-          break;
-        }
+      if (strokeNearPoint(stroke, x, y, eraserRadiusRef.current)) {
+        erasedIdsRef.current.push(stroke.id);
+        changed = true;
       }
     }
     if (changed) setErasedIds([...erasedIdsRef.current]);
@@ -267,6 +361,7 @@ export function NotebookCanvas({
   const commitErase = useCallback(() => {
     if (erasedIdsRef.current.length > 0) {
       const removed = new Set(erasedIdsRef.current);
+      setUndoEraseSnapshot(strokesRef.current);
       onStrokesChangeRef.current(strokesRef.current.filter((s) => !removed.has(s.id)));
     }
     erasedIdsRef.current = [];
@@ -286,7 +381,8 @@ export function NotebookCanvas({
     setStylusStrokeActive(false);
     commitStroke();
     commitErase();
-  }, [commitStroke, commitErase]);
+    restoreTemporaryEraserIfNeeded();
+  }, [commitStroke, commitErase, restoreTemporaryEraserIfNeeded]);
 
   /** Discard the in-progress stroke without committing it (used on tool change). */
   const abortStroke = useCallback(() => {
@@ -332,7 +428,7 @@ export function NotebookCanvas({
           if (drawingRef.current) endStroke();
 
           const activeMode = modeRef.current;
-          if (activeMode !== 'write' && activeMode !== 'erase') {
+          if (activeMode !== 'write' && activeMode !== 'highlight' && activeMode !== 'erase') {
             manager.fail();
             return;
           }
@@ -360,7 +456,7 @@ export function NotebookCanvas({
           setLastGestureDecision('activated');
           setStylusStrokeActive(true);
 
-          if (activeMode === 'write') {
+          if (activeMode === 'write' || activeMode === 'highlight') {
             // A brand-new stroke — its point list starts from scratch.
             currentPointsRef.current = [point];
             setCurrentPoints([point]);
@@ -379,7 +475,7 @@ export function NotebookCanvas({
           if (!touch) return;
           const point = { x: touch.x, y: touch.y + scrollOffsetYRef.current };
 
-          if (modeRef.current === 'write') {
+          if (modeRef.current === 'write' || modeRef.current === 'highlight') {
             const pts = currentPointsRef.current;
             const last = pts[pts.length - 1];
             if (
@@ -423,14 +519,6 @@ export function NotebookCanvas({
     abortStroke();
   }, [mode, abortStroke]);
 
-  /** Briefly show the Pen / Eraser badge with a light haptic tick. */
-  const showToolToast = useCallback((tool: 'write' | 'erase') => {
-    setToolToast(tool);
-    Haptics.selectionAsync().catch(() => {});
-    if (toastTimer.current) clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToolToast(null), TOOL_TOAST_MS);
-  }, []);
-
   useEffect(
     () => () => {
       if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -438,14 +526,30 @@ export function NotebookCanvas({
     [],
   );
 
-  // Apple Pencil double-tap toggles Write <-> Eraser. Type / Scroll are left
-  // untouched so a double-tap never disrupts typing or scrolling.
+  // Apple Pencil double-tap enters a temporary eraser from Pen/Highlighter.
+  // It restores only after the Pencil gesture ends, so continuous erasing
+  // works while the Pencil stays down.
   const handleDoubleTap = useCallback(() => {
     const current = modeRef.current;
-    if (current !== 'write' && current !== 'erase') return;
-    const next: CanvasMode = current === 'write' ? 'erase' : 'write';
-    setMode(next);
-    showToolToast(next);
+    if (current === 'write' || current === 'highlight') {
+      previousDrawingToolRef.current = current;
+      temporaryEraserRef.current = true;
+      setTemporaryEraser(true);
+      modeRef.current = 'erase';
+      setMode('erase');
+      showToolToast('erase');
+      return;
+    }
+    if (current === 'erase') {
+      const restored = temporaryEraserRef.current
+        ? previousDrawingToolRef.current
+        : previousDrawingToolRef.current ?? 'write';
+      temporaryEraserRef.current = false;
+      setTemporaryEraser(false);
+      modeRef.current = restored;
+      setMode(restored);
+      showToolToast(restored);
+    }
   }, [showToolToast]);
 
   useEffect(() => {
@@ -455,8 +559,13 @@ export function NotebookCanvas({
   }, [editable, handleDoubleTap]);
 
   const undo = useCallback(() => {
+    if (undoEraseSnapshot) {
+      onStrokesChange(undoEraseSnapshot);
+      setUndoEraseSnapshot(null);
+      return;
+    }
     if (strokes.length > 0) onStrokesChange(strokes.slice(0, -1));
-  }, [strokes, onStrokesChange]);
+  }, [strokes, onStrokesChange, undoEraseSnapshot]);
 
   const clearPage = useCallback(() => {
     if (strokes.length === 0 && text.length === 0) return;
@@ -469,6 +578,7 @@ export function NotebookCanvas({
           text: 'Clear',
           style: 'destructive',
           onPress: () => {
+            setUndoEraseSnapshot(null);
             onStrokesChange([]);
             onTextChange('');
           },
@@ -481,10 +591,17 @@ export function NotebookCanvas({
   // not on every touch move while the current stroke is being drawn. Each is
   // its own StrokeShape, so committed strokes always render independently.
   const committedShapes = useMemo(
-    () =>
-      strokes
-        .filter((stroke) => !erasedIds.includes(stroke.id))
-        .map((stroke) => <StrokeShape key={stroke.id} stroke={stroke} />),
+    () => {
+      const visible = strokes.filter((stroke) => !erasedIds.includes(stroke.id));
+      return [
+        ...visible
+          .filter((stroke) => stroke.tool === 'highlighter')
+          .map((stroke) => <StrokeShape key={stroke.id} stroke={stroke} />),
+        ...visible
+          .filter((stroke) => stroke.tool !== 'highlighter')
+          .map((stroke) => <StrokeShape key={stroke.id} stroke={stroke} />),
+      ];
+    },
     [strokes, erasedIds],
   );
 
@@ -511,7 +628,7 @@ export function NotebookCanvas({
                     key={m.key}
                     accessibilityRole="button"
                     accessibilityState={{ selected: active }}
-                    onPress={() => setMode(m.key)}
+                    onPress={() => changeMode(m.key)}
                     style={[styles.segmentBtn, active && styles.segmentBtnActive]}
                   >
                     <ModeIcon mode={m.key} active={active} />
@@ -524,31 +641,36 @@ export function NotebookCanvas({
             </View>
 
             {/* Pen options — only meaningful while writing */}
-            {mode === 'write' ? (
+            {mode === 'write' || mode === 'highlight' ? (
               <>
                 <View style={styles.toolGroup}>
-                  {PEN_COLORS.map((pen) => (
+                  {(mode === 'highlight' ? HIGHLIGHTER_COLORS : PEN_COLORS).map((pen) => {
+                    const selectedColor = mode === 'highlight' ? highlighterColor : penColor;
+                    return (
                     <Pressable
                       key={pen.key}
                       accessibilityRole="button"
-                      accessibilityLabel={`Pen colour ${pen.key}`}
-                      accessibilityState={{ selected: penColor === pen.value }}
-                      onPress={() => setPenColor(pen.value)}
-                      style={[styles.swatch, penColor === pen.value && styles.swatchActive]}
+                      accessibilityLabel={`${mode === 'highlight' ? 'Highlighter' : 'Pen'} colour ${pen.key}`}
+                      accessibilityState={{ selected: selectedColor === pen.value }}
+                      onPress={() => (mode === 'highlight' ? setHighlighterColor(pen.value) : setPenColor(pen.value))}
+                      style={[styles.swatch, selectedColor === pen.value && styles.swatchActive]}
                     >
                       <View style={[styles.swatchDot, { backgroundColor: pen.value }]} />
                     </Pressable>
-                  ))}
+                    );
+                  })}
                 </View>
                 <View style={styles.toolGroup}>
-                  {PEN_WIDTHS.map((pen) => (
+                  {(mode === 'highlight' ? HIGHLIGHTER_WIDTHS : PEN_WIDTHS).map((pen) => {
+                    const selectedWidth = mode === 'highlight' ? highlighterWidth : penWidth;
+                    return (
                     <Pressable
                       key={pen.key}
                       accessibilityRole="button"
-                      accessibilityLabel={`Pen width ${pen.key}`}
-                      accessibilityState={{ selected: penWidth === pen.value }}
-                      onPress={() => setPenWidth(pen.value)}
-                      style={[styles.widthBtn, penWidth === pen.value && styles.widthBtnActive]}
+                      accessibilityLabel={`${mode === 'highlight' ? 'Highlighter' : 'Pen'} width ${pen.key}`}
+                      accessibilityState={{ selected: selectedWidth === pen.value }}
+                      onPress={() => (mode === 'highlight' ? setHighlighterWidth(pen.value) : setPenWidth(pen.value))}
+                      style={[styles.widthBtn, selectedWidth === pen.value && styles.widthBtnActive]}
                     >
                       <View
                         style={{
@@ -559,10 +681,25 @@ export function NotebookCanvas({
                         }}
                       />
                     </Pressable>
-                  ))}
+                    );
+                  })}
                 </View>
               </>
             ) : null}
+
+            {/*
+             * Eraser size options are NOT rendered here. They used to live
+             * inside this flexWrap row alongside the segment + (when in
+             * write/highlight mode) color/width groups. With four segment
+             * buttons plus three eraser-size buttons the row wrapped into a
+             * second line on iPad widths, and that second line sat over the
+             * top edge of the GestureScrollView below — drawGesture (Pan +
+             * manualActivation) hit-tested the wrapped row first and swallowed
+             * the taps before the Pressables ever fired. The eraser size row
+             * is now a dedicated secondary bar below the main toolbar (see
+             * `<View style={styles.eraserSizeBar} />` further down) which is
+             * outside any gesture container and never wraps.
+             */}
           </View>
 
           <View style={styles.toolbarRight}>
@@ -571,7 +708,7 @@ export function NotebookCanvas({
               accessibilityRole="button"
               accessibilityLabel="Scroll mode (fallback)"
               accessibilityState={{ selected: mode === 'scroll' }}
-              onPress={() => setMode((m) => (m === 'scroll' ? 'write' : 'scroll'))}
+              onPress={() => changeMode(mode === 'scroll' ? 'write' : 'scroll')}
               style={[styles.fallbackBtn, mode === 'scroll' && styles.fallbackBtnActive]}
             >
               <Ionicons
@@ -589,8 +726,8 @@ export function NotebookCanvas({
               accessibilityRole="button"
               accessibilityLabel="Undo last stroke"
               onPress={undo}
-              disabled={strokes.length === 0}
-              style={[styles.toolBtn, strokes.length === 0 && styles.toolBtnDisabled]}
+              disabled={strokes.length === 0 && !undoEraseSnapshot}
+              style={[styles.toolBtn, strokes.length === 0 && !undoEraseSnapshot && styles.toolBtnDisabled]}
             >
               <Ionicons name="arrow-undo" size={18} color={colors.deepNavy} />
             </Pressable>
@@ -602,6 +739,64 @@ export function NotebookCanvas({
             >
               <Ionicons name="trash-outline" size={18} color={colors.recordingRed} />
             </Pressable>
+          </View>
+        </View>
+      ) : null}
+
+      {/* ---- Dedicated eraser-size bar ----
+          Lives *outside* the flexWrap-prone primary toolbar and *outside* the
+          GestureDetector below. Renders only in erase mode. Bigger tap
+          targets, hitSlop, and a console.warn on press so on-device taps
+          are observable in the Metro log without a debugger. */}
+      {editable && mode === 'erase' ? (
+        <View style={styles.eraserSizeBar} pointerEvents="auto">
+          <Text style={styles.eraserSizeBarLabel}>Eraser size</Text>
+          <View style={styles.eraserSizeSegment}>
+            {ERASER_SIZES.map((option) => {
+              const active = eraserSizeKey === option.key;
+              return (
+                <Pressable
+                  key={option.key}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Eraser size ${option.label}`}
+                  accessibilityState={{ selected: active }}
+                  hitSlop={10}
+                  onPress={() => {
+                    if (__DEV__) {
+                      // console.warn so the log is visibly louder than other
+                      // diagnostics — proves the tap reached the Pressable.
+                      console.warn('[NotebookCanvas] eraser size press', option.key, option.radius);
+                    }
+                    setEraserSizeKey(option.key);
+                  }}
+                  style={({ pressed }) => [
+                    styles.eraserSizeSegmentBtn,
+                    active && styles.eraserSizeSegmentBtnActive,
+                    pressed && styles.eraserSizeSegmentBtnPressed,
+                  ]}
+                >
+                  <View
+                    style={[
+                      styles.eraserSizeIndicator,
+                      {
+                        width: option.radius * 0.45,
+                        height: option.radius * 0.45,
+                        borderRadius: option.radius * 0.225,
+                      },
+                      active && styles.eraserSizeIndicatorActive,
+                    ]}
+                  />
+                  <Text
+                    style={[
+                      styles.eraserSizeSegmentText,
+                      active && styles.eraserSizeSegmentTextActive,
+                    ]}
+                  >
+                    {option.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
           </View>
         </View>
       ) : null}
@@ -646,18 +841,32 @@ export function NotebookCanvas({
               {committedShapes}
               {currentPoints.length > 0 ? (
                 <StrokeShape
-                  stroke={{ points: currentPoints, color: penColor, width: penWidth }}
+                  stroke={{
+                    points: currentPoints,
+                    tool: mode === 'highlight' ? 'highlighter' : 'pen',
+                    color: mode === 'highlight' ? highlighterColor : penColor,
+                    width: mode === 'highlight' ? highlighterWidth : penWidth,
+                    opacity: mode === 'highlight' ? 0.34 : 1,
+                  }}
                 />
               ) : null}
               {mode === 'erase' && erasePoint ? (
-                <Circle
-                  cx={erasePoint.x}
-                  cy={erasePoint.y}
-                  r={ERASER_RADIUS}
-                  stroke={colors.recordingRed}
-                  strokeWidth={1.5}
-                  fill="rgba(239, 68, 68, 0.12)"
-                />
+                <>
+                  <Circle
+                    cx={erasePoint.x}
+                    cy={erasePoint.y}
+                    r={eraserRadius}
+                    stroke="rgba(6, 27, 52, 0.88)"
+                    strokeWidth={2}
+                    fill="rgba(120, 214, 255, 0.22)"
+                  />
+                  <Circle
+                    cx={erasePoint.x}
+                    cy={erasePoint.y}
+                    r={2.4}
+                    fill="rgba(6, 27, 52, 0.88)"
+                  />
+                </>
               ) : null}
             </Svg>
           </View>
@@ -697,7 +906,7 @@ export function NotebookCanvas({
           <View style={styles.toolToast}>
             <ModeIcon mode={toolToast} active />
             <Text style={styles.toolToastText}>
-              {toolToast === 'erase' ? 'Eraser' : 'Pen'}
+              {toolToast === 'erase' ? 'Eraser' : toolToast === 'highlight' ? 'Highlighter' : 'Pen'}
             </Text>
           </View>
         </View>
@@ -750,7 +959,10 @@ export function HandwritingPreview({ strokes, style }: HandwritingPreviewProps) 
         viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`}
         preserveAspectRatio="xMidYMid meet"
       >
-        {strokes.map((stroke) => (
+        {strokes.filter((stroke) => stroke.tool === 'highlighter').map((stroke) => (
+          <StrokeShape key={stroke.id} stroke={stroke} />
+        ))}
+        {strokes.filter((stroke) => stroke.tool !== 'highlighter').map((stroke) => (
           <StrokeShape key={stroke.id} stroke={stroke} />
         ))}
       </Svg>
@@ -848,6 +1060,82 @@ const styles = StyleSheet.create({
   widthBtnActive: {
     backgroundColor: colors.iceTint,
     borderColor: colors.iceBlue,
+  },
+  eraserSizeBtn: {
+    minWidth: 56,
+    height: 38,
+    borderRadius: radius.md,
+    backgroundColor: colors.surfaceMuted,
+    borderWidth: 1,
+    borderColor: 'transparent',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: spacing.sm,
+  },
+  eraserSizeText: {
+    fontSize: fontSize.xs,
+    fontWeight: '800',
+    color: colors.deepNavy,
+  },
+
+  // ---- Dedicated eraser-size bar (Phase: NotebookCanvas eraser fix) ----
+  // Lives below the primary toolbar, outside the GestureDetector.
+  eraserSizeBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm + 2,
+    backgroundColor: colors.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  eraserSizeBarLabel: {
+    fontSize: fontSize.xs,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+    color: colors.textTertiary,
+    textTransform: 'uppercase',
+  },
+  eraserSizeSegment: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: radius.md,
+    padding: 3,
+  },
+  eraserSizeSegmentBtn: {
+    minWidth: 78,
+    minHeight: 38,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+    paddingHorizontal: spacing.md,
+    borderRadius: radius.sm,
+    backgroundColor: 'transparent',
+  },
+  eraserSizeSegmentBtnActive: {
+    backgroundColor: colors.deepNavy,
+  },
+  eraserSizeSegmentBtnPressed: {
+    opacity: 0.85,
+    transform: [{ scale: 0.97 }],
+  },
+  eraserSizeSegmentText: {
+    fontSize: fontSize.sm,
+    fontWeight: '800',
+    color: colors.deepNavy,
+  },
+  eraserSizeSegmentTextActive: {
+    color: colors.pearlWhite,
+  },
+  eraserSizeIndicator: {
+    backgroundColor: colors.deepNavy,
+  },
+  eraserSizeIndicatorActive: {
+    backgroundColor: colors.pearlWhite,
   },
   toolBtn: {
     width: 40,
