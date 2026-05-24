@@ -9,16 +9,18 @@
  *
  *  - `RealPurchaseService` — backed by `expo-iap` (StoreKit 2). Used only when
  *    `EXPO_PUBLIC_USE_REAL_IAP=true`. Talks to Apple, surfaces localized prices,
- *    drives the system purchase sheet, and finishes transactions locally so the
- *    StoreKit queue never gets stuck. It does NOT change the user's effective
- *    plan in the app — that still flows from `/api/quota/status` (Settings card).
- *    Backend receipt verification is a separate phase.
+ *    drives the system purchase sheet, and verifies StoreKit JWS transactions
+ *    with the backend before finishing them. The user's effective plan always
+ *    flows from `/api/quota/status`.
  *
  * The Plans/Settings screens depend only on the `PurchaseService` interface and
  * never branch on which implementation is active.
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ExpoIap from 'expo-iap';
+
+import { API_BASE_URL } from './config';
+import { PlanStatus } from './planStatus';
 
 export type PlanId = 'free' | 'basic' | 'plus' | 'pro';
 
@@ -104,8 +106,26 @@ export const PLANS: Plan[] = [
   },
 ];
 
+const PRODUCT_PLAN_MAP: Record<string, PlanId> = Object.fromEntries(
+  PLANS.filter((plan) => Boolean(plan.productId)).map((plan) => [plan.productId!, plan.id]),
+) as Record<string, PlanId>;
+
 export function planById(id: PlanId): Plan {
   return PLANS.find((p) => p.id === id) ?? PLANS[0];
+}
+
+const PLAN_TYPE_TO_PLAN_ID: Record<string, PlanId> = {
+  public_trial: 'free',
+  core_tester: 'free',
+  student_basic: 'basic',
+  student_plus: 'plus',
+  student_pro: 'pro',
+  admin: 'pro',
+  developer: 'pro',
+};
+
+export function planIdFromPlanType(planType: string | null | undefined): PlanId {
+  return planType ? PLAN_TYPE_TO_PLAN_ID[planType] ?? 'free' : 'free';
 }
 
 /**
@@ -137,6 +157,9 @@ export type PurchaseResult =
   | {
       ok: true;
       planId: PlanId;
+      planType?: string;
+      quotaStatus?: PlanStatus;
+      verifiedByBackend?: boolean;
       /**
        * True when the purchase succeeded (the StoreKit sheet completed) but
        * Apple's active-subscription query did not report the new product
@@ -149,7 +172,14 @@ export type PurchaseResult =
   | { ok: false; reason: string; canceled?: boolean };
 
 export type RestoreResult =
-  | { ok: true; planId: PlanId }
+  | {
+      ok: true;
+      planId: PlanId;
+      planType?: string;
+      quotaStatus?: PlanStatus;
+      restoredCount?: number;
+      localStoreKitFallback?: boolean;
+    }
   | { ok: false; reason: string };
 
 /** Map of plan id → localized App Store display price (e.g. "$4.99"). */
@@ -168,8 +198,8 @@ export interface PurchaseService {
   readonly mode: 'mock' | 'real';
   getPlans(): Plan[];
   getActivePlan(userId: string | null): Promise<PlanId>;
-  purchase(userId: string | null, planId: PlanId): Promise<PurchaseResult>;
-  restore(userId: string | null): Promise<RestoreResult>;
+  purchase(userId: string | null, planId: PlanId, accessToken?: string | null): Promise<PurchaseResult>;
+  restore(userId: string | null, accessToken?: string | null): Promise<RestoreResult>;
   /**
    * Optional. Real implementations fetch the localized App Store price for each
    * configured product id. Returns an empty object when no real prices are
@@ -184,6 +214,34 @@ const scopedRealIapLatestPlanKey = (userId: string) =>
 
 function isPlanId(value: unknown): value is PlanId {
   return value === 'free' || value === 'basic' || value === 'plus' || value === 'pro';
+}
+
+type PurchaseForBackend = ExpoIap.Purchase & {
+  transactionId?: string | null;
+  signedTransactionInfo?: string | null;
+  originalTransactionIdentifierIOS?: string | null;
+  environmentIOS?: string | null;
+  expirationDateIOS?: number | null;
+};
+
+type IapVerifyResponse = {
+  ok?: boolean;
+  planType?: string;
+  quotaStatus?: PlanStatus;
+  message?: string;
+  error?: string;
+};
+
+type IapRestoreResponse = IapVerifyResponse & {
+  restoredCount?: number;
+};
+
+function transactionIdFromPurchase(purchase: PurchaseForBackend): string | null {
+  return purchase.transactionId ?? purchase.id ?? null;
+}
+
+function purchaseHasBackendToken(purchase: PurchaseForBackend): boolean {
+  return Boolean(purchase.purchaseToken || purchase.signedTransactionInfo);
 }
 
 class MockPurchaseService implements PurchaseService {
@@ -226,7 +284,8 @@ class MockPurchaseService implements PurchaseService {
 }
 
 /**
- * StoreKit-backed implementation (Phase 1). Talks to Apple via expo-iap.
+ * StoreKit-backed implementation. Talks to Apple via expo-iap and sends signed
+ * transactions to the backend before finishing them.
  *
  * Lifecycle: a single connection is opened lazily on first use and reused for
  * the rest of the app session — `endConnection()` is intentionally not called
@@ -238,10 +297,9 @@ class MockPurchaseService implements PurchaseService {
  * (success) or `purchaseErrorListener` (failure/cancel). This class wraps that
  * into a single promise per call by tracking one in-flight purchase at a time.
  *
- * Phase 1 boundary: we finish the StoreKit transaction locally so the queue
- * does not keep re-delivering it. We do NOT yet POST the JWS to the backend or
- * mark the user as entitled — Settings/Home continue to read the effective
- * plan from `/api/quota/status`. Backend verification is Phase 2.
+ * Backend `/api/quota/status` is the source of truth. StoreKit can start or
+ * restore purchases, but a paid entitlement is only reflected after the backend
+ * verifies the signed transaction and updates quota state.
  */
 class RealPurchaseService implements PurchaseService {
   readonly mode = 'real' as const;
@@ -255,6 +313,7 @@ class RealPurchaseService implements PurchaseService {
         productId: string;
         planId: PlanId;
         userId: string;
+        accessToken: string;
         resolve: (result: PurchaseResult) => void;
         /** True once `requestPurchase` resolves without throwing — i.e. Apple
          *  accepted the request and (in practice) the StoreKit sheet was
@@ -267,19 +326,17 @@ class RealPurchaseService implements PurchaseService {
       }
     | null = null;
 
-  // Polling fallback. During a same-group subscription upgrade, expo-iap's
-  // `purchaseUpdatedListener` can deliver the OLD/current subscription's
-  // transaction (e.g. Basic) before — or instead of — a transaction for the
-  // new product (Plus). The active set returned by `getActiveSubscriptions`
-  // also takes a short moment to include the new SKU. The poll re-queries the
-  // active set every POLL_INTERVAL_MS until the pending product appears, at
-  // which point we resolve the purchase with the highest active tier.
+  // Polling fallback. During local StoreKit testing, expo-iap can resolve the
+  // purchase request or deliver an OLD subscription update without giving us a
+  // signed transaction for the selected SKU. In DEV only, the poll eventually
+  // releases the Plans UI with `pendingAppleSync`; production waits for a JWS
+  // or times out without granting entitlement.
   private pollHandle: ReturnType<typeof setInterval> | null = null;
   private pollAttempts = 0;
   private readonly POLL_INTERVAL_MS = 1500;
   /** ~30 seconds of polling. The global 90s `purchase` timeout still owns
    *  the absolute upper bound; the poll just gives the active set a fair
-   *  window to update before we give up via the slow path. */
+   *  window to deliver a signed transaction before we give up via the slow path. */
   private readonly POLL_MAX_ATTEMPTS = 20;
 
   getPlans(): Plan[] {
@@ -343,9 +400,14 @@ class RealPurchaseService implements PurchaseService {
     }
   }
 
-  async purchase(userId: string | null, planId: PlanId): Promise<PurchaseResult> {
+  async purchase(
+    userId: string | null,
+    planId: PlanId,
+    accessToken?: string | null,
+  ): Promise<PurchaseResult> {
     if (__DEV__) console.log('[IAP] purchase start', { planId, productId: planById(planId).productId });
     if (!userId) return { ok: false, reason: 'Sign in to subscribe.' };
+    if (!accessToken) return { ok: false, reason: 'Sign in to subscribe.' };
     if (planId === 'free') {
       return { ok: false, reason: 'The Free plan does not require a purchase.' };
     }
@@ -382,6 +444,7 @@ class RealPurchaseService implements PurchaseService {
         productId: plan.productId!,
         planId,
         userId,
+        accessToken,
         resolve: settle,
         requestPurchaseResolved: false,
         receivedAnyUpdate: false,
@@ -412,18 +475,11 @@ class RealPurchaseService implements PurchaseService {
         })
           .then(() => {
             // `requestPurchase` resolving means Apple accepted the request and
-            // the StoreKit sheet completed. Per expo-iap, entitlement still
-            // belongs to listener/active-subscription APIs; however local
-            // StoreKit upgrades can keep reporting the old tier. In __DEV__
-            // Phase 1 we therefore remember the requested plan for Plans'
-            // CURRENT chip only. Settings/quota remain backend truth.
+            // the StoreKit sheet completed. Entitlement still belongs to the
+            // signed transaction delivered through purchaseUpdatedListener and
+            // verified by the backend.
             if (this.pending === entry) entry.requestPurchaseResolved = true;
             if (__DEV__) console.log('[IAP] requestPurchase resolved');
-            if (__DEV__ && this.pending === entry) {
-              void this.rememberLocalPurchasedPlan(userId, planId).finally(() => {
-                entry.resolve({ ok: true, planId, pendingAppleSync: true });
-              });
-            }
           })
           .catch((err) => {
             settle({ ok: false, reason: errorMessage(err, 'Could not start the purchase.') });
@@ -440,18 +496,44 @@ class RealPurchaseService implements PurchaseService {
     });
   }
 
-  async restore(userId: string | null): Promise<RestoreResult> {
+  async restore(userId: string | null, accessToken?: string | null): Promise<RestoreResult> {
     if (!userId) return { ok: false, reason: 'Sign in to restore purchases.' };
+    if (!accessToken) return { ok: false, reason: 'Sign in to restore purchases.' };
     try {
       await this.ensureConnection();
       await ExpoIap.restorePurchases();
-      const activeIds = await this.fetchActiveProductIds();
-      const planId = highestActivePlan(activeIds);
-      if (__DEV__) {
-        await this.replaceLocalPurchasedPlanFromRestore(userId, planId);
-        console.log('[IAP] restore result', { activeIds: [...activeIds], planId });
+      const available = await ExpoIap.getAvailablePurchases({
+        alsoPublishToEventListenerIOS: false,
+        onlyIncludeActiveItemsIOS: true,
+      });
+      const youmiPurchases = (available ?? [])
+        .map((purchase) => purchase as PurchaseForBackend)
+        .filter((purchase) => Boolean(PRODUCT_PLAN_MAP[purchase.productId]));
+      const verifiablePurchases = youmiPurchases.filter(purchaseHasBackendToken);
+
+      if (verifiablePurchases.length === 0) {
+        if (__DEV__) {
+          const activeIds = await this.fetchActiveProductIds();
+          const planId = highestActivePlan(activeIds);
+          await this.replaceLocalPurchasedPlanFromRestore(userId, planId);
+          console.log('[IAP] restore local StoreKit fallback', { activeIds: [...activeIds], planId });
+          return { ok: true, planId, localStoreKitFallback: true };
+        }
+        return {
+          ok: false,
+          reason: 'No signed Youmi Lens purchases were available to restore.',
+        };
       }
-      return { ok: true, planId };
+
+      const restored = await this.restorePurchasesWithBackend(verifiablePurchases, accessToken);
+      if (__DEV__) {
+        await this.replaceLocalPurchasedPlanFromRestore(userId, restored.planId);
+        console.log('[IAP] restore verified', {
+          planType: restored.planType,
+          restoredCount: restored.restoredCount,
+        });
+      }
+      return { ok: true, ...restored };
     } catch (err) {
       if (__DEV__) console.warn('[IAP] restore failed', err);
       return { ok: false, reason: errorMessage(err, 'Could not restore purchases.') };
@@ -479,6 +561,90 @@ class RealPurchaseService implements PurchaseService {
   private async fetchActiveProductIds(): Promise<Set<string>> {
     const active = await ExpoIap.getActiveSubscriptions();
     return new Set((active ?? []).map((s) => s.productId));
+  }
+
+  private async verifyPurchaseWithBackend(
+    purchase: PurchaseForBackend,
+    accessToken: string,
+  ): Promise<{ planId: PlanId; planType: string; quotaStatus: PlanStatus }> {
+    if (!API_BASE_URL) throw new Error('Missing API base URL.');
+    const productId = purchase.productId;
+    const transactionId = transactionIdFromPurchase(purchase);
+    const purchaseToken = purchase.purchaseToken ?? purchase.signedTransactionInfo ?? null;
+    if (!purchaseToken) {
+      throw new Error('StoreKit did not provide a signed transaction for backend verification.');
+    }
+
+    if (__DEV__) console.log('[IAP] verify start', { productId, transactionId });
+    const response = await fetch(`${API_BASE_URL}/api/iap/verify`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        platform: 'ios',
+        productId,
+        transactionId,
+        originalTransactionId: purchase.originalTransactionIdentifierIOS ?? null,
+        purchaseToken,
+      }),
+    });
+
+    const payload = (await response.json().catch(() => null)) as IapVerifyResponse | null;
+    if (!response.ok || !payload?.ok || !payload.planType || !payload.quotaStatus) {
+      const reason =
+        payload?.message ??
+        payload?.error ??
+        `Purchase verification failed (HTTP ${response.status}).`;
+      if (__DEV__) console.warn('[IAP] verify failed', { productId, transactionId, error: reason });
+      throw new Error(reason);
+    }
+
+    if (__DEV__) console.log('[IAP] verify success', { planType: payload.planType });
+    return {
+      planId: planIdFromPlanType(payload.planType),
+      planType: payload.planType,
+      quotaStatus: payload.quotaStatus,
+    };
+  }
+
+  private async restorePurchasesWithBackend(
+    purchases: PurchaseForBackend[],
+    accessToken: string,
+  ): Promise<{ planId: PlanId; planType?: string; quotaStatus: PlanStatus; restoredCount?: number }> {
+    if (!API_BASE_URL) throw new Error('Missing API base URL.');
+    const bodyPurchases = purchases.map((purchase) => ({
+      productId: purchase.productId,
+      transactionId: transactionIdFromPurchase(purchase),
+      originalTransactionId: purchase.originalTransactionIdentifierIOS ?? null,
+      purchaseToken: purchase.purchaseToken ?? purchase.signedTransactionInfo ?? null,
+    }));
+
+    const response = await fetch(`${API_BASE_URL}/api/iap/restore`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ platform: 'ios', purchases: bodyPurchases }),
+    });
+
+    const payload = (await response.json().catch(() => null)) as IapRestoreResponse | null;
+    if (!response.ok || !payload?.ok || !payload.quotaStatus) {
+      throw new Error(
+        payload?.message ??
+          payload?.error ??
+          `Purchase restore failed (HTTP ${response.status}).`,
+      );
+    }
+
+    return {
+      planId: planIdFromPlanType(payload.planType ?? payload.quotaStatus.planType),
+      planType: payload.planType ?? payload.quotaStatus.planType,
+      quotaStatus: payload.quotaStatus,
+      restoredCount: payload.restoredCount,
+    };
   }
 
   private async readLocalPurchasedPlan(userId: string): Promise<PlanId | null> {
@@ -562,14 +728,8 @@ class RealPurchaseService implements PurchaseService {
         return;
       }
 
-      if (activeIds.has(c.productId)) {
-        const finalPlan = highestActivePlan(activeIds);
-        if (__DEV__) console.log('[IAP] poll resolved active plan', finalPlan);
-        this.stopPendingPoll('resolved');
-        // `resolve` is the settle wrapper from purchase(); calling it again
-        // would be a no-op, but stopPendingPoll already cleared our interval.
-        c.resolve({ ok: true, planId: finalPlan });
-        return;
+      if (activeIds.has(c.productId) && __DEV__) {
+        if (__DEV__) console.log('[IAP] poll saw pending product; waiting for signed transaction');
       }
 
       if (this.pollAttempts >= this.POLL_MAX_ATTEMPTS) {
@@ -585,8 +745,6 @@ class RealPurchaseService implements PurchaseService {
         // set the `pendingAppleSync` flag so the UI can move on. In a
         // production build we keep the conservative path: do nothing here and
         // let the global 90s timeout surface "tap Restore Purchases".
-        // Phase 2 backend receipt verification will make this whole branch
-        // obsolete.
         if (
           __DEV__ &&
           this.pending === c &&
@@ -615,57 +773,89 @@ class RealPurchaseService implements PurchaseService {
 
   /**
    * Called whenever a `purchaseUpdated` event arrives. Resolves the in-flight
-   * purchase if either (a) the incoming productId matches what we're waiting
-   * for, or (b) the pending product now shows up in Apple's active set — which
-   * is how we cover the upgrade case where StoreKit may deliver the OLD
-   * (revoked) subscription's transaction first instead of the new one.
-   *
-   * The resolved planId is computed from the highest-priority active tier so
-   * the Plans screen flips CURRENT to the upgraded plan even when the listener
-   * event itself referenced the old product.
+   * purchase only when the incoming productId matches what we're waiting for
+   * and the backend accepts the signed transaction. If StoreKit delivers an
+   * old subscription transaction during an upgrade, we keep waiting instead of
+   * treating the old JWS as proof of the requested new tier.
    */
-  private async maybeResolvePending(incomingProductId: string | undefined): Promise<void> {
+  private async verifyAndResolvePending(purchase: PurchaseForBackend): Promise<void> {
     const current = this.pending;
     if (!current) return;
+    const incomingProductId = purchase.productId;
 
-    let directMatch = incomingProductId === current.productId;
-    let activeIds: Set<string> = new Set();
-    try {
-      activeIds = await this.fetchActiveProductIds();
-    } catch (err) {
-      if (__DEV__) console.warn('[IAP] fetchActiveProductIds failed', err);
-    }
+    const directMatch = incomingProductId === current.productId;
     if (__DEV__) {
-      console.log('[IAP] active subscription ids after update:', [...activeIds]);
-      console.log('[IAP] maybeResolvePending', {
+      console.log('[IAP] verifyAndResolvePending', {
         pendingProductId: current.productId,
         incomingProductId,
         directMatch,
-        inActiveSet: activeIds.has(current.productId),
       });
     }
 
-    if (!directMatch && !activeIds.has(current.productId)) {
+    if (!directMatch) {
       // Event was for some other product (most commonly the OLD subscription
-      // during a same-group upgrade), and our target hasn't appeared in the
-      // active set yet. Don't resolve — but make sure the polling fallback is
-      // running so we don't depend on a future listener event that may never
-      // come for our target product.
+      // during a same-group upgrade). Don't verify it as proof of the requested
+      // plan; wait for a signed transaction for the product the user selected.
       this.startPendingPoll();
       return;
     }
 
-    const finalPlan: PlanId = activeIds.size > 0
-      ? highestActivePlan(activeIds)
-      : current.planId;
-    if (__DEV__) console.log('[IAP] resolved active plan:', finalPlan);
-
-    // Guard against a race where another listener call already resolved.
-    if (this.pending !== current) return;
-    if (__DEV__ && finalPlan !== 'free') {
-      await this.rememberLocalPurchasedPlan(current.userId, finalPlan);
+    if (!purchaseHasBackendToken(purchase)) {
+      const reason = 'StoreKit did not provide a signed transaction for backend verification.';
+      if (__DEV__) {
+        console.warn('[IAP] verify failed', {
+          productId: incomingProductId,
+          transactionId: transactionIdFromPurchase(purchase),
+          error: reason,
+        });
+        await this.rememberLocalPurchasedPlan(current.userId, current.planId);
+        try {
+          await ExpoIap.finishTransaction({
+            purchase: purchase as Parameters<typeof ExpoIap.finishTransaction>[0]['purchase'],
+            isConsumable: false,
+          });
+          console.log('[IAP] finishTransaction after local StoreKit fallback', {
+            productId: incomingProductId,
+            transactionId: transactionIdFromPurchase(purchase),
+          });
+        } catch (err) {
+          console.warn('[IAP] finishTransaction failed', err);
+        }
+        current.resolve({ ok: true, planId: current.planId, pendingAppleSync: true });
+        return;
+      }
+      current.resolve({ ok: false, reason });
+      return;
     }
-    current.resolve({ ok: true, planId: finalPlan });
+
+    try {
+      const verified = await this.verifyPurchaseWithBackend(purchase, current.accessToken);
+      if (this.pending !== current) return;
+      await ExpoIap.finishTransaction({
+        purchase: purchase as Parameters<typeof ExpoIap.finishTransaction>[0]['purchase'],
+        isConsumable: false,
+      });
+      if (__DEV__) {
+        console.log('[IAP] finishTransaction after verify', {
+          productId: incomingProductId,
+          transactionId: transactionIdFromPurchase(purchase),
+        });
+        if (verified.planId !== 'free') await this.rememberLocalPurchasedPlan(current.userId, verified.planId);
+      }
+      current.resolve({
+        ok: true,
+        planId: verified.planId,
+        planType: verified.planType,
+        quotaStatus: verified.quotaStatus,
+        verifiedByBackend: true,
+      });
+    } catch (err) {
+      if (this.pending !== current) return;
+      current.resolve({
+        ok: false,
+        reason: errorMessage(err, 'Purchase could not be verified.'),
+      });
+    }
   }
 
   private attachListeners() {
@@ -673,8 +863,9 @@ class RealPurchaseService implements PurchaseService {
     this.listenersAttached = true;
 
     this.updateSub = ExpoIap.purchaseUpdatedListener(async (purchase) => {
-      const productId = (purchase as { productId?: string })?.productId;
-      const transactionId = (purchase as { transactionId?: string })?.transactionId;
+      const typedPurchase = purchase as PurchaseForBackend;
+      const productId = typedPurchase.productId;
+      const transactionId = transactionIdFromPurchase(typedPurchase);
       if (__DEV__) console.log('[IAP] purchaseUpdated', { productId, transactionId });
 
       // Mark that something arrived from StoreKit for the in-flight purchase
@@ -682,18 +873,7 @@ class RealPurchaseService implements PurchaseService {
       // the sheet completed and Apple is processing the request.
       if (this.pending) this.pending.receivedAnyUpdate = true;
 
-      // Finish the transaction locally so it is not redelivered. Phase 2 will
-      // POST the JWS to the backend BEFORE finishing for receipt verification.
-      try {
-        await ExpoIap.finishTransaction({
-          purchase: purchase as Parameters<typeof ExpoIap.finishTransaction>[0]['purchase'],
-          isConsumable: false,
-        });
-      } catch (err) {
-        if (__DEV__) console.warn('[IAP] finishTransaction failed', err);
-      }
-
-      await this.maybeResolvePending(productId);
+      await this.verifyAndResolvePending(typedPurchase);
     });
 
     this.errorSub = ExpoIap.purchaseErrorListener((err) => {

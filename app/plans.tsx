@@ -9,10 +9,8 @@
  *  - Mock (default) — preserves the legacy preview/Coming-Soon behavior so the
  *    app stays usable in Xcode-installed builds without going through Apple.
  *  - Real (when `EXPO_PUBLIC_USE_REAL_IAP=true`) — fetches localized App Store
- *    prices, drives the system purchase sheet, and lets Restore replay any
- *    prior subscription. The user's effective plan is still rendered from the
- *    backend `/api/quota/status` on the Settings card; backend receipt
- *    verification is a separate (Phase 2) task.
+ *    prices, drives the system purchase sheet, verifies purchases with the
+ *    backend, and renders CURRENT from `/api/quota/status`.
  */
 import { Ionicons } from '@expo/vector-icons';
 import * as Linking from 'expo-linking';
@@ -34,11 +32,13 @@ import { PrimaryButton } from '@/components/PrimaryButton';
 import { SecondaryButton } from '@/components/SecondaryButton';
 import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
+import { fetchPlanStatus } from '@/lib/planStatus';
 import {
   LocalizedPrices,
   Plan,
   PLANS,
   PlanId,
+  planIdFromPlanType,
   planById,
   purchaseService,
   PurchaseResult,
@@ -57,8 +57,9 @@ const PRIVACY_URL = 'https://youmilens.app/privacy';
 
 export default function PlansScreen() {
   const router = useRouter();
-  const { user } = useAuth();
+  const { user, session } = useAuth();
   const userId = user?.id ?? null;
+  const accessToken = session?.access_token ?? null;
   const isRealMode = purchaseService.mode === 'real';
 
   const [activePlan, setActivePlan] = useState<PlanId | null>(null);
@@ -70,11 +71,22 @@ export default function PlansScreen() {
   const loadActive = useCallback(async () => {
     setLoading(true);
     try {
+      if (isRealMode) {
+        if (!accessToken) {
+          setActivePlan('free');
+          return;
+        }
+        const status = await fetchPlanStatus(accessToken);
+        setActivePlan(planIdFromPlanType(status.planType));
+        return;
+      }
       setActivePlan(await purchaseService.getActivePlan(userId));
+    } catch {
+      setActivePlan('free');
     } finally {
       setLoading(false);
     }
-  }, [userId]);
+  }, [accessToken, isRealMode, userId]);
 
   useEffect(() => {
     void loadActive();
@@ -120,7 +132,7 @@ export default function PlansScreen() {
       // button stuck on "Processing…" forever.
       let result: PurchaseResult;
       try {
-        result = await purchaseService.purchase(userId, planId);
+        result = await purchaseService.purchase(userId, planId, accessToken);
       } finally {
         if (__DEV__) console.log('[Plans] clearing busyPlanId');
         setBusyPlanId(null);
@@ -144,19 +156,13 @@ export default function PlansScreen() {
         return;
       }
 
-      // Real mode: the App Store accepted the subscription. The service
-      // already resolved the planId; we use it for the CURRENT chip in
-      // Plans. We intentionally do NOT mark the user's effective plan as
-      // paid in any backend state — Settings reflects entitlement through
-      // /api/quota/status after Phase 2 receipt validation.
-      setActivePlan(result.planId);
-
       if (result.pendingAppleSync) {
         // Local-fallback success: the StoreKit sheet completed but Apple's
         // active-subscription query did not reflect the new product within
         // our poll window. Soften the alert wording and skip the extra
         // active-set refresh (it would just re-show the old tier).
         if (__DEV__) console.log('[Plans] purchase pending Apple sync');
+        setActivePlan(result.planId);
         Alert.alert(
           'Purchase completed',
           'Apple subscription status may take a moment to update. Your Settings quota will update after server verification.',
@@ -164,29 +170,35 @@ export default function PlansScreen() {
         return;
       }
 
-      // Belt-and-suspenders refresh in case StoreKit's active set caught up
-      // after the listener fired.
-      void purchaseService
-        .getActivePlan(userId)
-        .then((latest) => setActivePlan(latest))
-        .catch(() => {
-          /* keep the resolver's planId */
-        });
+      // Real mode: backend verification is complete. Refetch quota/status and
+      // use that backend planType as the only CURRENT source.
+      let backendPlanId = result.planId;
+      try {
+        if (accessToken) {
+          const latestStatus = await fetchPlanStatus(accessToken);
+          backendPlanId = planIdFromPlanType(latestStatus.planType);
+        }
+      } catch {
+        backendPlanId = result.quotaStatus
+          ? planIdFromPlanType(result.quotaStatus.planType)
+          : result.planId;
+      }
+      setActivePlan(backendPlanId);
 
-      const planName = planById(result.planId).name;
+      const planName = result.quotaStatus?.displayName ?? planById(backendPlanId).name;
       Alert.alert(
-        'Purchase complete',
-        `Thanks for subscribing to ${planName}. Your plan will update in Settings once it is verified with our servers.`,
+        'Purchase verified',
+        `Thanks for subscribing to ${planName}. Your plan and quota are now synced from Youmi Lens servers.`,
       );
     },
-    [activePlan, isRealMode, userId],
+    [accessToken, activePlan, isRealMode, userId],
   );
 
   const handleRestore = useCallback(async () => {
     setRestoring(true);
     let result: Awaited<ReturnType<typeof purchaseService.restore>>;
     try {
-      result = await purchaseService.restore(userId);
+      result = await purchaseService.restore(userId, accessToken);
     } finally {
       setRestoring(false);
     }
@@ -205,21 +217,41 @@ export default function PlansScreen() {
       return;
     }
 
-    // Real mode: keep the screen indicator in sync with what Apple reports.
-    setActivePlan(result.planId);
-    if (result.planId === 'free') {
+    if (result.localStoreKitFallback) {
+      setActivePlan(result.planId);
+      Alert.alert(
+        'Restore completed locally',
+        'Local StoreKit did not provide a signed transaction for server verification. Your real plan and quota still come from Youmi Lens servers.',
+      );
+      return;
+    }
+
+    // Real mode: keep the screen indicator in sync with backend quota truth.
+    let backendPlanId = result.planId;
+    try {
+      if (accessToken) {
+        const latestStatus = await fetchPlanStatus(accessToken);
+        backendPlanId = planIdFromPlanType(latestStatus.planType);
+      }
+    } catch {
+      backendPlanId = result.quotaStatus
+        ? planIdFromPlanType(result.quotaStatus.planType)
+        : result.planId;
+    }
+    setActivePlan(backendPlanId);
+    if (backendPlanId === 'free') {
       Alert.alert(
         'Nothing to restore',
         'No active Youmi Lens subscription was found on this Apple ID.',
       );
     } else {
-      const planName = planById(result.planId).name;
+      const planName = result.quotaStatus?.displayName ?? planById(backendPlanId).name;
       Alert.alert(
         'Purchases restored',
-        `Your ${planName} subscription was found on this Apple ID. Your plan will update in Settings once it is verified with our servers.`,
+        `Your ${planName} subscription was restored and synced from Youmi Lens servers.`,
       );
     }
-  }, [isRealMode, userId]);
+  }, [accessToken, isRealMode, userId]);
 
   const openExternal = useCallback((url: string) => {
     Linking.openURL(url).catch(() => {
