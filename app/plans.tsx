@@ -1,21 +1,21 @@
 /**
- * Plans / Upgrade screen.
+ * Access & Usage screen (route: /plans).
  *
- * Lists the four subscription tiers, marks the active selection, and exposes a
- * Restore Purchases action. The actual "subscribe" call goes through the
- * PurchaseService abstraction in lib/purchases.ts.
+ * Youmi Lens is free during beta. This screen shows the user's current
+ * access tier, monthly + daily minute budgets, recordings used today, and
+ * per-recording / per-live-session caps. All numbers come from the backend
+ * `/api/quota/status` — the same endpoint the Settings Plan card uses, and
+ * the same backend the Mac client reads from. Quota is account-level
+ * (Supabase user_id), so usage on iPad and Mac shares the same numbers.
  *
- * Two modes:
- *  - Mock (default) — preserves the legacy preview/Coming-Soon behavior so the
- *    app stays usable in Xcode-installed builds without going through Apple.
- *  - Real (when `EXPO_PUBLIC_USE_REAL_IAP=true`) — fetches localized App Store
- *    prices, drives the system purchase sheet, verifies purchases with the
- *    backend, and renders CURRENT from `/api/quota/status`.
+ * No paid plans, no Subscribe, no Restore Purchases, no prices, no Apple
+ * IAP, no donations. The IAP code in `lib/purchases.ts` is left in place
+ * but inert (gated behind `EXPO_PUBLIC_USE_REAL_IAP`, currently off).
  */
 import { Ionicons } from '@expo/vector-icons';
 import * as Linking from 'expo-linking';
-import { useRouter } from 'expo-router';
-import { useCallback, useEffect, useState } from 'react';
+import { useFocusEffect, useRouter } from 'expo-router';
+import { useCallback, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -28,234 +28,51 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { GlassCard } from '@/components/GlassCard';
-import { PrimaryButton } from '@/components/PrimaryButton';
 import { SecondaryButton } from '@/components/SecondaryButton';
 import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
-import { fetchPlanStatus } from '@/lib/planStatus';
-import {
-  LocalizedPrices,
-  Plan,
-  PLANS,
-  PlanId,
-  planIdFromPlanType,
-  planById,
-  purchaseService,
-  PurchaseResult,
-} from '@/lib/purchases';
+import { fetchPlanStatus, PlanStatus } from '@/lib/planStatus';
 
-/**
- * Standard Apple EULA. App Store Connect uses this by default unless a custom
- * EULA is uploaded; both are acceptable for Review.
- */
-const TERMS_URL = 'https://www.apple.com/legal/internet-services/itunes/dev/stdeula/';
-/**
- * Public-facing privacy policy. docs/privacy-policy.md is the source; this
- * placeholder URL must be replaced with the live hosted copy before submission.
- */
-const PRIVACY_URL = 'https://youmilens.app/privacy';
+const CONTACT_EMAIL = 'youmilens@gmail.com';
 
 export default function PlansScreen() {
   const router = useRouter();
-  const { user, session } = useAuth();
-  const userId = user?.id ?? null;
+  const { session } = useAuth();
   const accessToken = session?.access_token ?? null;
-  const isRealMode = purchaseService.mode === 'real';
 
-  const [activePlan, setActivePlan] = useState<PlanId | null>(null);
+  const [planStatus, setPlanStatus] = useState<PlanStatus | null>(null);
   const [loading, setLoading] = useState(true);
-  const [busyPlanId, setBusyPlanId] = useState<PlanId | null>(null);
-  const [restoring, setRestoring] = useState(false);
-  const [localizedPrices, setLocalizedPrices] = useState<LocalizedPrices>({});
+  const [error, setError] = useState<string | null>(null);
 
-  const loadActive = useCallback(async () => {
+  const loadStatus = useCallback(async () => {
+    if (!accessToken) {
+      setPlanStatus(null);
+      setLoading(false);
+      setError('Sign in to view your access.');
+      return;
+    }
     setLoading(true);
+    setError(null);
     try {
-      if (isRealMode) {
-        if (!accessToken) {
-          setActivePlan('free');
-          return;
-        }
-        const status = await fetchPlanStatus(accessToken);
-        setActivePlan(planIdFromPlanType(status.planType));
-        return;
-      }
-      setActivePlan(await purchaseService.getActivePlan(userId));
-    } catch {
-      setActivePlan('free');
+      setPlanStatus(await fetchPlanStatus(accessToken));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Access information is unavailable.');
     } finally {
       setLoading(false);
     }
-  }, [accessToken, isRealMode, userId]);
+  }, [accessToken]);
 
-  useEffect(() => {
-    void loadActive();
-  }, [loadActive]);
-
-  // In real mode, fetch App Store-localized prices once. Failures are silent;
-  // the cards fall back to the hardcoded `priceLabel` from the catalog.
-  useEffect(() => {
-    if (!purchaseService.getLocalizedPrices) return;
-    let cancelled = false;
-    purchaseService
-      .getLocalizedPrices()
-      .then((prices) => {
-        if (!cancelled) setLocalizedPrices(prices);
-      })
-      .catch(() => {
-        /* fall back to catalog priceLabel */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const handleSelectPlan = useCallback(
-    async (planId: PlanId) => {
-      if (__DEV__) console.log('[Plans] select plan', planId);
-      if (planId === activePlan) return;
-
-      // Mock mode preserves the legacy "Coming Soon" behavior for paid tiers so
-      // the dev build never implies a real subscription was bought.
-      if (!isRealMode && planId !== 'free') {
-        Alert.alert(
-          'Coming Soon',
-          'Apple in-app purchases are coming soon. Paid plans are previewed here so you can see what is planned — no real payment is processed in this build.',
-        );
-        return;
-      }
-
-      if (__DEV__) console.log('[Plans] busyPlanId set', planId);
-      setBusyPlanId(planId);
-      // try/finally is mandatory here — without it, any thrown exception
-      // between setBusyPlanId(planId) and the explicit clear leaves the
-      // button stuck on "Processing…" forever.
-      let result: PurchaseResult;
-      try {
-        result = await purchaseService.purchase(userId, planId, accessToken);
-      } finally {
-        if (__DEV__) console.log('[Plans] clearing busyPlanId');
-        setBusyPlanId(null);
-      }
-
-      if (!result.ok) {
-        // Silently swallow a user-initiated cancel: showing an "error" alert
-        // when the user themselves dismissed the sheet is App Review-unfriendly.
-        if (result.canceled) return;
-        Alert.alert('Could not switch plan', result.reason);
-        return;
-      }
-
-      if (!isRealMode) {
-        // Mock-only: switching to Free updates the preview indicator locally.
-        setActivePlan(result.planId);
-        Alert.alert(
-          'Switched to Free',
-          'Test mode — your selection has been recorded locally on this device.',
-        );
-        return;
-      }
-
-      if (result.pendingAppleSync) {
-        // Local-fallback success: the StoreKit sheet completed but Apple's
-        // active-subscription query did not reflect the new product within
-        // our poll window. Soften the alert wording and skip the extra
-        // active-set refresh (it would just re-show the old tier).
-        if (__DEV__) console.log('[Plans] purchase pending Apple sync');
-        setActivePlan(result.planId);
-        Alert.alert(
-          'Purchase completed',
-          'Apple subscription status may take a moment to update. Your Settings quota will update after server verification.',
-        );
-        return;
-      }
-
-      // Real mode: backend verification is complete. Refetch quota/status and
-      // use that backend planType as the only CURRENT source.
-      let backendPlanId = result.planId;
-      try {
-        if (accessToken) {
-          const latestStatus = await fetchPlanStatus(accessToken);
-          backendPlanId = planIdFromPlanType(latestStatus.planType);
-        }
-      } catch {
-        backendPlanId = result.quotaStatus
-          ? planIdFromPlanType(result.quotaStatus.planType)
-          : result.planId;
-      }
-      setActivePlan(backendPlanId);
-
-      const planName = result.quotaStatus?.displayName ?? planById(backendPlanId).name;
-      Alert.alert(
-        'Purchase verified',
-        `Thanks for subscribing to ${planName}. Your plan and quota are now synced from Youmi Lens servers.`,
-      );
-    },
-    [accessToken, activePlan, isRealMode, userId],
+  // Refetch every time the screen regains focus — keeps the numbers in
+  // sync with Mac-side usage, which is the whole point of this page.
+  useFocusEffect(
+    useCallback(() => {
+      void loadStatus();
+    }, [loadStatus]),
   );
 
-  const handleRestore = useCallback(async () => {
-    setRestoring(true);
-    let result: Awaited<ReturnType<typeof purchaseService.restore>>;
-    try {
-      result = await purchaseService.restore(userId, accessToken);
-    } finally {
-      setRestoring(false);
-    }
-    if (!result.ok) {
-      Alert.alert('Restore unavailable', result.reason);
-      return;
-    }
-
-    if (!isRealMode) {
-      setActivePlan(result.planId);
-      const planName = planById(result.planId).name;
-      Alert.alert(
-        'Restore Purchases',
-        `Apple in-app purchases are not yet connected, so there is nothing to restore from the App Store. Locally remembered plan: ${planName}.`,
-      );
-      return;
-    }
-
-    if (result.localStoreKitFallback) {
-      setActivePlan(result.planId);
-      Alert.alert(
-        'Restore completed locally',
-        'Local StoreKit did not provide a signed transaction for server verification. Your real plan and quota still come from Youmi Lens servers.',
-      );
-      return;
-    }
-
-    // Real mode: keep the screen indicator in sync with backend quota truth.
-    let backendPlanId = result.planId;
-    try {
-      if (accessToken) {
-        const latestStatus = await fetchPlanStatus(accessToken);
-        backendPlanId = planIdFromPlanType(latestStatus.planType);
-      }
-    } catch {
-      backendPlanId = result.quotaStatus
-        ? planIdFromPlanType(result.quotaStatus.planType)
-        : result.planId;
-    }
-    setActivePlan(backendPlanId);
-    if (backendPlanId === 'free') {
-      Alert.alert(
-        'Nothing to restore',
-        'No active Youmi Lens subscription was found on this Apple ID.',
-      );
-    } else {
-      const planName = result.quotaStatus?.displayName ?? planById(backendPlanId).name;
-      Alert.alert(
-        'Purchases restored',
-        `Your ${planName} subscription was restored and synced from Youmi Lens servers.`,
-      );
-    }
-  }, [accessToken, isRealMode, userId]);
-
-  const openExternal = useCallback((url: string) => {
-    Linking.openURL(url).catch(() => {
-      Alert.alert('Could not open link', 'Please try again later.');
+  const openMailto = useCallback(() => {
+    Linking.openURL(`mailto:${CONTACT_EMAIL}?subject=Youmi%20Lens%20beta%20access`).catch(() => {
+      Alert.alert('Could not open mail', `Please email ${CONTACT_EMAIL} manually.`);
     });
   }, []);
 
@@ -271,173 +88,230 @@ export default function PlansScreen() {
         >
           <Ionicons name="chevron-back" size={24} color={colors.deepNavy} />
         </Pressable>
-        <Text style={styles.headerTitle}>Plans</Text>
+        <Text style={styles.headerTitle}>Access & Usage</Text>
         <View style={styles.headerSpacer} />
       </View>
 
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         <View style={styles.content}>
           <View style={styles.heroBlock}>
-            <Text style={styles.heroTitle}>Choose the plan that fits how you study</Text>
+            <Text style={styles.heroTitle}>Youmi Lens is free during beta.</Text>
             <Text style={styles.heroSubtitle}>
-              Plans are designed around monthly recording time, transcripts, summaries, and
-              cloud-backed lecture history.
+              Daily and monthly limits help keep the service stable for students. Your usage is
+              shared across iPad and Mac.
             </Text>
-            {!isRealMode ? (
-              <View style={styles.testNotice}>
-                <Ionicons name="construct-outline" size={14} color={colors.deepNavy} />
-                <Text style={styles.testNoticeText}>
-                  Test mode — this screen is a local preview only. Your real plan and quota still
-                  come from the backend Settings card.
-                </Text>
-              </View>
-            ) : null}
           </View>
 
-          {loading || activePlan === null ? (
+          {loading && !planStatus ? (
             <View style={styles.loading}>
               <ActivityIndicator color={colors.deepNavy} />
             </View>
+          ) : !planStatus ? (
+            <ErrorCard
+              message={error ?? 'Access information is unavailable.'}
+              onRetry={() => void loadStatus()}
+            />
           ) : (
-            <View style={styles.cards}>
-              {PLANS.map((plan) => (
-                <PlanCard
-                  key={plan.id}
-                  plan={plan}
-                  isActive={activePlan === plan.id}
-                  isBusy={busyPlanId === plan.id}
-                  isRealMode={isRealMode}
-                  displayPrice={localizedPrices[plan.id] ?? plan.priceLabel}
-                  onSelect={() => void handleSelectPlan(plan.id)}
-                />
-              ))}
-            </View>
+            <AccessCards status={planStatus} />
           )}
 
-          <View style={styles.restoreRow}>
+          <GlassCard style={styles.contactCard}>
+            <View style={styles.contactRow}>
+              <View style={styles.contactIcon}>
+                <Ionicons name="mail-outline" size={20} color={colors.deepNavy} />
+              </View>
+              <View style={styles.contactText}>
+                <Text style={styles.contactTitle}>Need extended access?</Text>
+                <Text style={styles.contactBody}>
+                  If you need more capacity for coursework, contact us.
+                </Text>
+              </View>
+            </View>
             <SecondaryButton
-              label={restoring ? 'Restoring…' : 'Restore Purchases'}
-              icon="refresh-outline"
-              onPress={() => void handleRestore()}
-              disabled={restoring}
-              style={styles.restoreButton}
+              label={CONTACT_EMAIL}
+              icon="mail-outline"
+              onPress={openMailto}
+              style={styles.contactButton}
             />
-            {!isRealMode ? (
-              <Text style={styles.restoreNote}>
-                Test mode — restore will activate when Apple in-app purchase is live. Until then, Settings remains the source of truth for your real plan.
-              </Text>
-            ) : null}
-          </View>
+          </GlassCard>
 
           <Text style={styles.footerNote}>
-            Subscriptions auto-renew monthly unless canceled at least 24 hours before the end of the
-            current period. You can manage or cancel a subscription in your iPad Settings → Apple ID
-            → Subscriptions.
+            Youmi Lens is currently a free educational beta. There are no paid subscriptions or
+            in-app purchases.
           </Text>
-
-          <View style={styles.legalRow}>
-            <Pressable
-              accessibilityRole="link"
-              accessibilityLabel="Terms of Use"
-              onPress={() => openExternal(TERMS_URL)}
-              hitSlop={8}
-            >
-              <Text style={styles.legalLink}>Terms of Use (EULA)</Text>
-            </Pressable>
-            <Text style={styles.legalSeparator}>·</Text>
-            <Pressable
-              accessibilityRole="link"
-              accessibilityLabel="Privacy Policy"
-              onPress={() => openExternal(PRIVACY_URL)}
-              hitSlop={8}
-            >
-              <Text style={styles.legalLink}>Privacy Policy</Text>
-            </Pressable>
-          </View>
         </View>
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-function PlanCard({
-  plan,
-  isActive,
-  isBusy,
-  isRealMode,
-  displayPrice,
-  onSelect,
-}: {
-  plan: Plan;
-  isActive: boolean;
-  isBusy: boolean;
-  isRealMode: boolean;
-  displayPrice: string;
-  onSelect: () => void;
-}) {
-  const activeChipLabel = isRealMode ? 'CURRENT' : 'PREVIEW';
-  return (
-    <GlassCard style={StyleSheet.flatten([styles.planCard, isActive && styles.planCardActive])}>
-      <View style={styles.planHeader}>
-        <View style={styles.planNameBlock}>
-          <View style={styles.planNameRow}>
-            <Text style={styles.planName}>{plan.name}</Text>
-            {isActive ? (
-              <View style={styles.activeChip}>
-                <Ionicons name="checkmark" size={12} color="#157A58" />
-                <Text style={styles.activeChipText}>{activeChipLabel}</Text>
-              </View>
-            ) : null}
+function AccessCards({ status }: { status: PlanStatus }) {
+  if (status.status === 'suspended') {
+    return (
+      <GlassCard style={styles.tierCard}>
+        <View style={styles.tierHeader}>
+          <Text style={styles.tierName}>{status.displayName}</Text>
+          <View style={styles.suspendedPill}>
+            <Text style={styles.suspendedPillText}>ON HOLD</Text>
           </View>
-          {plan.blurb ? <Text style={styles.planBlurb}>{plan.blurb}</Text> : null}
         </View>
-        <View style={styles.planPriceBlock}>
-          <Text style={styles.planPrice}>{displayPrice}</Text>
-          {plan.id !== 'free' ? <Text style={styles.planPriceCadence}>/month</Text> : null}
-        </View>
-      </View>
-
-      <View style={styles.planFeatureList}>
-        {plan.features.map((feature) => (
-          <View key={feature} style={styles.planFeatureRow}>
-            <Ionicons name="checkmark-circle" size={16} color={colors.success} />
-            <Text style={styles.planFeatureText}>{feature}</Text>
-          </View>
-        ))}
-      </View>
-
-      {isActive ? (
-        <Text style={styles.currentLine}>
-          {isRealMode
-            ? 'Current subscription on this Apple ID.'
-            : 'Preview selection only — real plan is shown in Settings.'}
+        <Text style={styles.tierBlurb}>
+          Your account is currently on hold. Please contact support for help.
         </Text>
-      ) : plan.id === 'free' ? (
-        <SecondaryButton
-          label="Switch to Free"
-          icon="arrow-down-outline"
-          onPress={onSelect}
-          disabled={isBusy}
-          style={styles.planButton}
+      </GlassCard>
+    );
+  }
+
+  if (status.unlimited) {
+    return (
+      <GlassCard style={styles.tierCard}>
+        <View style={styles.tierHeader}>
+          <Text style={styles.tierName}>{status.displayName}</Text>
+          <View style={styles.activePill}>
+            <Ionicons name="checkmark" size={12} color="#157A58" />
+            <Text style={styles.activePillText}>UNLIMITED</Text>
+          </View>
+        </View>
+        <Text style={styles.tierBlurb}>Usage limits are bypassed for this account.</Text>
+      </GlassCard>
+    );
+  }
+
+  return (
+    <View style={styles.cards}>
+      <GlassCard style={styles.tierCard}>
+        <View style={styles.tierHeader}>
+          <Text style={styles.tierName}>{status.displayName}</Text>
+          <View style={styles.activePill}>
+            <Ionicons name="checkmark" size={12} color="#157A58" />
+            <Text style={styles.activePillText}>ACTIVE</Text>
+          </View>
+        </View>
+        <Text style={styles.tierBlurb}>
+          {tierBlurbFor(status.planType)}
+        </Text>
+      </GlassCard>
+
+      <UsageCard
+        title="Monthly minutes"
+        used={status.minutesUsed}
+        limit={status.minutesLimit}
+        remaining={status.minutesRemaining}
+        unit="min"
+      />
+      <UsageCard
+        title="Daily minutes"
+        used={status.dailyMinutesUsed}
+        limit={status.dailyMinutesLimit}
+        remaining={status.dailyMinutesRemaining}
+        unit="min"
+      />
+      <UsageCard
+        title="Recordings today"
+        used={status.recordingsUsedToday}
+        limit={status.maxRecordingsPerDay}
+        remaining={status.recordingsRemainingToday}
+        unit="recordings"
+      />
+
+      <GlassCard style={styles.limitsCard}>
+        <Text style={styles.limitsTitle}>Per-session limits</Text>
+        <LimitLine
+          label="Max recording length"
+          value={formatMinutes(status.maxRecordingMinutes)}
         />
-      ) : isRealMode ? (
-        <PrimaryButton
-          label={isBusy ? 'Processing…' : `Subscribe — ${displayPrice}/month`}
-          icon="diamond-outline"
-          onPress={onSelect}
-          disabled={isBusy}
-          style={styles.planButton}
+        <LimitLine
+          label="Max live session length"
+          value={formatMinutes(status.maxLiveSessionMinutes)}
         />
-      ) : (
-        <PrimaryButton
-          label={`Coming Soon — ${displayPrice}/month`}
-          icon="time-outline"
-          onPress={onSelect}
-          style={styles.planButton}
-        />
-      )}
+      </GlassCard>
+    </View>
+  );
+}
+
+function UsageCard({
+  title,
+  used,
+  limit,
+  remaining,
+  unit,
+}: {
+  title: string;
+  used?: number;
+  limit?: number | null;
+  remaining?: number | null;
+  unit: string;
+}) {
+  const usedDisplay = used == null ? '—' : Math.round(used).toString();
+  const limitDisplay = limit == null ? '—' : Math.round(limit).toString();
+  const remainingDisplay =
+    remaining == null ? null : Math.max(0, Math.round(remaining)).toString();
+  const exhausted = remaining != null && Number(remaining) <= 0;
+
+  return (
+    <GlassCard style={styles.usageCard}>
+      <View style={styles.usageHeader}>
+        <Text style={styles.usageTitle}>{title}</Text>
+        {exhausted ? (
+          <View style={styles.warningPill}>
+            <Text style={styles.warningPillText}>LIMIT REACHED</Text>
+          </View>
+        ) : null}
+      </View>
+      <Text style={styles.usageMain}>
+        <Text style={styles.usageMainUsed}>{usedDisplay}</Text>
+        <Text style={styles.usageMainSep}> / </Text>
+        <Text style={styles.usageMainLimit}>{limitDisplay} </Text>
+        <Text style={styles.usageMainUnit}>{unit}</Text>
+      </Text>
+      {remainingDisplay ? (
+        <Text style={styles.usageRemaining}>{remainingDisplay} remaining</Text>
+      ) : null}
     </GlassCard>
   );
+}
+
+function LimitLine({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.limitsLine}>
+      <Text style={styles.limitsLineLabel}>{label}</Text>
+      <Text style={styles.limitsLineValue}>{value}</Text>
+    </View>
+  );
+}
+
+function ErrorCard({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <GlassCard style={styles.tierCard}>
+      <Text style={styles.tierName}>Access unavailable</Text>
+      <Text style={styles.tierBlurb}>{message}</Text>
+      <SecondaryButton
+        label="Retry"
+        icon="refresh-outline"
+        onPress={onRetry}
+        style={styles.contactButton}
+      />
+    </GlassCard>
+  );
+}
+
+function tierBlurbFor(planType: string): string {
+  switch (planType) {
+    case 'public_trial':
+      return 'Free Beta access for students. Usage limits help keep the service stable.';
+    case 'core_tester':
+      return 'Extended testing access for active beta users.';
+    case 'admin':
+    case 'developer':
+      return 'Developer account — limits are bypassed.';
+    default:
+      return 'Beta access. Usage limits help keep the service stable.';
+  }
+}
+
+function formatMinutes(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(Number(value))) return '—';
+  return `${Math.round(Number(value))} min`;
 }
 
 const styles = StyleSheet.create({
@@ -464,7 +338,7 @@ const styles = StyleSheet.create({
   scroll: { paddingHorizontal: spacing.xl, paddingBottom: spacing.xxxl },
   content: { width: '100%', maxWidth: layout.content, alignSelf: 'center', gap: spacing.xl },
 
-  // ---- Hero ----
+  // Hero
   heroBlock: { gap: spacing.sm },
   heroTitle: {
     fontSize: fontSize.xxl,
@@ -478,51 +352,29 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontWeight: '500',
   },
-  testNotice: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: spacing.sm,
-    marginTop: spacing.sm,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm + 2,
-    borderRadius: radius.md,
-    backgroundColor: colors.iceTint,
-    borderWidth: 1,
-    borderColor: colors.iceBlue,
-  },
-  testNoticeText: {
-    flex: 1,
-    fontSize: fontSize.sm,
-    lineHeight: fontSize.sm * 1.5,
-    color: colors.deepNavy,
-    fontWeight: '600',
-  },
 
-  // ---- Loading ----
+  // States
   loading: { paddingVertical: spacing.xxxl, alignItems: 'center' },
 
-  // ---- Plan card list ----
+  // Card list
   cards: { gap: spacing.lg },
 
-  // ---- Plan card ----
-  planCard: { gap: spacing.lg },
-  planCardActive: { borderWidth: 2, borderColor: colors.deepNavy },
-  planHeader: {
+  // Tier card
+  tierCard: { gap: spacing.md },
+  tierHeader: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     justifyContent: 'space-between',
     gap: spacing.md,
   },
-  planNameBlock: { flex: 1, gap: spacing.xs },
-  planNameRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
-  planName: { fontSize: fontSize.xl, fontWeight: '800', color: colors.textPrimary },
-  planBlurb: {
+  tierName: { fontSize: fontSize.xl, fontWeight: '800', color: colors.textPrimary },
+  tierBlurb: {
     fontSize: fontSize.sm,
-    lineHeight: fontSize.sm * 1.45,
+    lineHeight: fontSize.sm * 1.5,
     color: colors.textSecondary,
     fontWeight: '500',
   },
-  activeChip: {
+  activePill: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
@@ -531,32 +383,101 @@ const styles = StyleSheet.create({
     borderRadius: radius.pill,
     backgroundColor: colors.successTint,
   },
-  activeChipText: {
+  activePillText: {
     fontSize: 10,
     fontWeight: '800',
     letterSpacing: 0.5,
     color: '#157A58',
   },
-  planPriceBlock: { alignItems: 'flex-end' },
-  planPrice: { fontSize: fontSize.xxl, fontWeight: '800', color: colors.textPrimary, letterSpacing: -0.3 },
-  planPriceCadence: { fontSize: fontSize.xs, fontWeight: '600', color: colors.textTertiary },
+  suspendedPill: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+    borderRadius: radius.pill,
+    backgroundColor: '#FCE4E0',
+  },
+  suspendedPillText: {
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+    color: '#C0392B',
+  },
 
-  planFeatureList: { gap: spacing.sm },
-  planFeatureRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
-  planFeatureText: { flex: 1, fontSize: fontSize.sm, color: colors.textPrimary, fontWeight: '500' },
+  // Usage card
+  usageCard: { gap: spacing.xs },
+  usageHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.md,
+  },
+  usageTitle: {
+    fontSize: fontSize.xs,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+    color: colors.textTertiary,
+  },
+  warningPill: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+    borderRadius: radius.pill,
+    backgroundColor: '#FCE4E0',
+  },
+  warningPillText: {
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+    color: '#C0392B',
+  },
+  usageMain: { color: colors.textPrimary },
+  usageMainUsed: { fontSize: fontSize.xxl, fontWeight: '800', color: colors.textPrimary },
+  usageMainSep: { fontSize: fontSize.lg, fontWeight: '600', color: colors.textTertiary },
+  usageMainLimit: { fontSize: fontSize.lg, fontWeight: '700', color: colors.textSecondary },
+  usageMainUnit: { fontSize: fontSize.sm, fontWeight: '600', color: colors.textTertiary },
+  usageRemaining: { fontSize: fontSize.sm, fontWeight: '600', color: colors.textSecondary },
 
-  planButton: { alignSelf: 'stretch' },
-  currentLine: {
+  // Limits card
+  limitsCard: { gap: spacing.sm },
+  limitsTitle: {
+    fontSize: fontSize.xs,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+    color: colors.textTertiary,
+  },
+  limitsLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.md,
+  },
+  limitsLineLabel: {
     fontSize: fontSize.sm,
     color: colors.textSecondary,
     fontWeight: '600',
-    textAlign: 'center',
+  },
+  limitsLineValue: {
+    fontSize: fontSize.sm,
+    color: colors.textPrimary,
+    fontWeight: '700',
   },
 
-  // ---- Restore + footer ----
-  restoreRow: { alignItems: 'center', gap: spacing.xs },
-  restoreButton: { alignSelf: 'center' },
-  restoreNote: { fontSize: fontSize.xs, color: colors.textTertiary, fontWeight: '600' },
+  // Contact
+  contactCard: { gap: spacing.md },
+  contactRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
+  contactIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: radius.md,
+    backgroundColor: colors.iceTint,
+    borderWidth: 1,
+    borderColor: colors.iceBlue,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  contactText: { flex: 1, gap: 2 },
+  contactTitle: { fontSize: fontSize.md, fontWeight: '700', color: colors.textPrimary },
+  contactBody: { fontSize: fontSize.sm, color: colors.textSecondary, fontWeight: '500' },
+  contactButton: { alignSelf: 'stretch' },
+
   footerNote: {
     fontSize: fontSize.xs,
     lineHeight: fontSize.xs * 1.5,
@@ -564,23 +485,5 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     textAlign: 'center',
   },
-  legalRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.sm,
-  },
-  legalLink: {
-    fontSize: fontSize.xs,
-    color: colors.deepNavy,
-    fontWeight: '700',
-    textDecorationLine: 'underline',
-  },
-  legalSeparator: {
-    fontSize: fontSize.xs,
-    color: colors.textTertiary,
-    fontWeight: '700',
-  },
-
   pressed: { opacity: 0.85, transform: [{ scale: 0.97 }] },
 });

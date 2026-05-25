@@ -102,7 +102,7 @@ export default function SettingsScreen() {
     const token = session?.access_token;
     if (!token) {
       setPlanStatus(null);
-      setPlanError('Plan unavailable.');
+      setPlanError('Access unavailable.');
       setPlanLoading(false);
       return;
     }
@@ -111,7 +111,7 @@ export default function SettingsScreen() {
     try {
       setPlanStatus(await fetchPlanStatus(token));
     } catch {
-      setPlanError('Plan unavailable.');
+      setPlanError('Access unavailable.');
     } finally {
       setPlanLoading(false);
     }
@@ -234,14 +234,15 @@ export default function SettingsScreen() {
             />
           </Section>
 
-          {/* Plan — live from the backend user_quota table */}
-          <Section title="PLAN">
+          {/* Access & Usage — live summary from the backend user_quota table,
+              followed by the entry row to the full Access & Usage screen. */}
+          <Section title="ACCESS & USAGE">
             {planStatus ? (
               <View style={styles.planBox}>
                 <View style={styles.planTop}>
                   <View style={styles.planHeadText}>
                     <Text style={styles.planName}>{planStatus.displayName}</Text>
-                    <Text style={styles.planSub}>Youmi Lens plan</Text>
+                    <Text style={styles.planSub}>Account access</Text>
                   </View>
                   {planStatus.status === 'suspended' ? (
                     <View style={styles.suspendedPill}>
@@ -282,11 +283,11 @@ export default function SettingsScreen() {
             ) : planLoading ? (
               <View style={styles.planStateBox}>
                 <ActivityIndicator color={colors.deepNavy} />
-                <Text style={styles.planStateText}>Loading plan…</Text>
+                <Text style={styles.planStateText}>Loading access…</Text>
               </View>
             ) : (
               <View style={styles.planStateBox}>
-                <Text style={styles.planStateText}>{planError ?? 'Plan unavailable.'}</Text>
+                <Text style={styles.planStateText}>{planError ?? 'Access unavailable.'}</Text>
                 <SecondaryButton
                   label="Retry"
                   icon="refresh-outline"
@@ -295,13 +296,9 @@ export default function SettingsScreen() {
                 />
               </View>
             )}
-          </Section>
-
-          {/* Upgrade — entry to the Plans screen (StoreKit testing scaffold) */}
-          <Section title="UPGRADE">
             <Row
-              icon="diamond-outline"
-              label="See Plans"
+              icon="information-circle-outline"
+              label="Access & Usage"
               onPress={() => router.push('/plans')}
               last
             />
