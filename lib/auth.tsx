@@ -54,6 +54,7 @@ type AuthContextValue = {
   updateUsername: (newUsername: string) => Promise<AuthResult>;
   refreshSession: () => Promise<Session | null>;
   signOut: () => Promise<AuthResult>;
+  clearLocalSession: () => Promise<void>;
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -458,6 +459,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return { error: error?.message ?? null };
   }, [applySessionState]);
 
+  const clearLocalSession = useCallback(async (): Promise<void> => {
+    await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+    await applySessionState(null);
+  }, [applySessionState]);
+
   const value = useMemo<AuthContextValue>(
     () => ({
       user,
@@ -477,6 +483,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       updateUsername,
       refreshSession,
       signOut,
+      clearLocalSession,
     }),
     [
       user,
@@ -496,6 +503,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       updateUsername,
       refreshSession,
       signOut,
+      clearLocalSession,
     ],
   );
 

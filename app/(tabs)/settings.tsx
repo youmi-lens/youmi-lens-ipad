@@ -9,6 +9,7 @@ import { RenameModal } from '@/components/RenameModal';
 import { SecondaryButton } from '@/components/SecondaryButton';
 import { StatusPill } from '@/components/StatusPill';
 import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
+import { deleteAccount } from '@/lib/account';
 import { useAuth } from '@/lib/auth';
 import { fetchPlanStatus, PlanStatus } from '@/lib/planStatus';
 import { useData } from '@/lib/store';
@@ -46,6 +47,7 @@ function Row({
   last = false,
   onPress,
   readOnly = false,
+  danger = false,
 }: {
   icon: IoniconName;
   label: string;
@@ -53,6 +55,7 @@ function Row({
   last?: boolean;
   onPress?: () => void;
   readOnly?: boolean;
+  danger?: boolean;
 }) {
   return (
     <Pressable
@@ -61,14 +64,14 @@ function Row({
       disabled={!onPress}
       style={({ pressed }) => [styles.row, !last && styles.rowDivider, pressed && styles.rowPressed]}
     >
-      <View style={styles.rowIcon}>
-        <Ionicons name={icon} size={19} color={colors.deepNavy} />
+      <View style={[styles.rowIcon, danger && styles.rowIconDanger]}>
+        <Ionicons name={icon} size={19} color={danger ? colors.recordingRed : colors.deepNavy} />
       </View>
-      <Text style={styles.rowLabel}>{label}</Text>
+      <Text style={[styles.rowLabel, danger && styles.rowLabelDanger]}>{label}</Text>
       <View style={styles.rowRight}>
         {value ? <Text style={styles.rowValue}>{value}</Text> : null}
         {!readOnly ? (
-          <Ionicons name="chevron-forward" size={17} color={colors.textTertiary} />
+          <Ionicons name="chevron-forward" size={17} color={danger ? colors.recordingRed : colors.textTertiary} />
         ) : null}
       </View>
     </Pressable>
@@ -88,13 +91,14 @@ function PlanLine({ label, value }: { label: string; value: string }) {
 export default function SettingsScreen() {
   const router = useRouter();
   const { courses, lectures, clearAll } = useData();
-  const { user, username, signOut, session, updateUsername } = useAuth();
+  const { user, username, signOut, session, updateUsername, clearLocalSession } = useAuth();
 
   const [planStatus, setPlanStatus] = useState<PlanStatus | null>(null);
   const [planLoading, setPlanLoading] = useState(true);
   const [planError, setPlanError] = useState<string | null>(null);
   const [usernameModalVisible, setUsernameModalVisible] = useState(false);
   const [usernameSaving, setUsernameSaving] = useState(false);
+  const [deletingAccount, setDeletingAccount] = useState(false);
 
   // Load the live plan from the backend. Any previously loaded plan stays
   // visible if a refresh fails, so Settings never blocks on a network error.
@@ -176,6 +180,64 @@ export default function SettingsScreen() {
     }
   };
 
+  const performAccountDeletion = async () => {
+    if (deletingAccount) return;
+    const token = session?.access_token;
+    if (!token) {
+      Alert.alert('Sign in required', 'Please sign in again before deleting your account.');
+      return;
+    }
+
+    setDeletingAccount(true);
+    try {
+      await deleteAccount(token);
+      await clearAll();
+      const { error } = await signOut();
+      if (error) {
+        await clearLocalSession();
+      }
+      router.replace('/auth');
+      Alert.alert('Account deleted', 'Your Youmi Lens account has been deleted.');
+    } catch (err) {
+      Alert.alert(
+        'Could not delete account',
+        err instanceof Error ? err.message : 'Please try again or contact support.',
+      );
+    } finally {
+      setDeletingAccount(false);
+    }
+  };
+
+  const confirmDeleteAccount = () => {
+    Alert.alert(
+      'Delete Account?',
+      'This will permanently delete your Youmi Lens account and associated data. This action cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Continue',
+          style: 'destructive',
+          onPress: () => {
+            Alert.alert(
+              'Confirm Deletion',
+              'Are you absolutely sure? Your recordings, transcripts, summaries, and usage history may be deleted.',
+              [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                  text: 'Delete Account',
+                  style: 'destructive',
+                  onPress: () => {
+                    void performAccountDeletion();
+                  },
+                },
+              ],
+            );
+          },
+        },
+      ],
+    );
+  };
+
   const handleSaveUsername = async (value: string) => {
     const trimmed = value.trim();
     if (!trimmed) {
@@ -225,6 +287,15 @@ export default function SettingsScreen() {
               value={username ?? 'Not set'}
               onPress={() => setUsernameModalVisible(true)}
             />
+            <Row
+              icon="trash-outline"
+              label={deletingAccount ? 'Deleting Account…' : 'Delete Account'}
+              onPress={deletingAccount ? undefined : confirmDeleteAccount}
+              danger
+            />
+            <Text style={styles.deleteAccountHelp}>
+              Permanently delete your Youmi Lens account and associated data.
+            </Text>
             <SecondaryButton
               label="Sign Out"
               icon="log-out-outline"
@@ -496,11 +567,26 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  rowIconDanger: {
+    backgroundColor: colors.recordingTint,
+  },
   rowLabel: {
     flex: 1,
     fontSize: fontSize.md,
     fontWeight: '600',
     color: colors.textPrimary,
+  },
+  rowLabelDanger: {
+    color: colors.recordingRed,
+  },
+  deleteAccountHelp: {
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.md,
+    marginTop: -spacing.xs,
+    fontSize: fontSize.sm,
+    lineHeight: fontSize.sm * 1.4,
+    color: colors.textTertiary,
+    fontWeight: '500',
   },
   rowRight: {
     flexDirection: 'row',
