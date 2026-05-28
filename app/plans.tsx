@@ -1,16 +1,12 @@
 /**
  * Access & Usage screen (route: /plans).
  *
- * Youmi Lens is free during beta. This screen shows the user's current
+ * Youmi Lens is free for students. This screen shows the user's current
  * access tier, monthly + daily minute budgets, recordings used today, and
  * per-recording / per-live-session caps. All numbers come from the backend
  * `/api/quota/status` — the same endpoint the Settings Plan card uses, and
  * the same backend the Mac client reads from. Quota is account-level
  * (Supabase user_id), so usage on iPad and Mac shares the same numbers.
- *
- * No paid plans, no Subscribe, no Restore Purchases, no prices, no Apple
- * IAP, no donations. The IAP code in `lib/purchases.ts` is left in place
- * but inert (gated behind `EXPO_PUBLIC_USE_REAL_IAP`, currently off).
  */
 import { Ionicons } from '@expo/vector-icons';
 import * as Linking from 'expo-linking';
@@ -71,7 +67,7 @@ export default function PlansScreen() {
   );
 
   const openMailto = useCallback(() => {
-    Linking.openURL(`mailto:${CONTACT_EMAIL}?subject=Youmi%20Lens%20beta%20access`).catch(() => {
+    Linking.openURL(`mailto:${CONTACT_EMAIL}?subject=Youmi%20Lens%20access`).catch(() => {
       Alert.alert('Could not open mail', `Please email ${CONTACT_EMAIL} manually.`);
     });
   }, []);
@@ -95,7 +91,7 @@ export default function PlansScreen() {
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         <View style={styles.content}>
           <View style={styles.heroBlock}>
-            <Text style={styles.heroTitle}>Youmi Lens is free during beta.</Text>
+            <Text style={styles.heroTitle}>Youmi Lens is free for students.</Text>
             <Text style={styles.heroSubtitle}>
               Daily and monthly limits help keep the service stable for students. Your usage is
               shared across iPad and Mac.
@@ -136,8 +132,8 @@ export default function PlansScreen() {
           </GlassCard>
 
           <Text style={styles.footerNote}>
-            Youmi Lens is currently a free educational beta. There are no paid subscriptions or
-            in-app purchases.
+            Youmi Lens is available with free student access. Usage limits help keep the service
+            stable.
           </Text>
         </View>
       </ScrollView>
@@ -298,14 +294,14 @@ function ErrorCard({ message, onRetry }: { message: string; onRetry: () => void 
 function tierBlurbFor(planType: string): string {
   switch (planType) {
     case 'public_trial':
-      return 'Free Beta access for students. Usage limits help keep the service stable.';
+      return 'Free student access. Usage limits help keep the service stable.';
     case 'core_tester':
-      return 'Extended testing access for active beta users.';
+      return 'Extended access for active users.';
     case 'admin':
     case 'developer':
       return 'Developer account — limits are bypassed.';
     default:
-      return 'Beta access. Usage limits help keep the service stable.';
+      return 'Free access. Usage limits help keep the service stable.';
   }
 }
 

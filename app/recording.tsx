@@ -337,14 +337,14 @@ export default function RecordingScreen() {
           </View>
           <Text style={styles.permTitle}>Microphone access needed</Text>
           <Text style={styles.permBody}>
-            Microphone access is needed to record your lecture.
+            Youmi Lens uses the microphone to record lectures and generate transcripts.
             {permissionStatus === 'denied'
               ? ' Turn it on for Youmi Lens in your iPad Settings.'
               : ''}
           </Text>
           {error ? <Text style={styles.errorText}>{error}</Text> : null}
           <PrimaryButton
-            label={permissionStatus === 'denied' ? 'Open Settings' : 'Allow Microphone'}
+            label={permissionStatus === 'denied' ? 'Open Settings' : 'Continue'}
             icon={permissionStatus === 'denied' ? 'settings-outline' : 'mic'}
             onPress={
               permissionStatus === 'denied'
