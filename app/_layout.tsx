@@ -63,7 +63,7 @@ export default function RootLayout() {
 }
 
 function AuthGate({ children }: { children: React.ReactNode }) {
-  const { session, loading, isResettingPassword } = useAuth();
+  const { session, loading, isResettingPassword, isGuest } = useAuth();
   const segments = useSegments();
   const inAuthRoute = segments[0] === 'auth';
 
@@ -75,7 +75,9 @@ function AuthGate({ children }: { children: React.ReactNode }) {
     );
   }
 
-  if (!session && !inAuthRoute) {
+  // Unauthenticated users are sent to /auth unless they chose guest mode.
+  // Guests can still reach /auth to sign in at any time.
+  if (!session && !isGuest && !inAuthRoute) {
     return <Redirect href="/auth" />;
   }
 

@@ -19,6 +19,7 @@ import {
 import { AppState } from 'react-native';
 
 import { useAuth } from './auth';
+import { GUEST_STORAGE_SCOPE } from './guest';
 import {
   COURSE_PRESETS,
   type Course,
@@ -442,8 +443,12 @@ function mergeRemoteRecordingsIntoStore(
 }
 
 export function DataProvider({ children }: { children: ReactNode }) {
-  const { user } = useAuth();
+  const { user, isGuest } = useAuth();
   const currentUserId = user?.id ?? null;
+  // The on-device cache is keyed by this scope id. Signed-in users use their
+  // Supabase user id; guests use a dedicated local-only scope so their
+  // recordings persist across restarts without ever touching the cloud.
+  const storageScopeId = currentUserId ?? (isGuest ? GUEST_STORAGE_SCOPE : null);
   const [loaded, setLoaded] = useState(false);
   const [hydratedUserId, setHydratedUserId] = useState<string | null>(null);
   const [courses, setCourses] = useState<Course[]>([]);
@@ -504,7 +509,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
     setMaterialAnnotations([]);
     setSelectedCourseId(null);
 
-    if (!currentUserId) {
+    if (!storageScopeId) {
       setHydratedUserId(null);
       setLoaded(true);
       return () => {
@@ -515,11 +520,11 @@ export function DataProvider({ children }: { children: ReactNode }) {
     (async () => {
       try {
         const [rawCourses, rawLectures, rawMaterials, rawMaterialLinks, rawMaterialAnnotations] = await Promise.all([
-          AsyncStorage.getItem(scopedCoursesKey(currentUserId)),
-          AsyncStorage.getItem(scopedLecturesKey(currentUserId)),
-          AsyncStorage.getItem(scopedMaterialsKey(currentUserId)),
-          AsyncStorage.getItem(scopedMaterialLinksKey(currentUserId)),
-          AsyncStorage.getItem(scopedMaterialAnnotationsKey(currentUserId)),
+          AsyncStorage.getItem(scopedCoursesKey(storageScopeId)),
+          AsyncStorage.getItem(scopedLecturesKey(storageScopeId)),
+          AsyncStorage.getItem(scopedMaterialsKey(storageScopeId)),
+          AsyncStorage.getItem(scopedMaterialLinksKey(storageScopeId)),
+          AsyncStorage.getItem(scopedMaterialAnnotationsKey(storageScopeId)),
         ]);
         if (!mounted || hydrateSequence.current !== sequence) return;
         const storedCourses: Course[] = rawCourses ? JSON.parse(rawCourses) : [];
@@ -549,7 +554,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
         setMaterials(Array.isArray(storedMaterials) ? storedMaterials : []);
         setMaterialLinks(Array.isArray(storedMaterialLinks) ? storedMaterialLinks : []);
         setMaterialAnnotations(Array.isArray(storedMaterialAnnotations) ? storedMaterialAnnotations : []);
-        setHydratedUserId(currentUserId);
+        setHydratedUserId(storageScopeId);
         setSelectedCourseId(nextCourses.find((course) => !course.deletedAt)?.id ?? null);
       } catch {
         // Corrupt or missing user-scoped data — start from an empty state.
@@ -561,7 +566,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
     return () => {
       mounted = false;
     };
-  }, [applyRemoteRecordings, currentUserId]);
+  }, [applyRemoteRecordings, storageScopeId]);
 
 
   // Refresh cloud-backed history when the app returns to the foreground. This
@@ -591,40 +596,41 @@ export function DataProvider({ children }: { children: ReactNode }) {
     return () => subscription.remove();
   }, [applyRemoteRecordings, currentUserId, hydratedUserId, loaded]);
 
-  // Persist only after the current user's scoped store is loaded. Legacy global
-  // keys remain intentionally ignored; they cannot safely be attributed.
+  // Persist only after the current scope's store is loaded. Legacy global keys
+  // remain intentionally ignored; they cannot safely be attributed. Guests use
+  // a dedicated local scope (no cloud) — see storageScopeId.
   useEffect(() => {
-    if (loaded && currentUserId && hydratedUserId === currentUserId) {
-      AsyncStorage.setItem(scopedCoursesKey(currentUserId), JSON.stringify(courses)).catch(() => {});
+    if (loaded && storageScopeId && hydratedUserId === storageScopeId) {
+      AsyncStorage.setItem(scopedCoursesKey(storageScopeId), JSON.stringify(courses)).catch(() => {});
     }
-  }, [courses, currentUserId, hydratedUserId, loaded]);
+  }, [courses, storageScopeId, hydratedUserId, loaded]);
 
   useEffect(() => {
-    if (loaded && currentUserId && hydratedUserId === currentUserId) {
-      AsyncStorage.setItem(scopedLecturesKey(currentUserId), JSON.stringify(lectures)).catch(() => {});
+    if (loaded && storageScopeId && hydratedUserId === storageScopeId) {
+      AsyncStorage.setItem(scopedLecturesKey(storageScopeId), JSON.stringify(lectures)).catch(() => {});
     }
-  }, [lectures, currentUserId, hydratedUserId, loaded]);
+  }, [lectures, storageScopeId, hydratedUserId, loaded]);
 
-  // Materials persistence (Build 7 V1.1) — same per-user-scoped pattern.
+  // Materials persistence (Build 7 V1.1) — same per-scope pattern.
   // Local-only; no Supabase mirror in V1.
   useEffect(() => {
-    if (loaded && currentUserId && hydratedUserId === currentUserId) {
-      AsyncStorage.setItem(scopedMaterialsKey(currentUserId), JSON.stringify(materials)).catch(() => {});
+    if (loaded && storageScopeId && hydratedUserId === storageScopeId) {
+      AsyncStorage.setItem(scopedMaterialsKey(storageScopeId), JSON.stringify(materials)).catch(() => {});
     }
-  }, [materials, currentUserId, hydratedUserId, loaded]);
+  }, [materials, storageScopeId, hydratedUserId, loaded]);
 
-  // Lecture/material links are also local-only and scoped per signed-in user.
+  // Lecture/material links are also local-only and scoped per signed-in user / guest.
   useEffect(() => {
-    if (loaded && currentUserId && hydratedUserId === currentUserId) {
-      AsyncStorage.setItem(scopedMaterialLinksKey(currentUserId), JSON.stringify(materialLinks)).catch(() => {});
+    if (loaded && storageScopeId && hydratedUserId === storageScopeId) {
+      AsyncStorage.setItem(scopedMaterialLinksKey(storageScopeId), JSON.stringify(materialLinks)).catch(() => {});
     }
-  }, [materialLinks, currentUserId, hydratedUserId, loaded]);
+  }, [materialLinks, storageScopeId, hydratedUserId, loaded]);
 
   useEffect(() => {
-    if (loaded && currentUserId && hydratedUserId === currentUserId) {
-      AsyncStorage.setItem(scopedMaterialAnnotationsKey(currentUserId), JSON.stringify(materialAnnotations)).catch(() => {});
+    if (loaded && storageScopeId && hydratedUserId === storageScopeId) {
+      AsyncStorage.setItem(scopedMaterialAnnotationsKey(storageScopeId), JSON.stringify(materialAnnotations)).catch(() => {});
     }
-  }, [materialAnnotations, currentUserId, hydratedUserId, loaded]);
+  }, [materialAnnotations, storageScopeId, hydratedUserId, loaded]);
 
   const createCourse = useCallback((input: NewCourseInput): Course => {
     const course: Course = {
@@ -1077,18 +1083,18 @@ export function DataProvider({ children }: { children: ReactNode }) {
     setMaterialLinks([]);
     setMaterialAnnotations([]);
     setSelectedCourseId(null);
-    if (currentUserId) {
+    if (storageScopeId) {
       await AsyncStorage.multiRemove([
-        scopedCoursesKey(currentUserId),
-        scopedLecturesKey(currentUserId),
-        scopedMaterialsKey(currentUserId),
-        scopedMaterialLinksKey(currentUserId),
-        scopedMaterialAnnotationsKey(currentUserId),
+        scopedCoursesKey(storageScopeId),
+        scopedLecturesKey(storageScopeId),
+        scopedMaterialsKey(storageScopeId),
+        scopedMaterialLinksKey(storageScopeId),
+        scopedMaterialAnnotationsKey(storageScopeId),
       ]).catch(() => {});
     }
-  }, [currentUserId]);
+  }, [storageScopeId]);
 
-  const visibleStoreReady = loaded && hydratedUserId === currentUserId;
+  const visibleStoreReady = loaded && hydratedUserId === storageScopeId;
   const visibleCourses = visibleStoreReady ? courses : [];
   const visibleLectures = visibleStoreReady ? lectures : [];
   const visibleMaterials = visibleStoreReady ? materials : [];

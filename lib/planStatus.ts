@@ -40,12 +40,38 @@ type QuotaStatusResponse = {
 };
 
 /**
+ * Map a backend plan type / display name to a neutral, App-Store-safe access
+ * label for the UI. The backend may still return historical labels such as
+ * "Free Beta", "Student Beta", or tier names (Basic/Plus/Pro); none of those
+ * price/beta/trial-flavored strings may ever reach a user-visible surface.
+ * Every recognized account becomes one of three calm labels, and anything
+ * unrecognized falls back to the safe default "Student Access".
+ */
+export function safeAccessLabel(
+  planType?: string | null,
+  displayName?: string | null,
+): string {
+  const type = (planType ?? '').toLowerCase();
+  const name = (displayName ?? '').toLowerCase();
+
+  if (type === 'admin' || type === 'developer' || name.includes('developer')) {
+    return 'Developer';
+  }
+  if (type === 'core_tester' || name.includes('core tester') || name.includes('extended')) {
+    return 'Extended Access';
+  }
+  // public_trial, student_basic/plus/pro, any "Free"/"Beta"/"Trial" historical
+  // label, or anything unrecognized → the neutral student-facing label.
+  return 'Student Access';
+}
+
+/**
  * Fetch the signed-in user's live plan from the backend. Throws with a
  * user-safe message on any failure so the caller can show an error state.
  */
 export async function fetchPlanStatus(accessToken: string | null | undefined): Promise<PlanStatus> {
   if (!API_BASE_URL) throw new Error('Missing API base URL.');
-  if (!accessToken) throw new Error('Sign in to view your plan.');
+  if (!accessToken) throw new Error('Sign in to view your account.');
 
   const response = await fetch(`${API_BASE_URL}/api/quota/status`, {
     method: 'GET',
@@ -56,7 +82,7 @@ export async function fetchPlanStatus(accessToken: string | null | undefined): P
 
   if (!response.ok || !payload?.ok || !payload.plan) {
     throw new Error(
-      payload?.message ?? payload?.error ?? `Plan request failed (HTTP ${response.status}).`,
+      payload?.message ?? payload?.error ?? `Account status request failed (HTTP ${response.status}).`,
     );
   }
 

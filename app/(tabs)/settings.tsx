@@ -11,7 +11,7 @@ import { StatusPill } from '@/components/StatusPill';
 import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
 import { deleteAccount } from '@/lib/account';
 import { useAuth } from '@/lib/auth';
-import { fetchPlanStatus, PlanStatus } from '@/lib/planStatus';
+import { fetchPlanStatus, PlanStatus, safeAccessLabel } from '@/lib/planStatus';
 import { useData } from '@/lib/store';
 
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
@@ -91,7 +91,8 @@ function PlanLine({ label, value }: { label: string; value: string }) {
 export default function SettingsScreen() {
   const router = useRouter();
   const { courses, lectures, clearAll } = useData();
-  const { user, username, signOut, session, updateUsername, clearLocalSession } = useAuth();
+  const { user, username, signOut, session, updateUsername, clearLocalSession, isGuest, exitGuest } =
+    useAuth();
 
   const [planStatus, setPlanStatus] = useState<PlanStatus | null>(null);
   const [planLoading, setPlanLoading] = useState(true);
@@ -106,7 +107,7 @@ export default function SettingsScreen() {
     const token = session?.access_token;
     if (!token) {
       setPlanStatus(null);
-      setPlanError('Access unavailable.');
+      setPlanError('Account status unavailable.');
       setPlanLoading(false);
       return;
     }
@@ -115,7 +116,7 @@ export default function SettingsScreen() {
     try {
       setPlanStatus(await fetchPlanStatus(token));
     } catch {
-      setPlanError('Access unavailable.');
+      setPlanError('Account status unavailable.');
     } finally {
       setPlanLoading(false);
     }
@@ -178,6 +179,11 @@ export default function SettingsScreen() {
     if (error) {
       Alert.alert('Unable to sign out', error);
     }
+  };
+
+  const handleGuestSignIn = async () => {
+    await exitGuest();
+    router.replace('/auth');
   };
 
   const performAccountDeletion = async () => {
@@ -270,54 +276,77 @@ export default function SettingsScreen() {
         <View style={styles.content}>
           <Text style={styles.title}>Settings</Text>
 
-          {/* Account */}
-          <Section title="ACCOUNT">
-            <View style={styles.account}>
-              <View style={styles.avatar}>
-                <Text style={styles.avatarText}>{initials}</Text>
+          {/* Account — guest sees a sign-in invitation instead of account details */}
+          {isGuest ? (
+            <Section title="ACCOUNT" footer="Guest recordings are stored only on this device.">
+              <View style={styles.storageNote}>
+                <View style={styles.rowIcon}>
+                  <Ionicons name="person-outline" size={19} color={colors.deepNavy} />
+                </View>
+                <Text style={styles.storageText}>
+                  You’re using Youmi Lens without an account. Sign in to save and sync your lectures.
+                </Text>
               </View>
-              <View style={styles.accountText}>
-                <Text style={styles.accountName}>{displayName}</Text>
-                <Text style={styles.accountEmail}>{email}</Text>
+              <SecondaryButton
+                label="Sign In"
+                icon="log-in-outline"
+                onPress={handleGuestSignIn}
+                style={styles.signOutButton}
+              />
+            </Section>
+          ) : (
+            <Section title="ACCOUNT">
+              <View style={styles.account}>
+                <View style={styles.avatar}>
+                  <Text style={styles.avatarText}>{initials}</Text>
+                </View>
+                <View style={styles.accountText}>
+                  <Text style={styles.accountName}>{displayName}</Text>
+                  <Text style={styles.accountEmail}>{email}</Text>
+                </View>
               </View>
-            </View>
-            <Row
-              icon="person-outline"
-              label="Edit Username"
-              value={username ?? 'Not set'}
-              onPress={() => setUsernameModalVisible(true)}
-            />
-            <Row
-              icon="trash-outline"
-              label={deletingAccount ? 'Deleting Account…' : 'Delete Account'}
-              onPress={deletingAccount ? undefined : confirmDeleteAccount}
-              danger
-            />
-            <Text style={styles.deleteAccountHelp}>
-              Permanently delete your Youmi Lens account and associated data.
-            </Text>
-            <SecondaryButton
-              label="Sign Out"
-              icon="log-out-outline"
-              onPress={handleSignOut}
-              danger
-              style={styles.signOutButton}
-            />
-          </Section>
+              <Row
+                icon="person-outline"
+                label="Edit Username"
+                value={username ?? 'Not set'}
+                onPress={() => setUsernameModalVisible(true)}
+              />
+              <Row
+                icon="trash-outline"
+                label={deletingAccount ? 'Deleting Account…' : 'Delete Account'}
+                onPress={deletingAccount ? undefined : confirmDeleteAccount}
+                danger
+              />
+              <Text style={styles.deleteAccountHelp}>
+                Permanently delete your Youmi Lens account and associated data.
+              </Text>
+              <SecondaryButton
+                label="Sign Out"
+                icon="log-out-outline"
+                onPress={handleSignOut}
+                danger
+                style={styles.signOutButton}
+              />
+            </Section>
+          )}
 
-          {/* Access & Usage — live summary from the backend user_quota table,
-              followed by the entry row to the full Access & Usage screen. */}
-          <Section title="ACCESS & USAGE">
+          {/* Account & Usage — account-only; guests have no backend usage. Live
+              summary from the backend, followed by the entry row to the full
+              Account & Usage screen. */}
+          {!isGuest ? (
+          <Section title="ACCOUNT & USAGE">
             {planStatus ? (
               <View style={styles.planBox}>
                 <View style={styles.planTop}>
                   <View style={styles.planHeadText}>
-                    <Text style={styles.planName}>{planStatus.displayName}</Text>
-                    <Text style={styles.planSub}>Account access</Text>
+                    <Text style={styles.planName}>
+                      {safeAccessLabel(planStatus.planType, planStatus.displayName)}
+                    </Text>
+                    <Text style={styles.planSub}>Account status</Text>
                   </View>
                   {planStatus.status === 'suspended' ? (
                     <View style={styles.suspendedPill}>
-                      <Text style={styles.suspendedPillText}>SUSPENDED</Text>
+                      <Text style={styles.suspendedPillText}>ON HOLD</Text>
                     </View>
                   ) : (
                     <StatusPill label="ACTIVE" variant="live" />
@@ -325,40 +354,32 @@ export default function SettingsScreen() {
                 </View>
 
                 {planStatus.unlimited ? (
-                  <Text style={styles.planUsage}>Usage · Unlimited</Text>
+                  <Text style={styles.planUsage}>Account active</Text>
                 ) : (
                   <View style={styles.planLines}>
                     <PlanLine
-                      label="Today"
-                      value={`${planStatus.recordingsUsedToday ?? 0} / ${planStatus.maxRecordingsPerDay ?? 0} recordings used`}
+                      label="Recordings today"
+                      value={`${planStatus.recordingsUsedToday ?? 0}`}
                     />
                     <PlanLine
-                      label="Limit"
-                      value={`${planStatus.maxRecordingMinutes ?? 0} min per recording`}
+                      label="Recording length"
+                      value={`${planStatus.maxRecordingMinutes ?? 0} min`}
                     />
-                    {typeof planStatus.recordingsRemainingToday === 'number' ? (
-                      <PlanLine
-                        label="Remaining"
-                        value={`${planStatus.recordingsRemainingToday} recording${
-                          planStatus.recordingsRemainingToday === 1 ? '' : 's'
-                        } today`}
-                      />
-                    ) : null}
                   </View>
                 )}
 
                 {planStatus.status === 'suspended' ? (
-                  <Text style={styles.planHelper}>Contact support for access.</Text>
+                  <Text style={styles.planHelper}>Contact support to continue.</Text>
                 ) : null}
               </View>
             ) : planLoading ? (
               <View style={styles.planStateBox}>
                 <ActivityIndicator color={colors.deepNavy} />
-                <Text style={styles.planStateText}>Loading access…</Text>
+                <Text style={styles.planStateText}>Loading account…</Text>
               </View>
             ) : (
               <View style={styles.planStateBox}>
-                <Text style={styles.planStateText}>{planError ?? 'Access unavailable.'}</Text>
+                <Text style={styles.planStateText}>{planError ?? 'Account status unavailable.'}</Text>
                 <SecondaryButton
                   label="Retry"
                   icon="refresh-outline"
@@ -369,11 +390,12 @@ export default function SettingsScreen() {
             )}
             <Row
               icon="information-circle-outline"
-              label="Access & Usage"
+              label="Account & Usage"
               onPress={() => router.push('/plans')}
               last
             />
           </Section>
+          ) : null}
 
           {/* Language — English captions + Chinese study support, fixed for V1 */}
           <Section
@@ -402,20 +424,22 @@ export default function SettingsScreen() {
             />
           </Section>
 
-          {/* Account Storage — honest, informational only (no sync UI) */}
-          <Section
-            title="ACCOUNT STORAGE"
-            footer="Data is kept separate for each signed-in account."
-          >
-            <View style={styles.storageNote}>
-              <View style={styles.rowIcon}>
-                <Ionicons name="folder-outline" size={19} color={colors.deepNavy} />
+          {/* Account Storage — account-only; honest, informational (no sync UI) */}
+          {!isGuest ? (
+            <Section
+              title="ACCOUNT STORAGE"
+              footer="Data is kept separate for each signed-in account."
+            >
+              <View style={styles.storageNote}>
+                <View style={styles.rowIcon}>
+                  <Ionicons name="folder-outline" size={19} color={colors.deepNavy} />
+                </View>
+                <Text style={styles.storageText}>
+                  Your lectures, transcripts, summaries, and notes are saved to your Youmi Lens account.
+                </Text>
               </View>
-              <Text style={styles.storageText}>
-                Your lectures, transcripts, summaries, and notes are saved to your Youmi Lens account.
-              </Text>
-            </View>
-          </Section>
+            </Section>
+          ) : null}
 
           {/* Recently Deleted — recovery for deleted courses & lectures */}
           <Section

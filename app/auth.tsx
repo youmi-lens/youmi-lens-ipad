@@ -49,6 +49,7 @@ export default function AuthScreen() {
     updatePassword,
     signOut,
     isResettingPassword,
+    continueAsGuest,
   } = useAuth();
   const [entryMode, setEntryMode] = useState<EntryMode>('signIn');
   const [step, setStep] = useState<AuthStep>('entry');
@@ -359,6 +360,11 @@ export default function AuthScreen() {
     setSuccessMessage('If an account exists for this email, we sent a verification code.');
   };
 
+  const handleContinueAsGuest = async () => {
+    await continueAsGuest();
+    router.replace('/(tabs)');
+  };
+
   const handleUpdatePassword = async () => {
     if (!resetPassword) return setError('Please enter a new password.');
     if (resetPassword.length < 8) return setError('Password must be at least 8 characters.');
@@ -630,6 +636,21 @@ export default function AuthScreen() {
                 )}
                 {successMessage ? <Text style={styles.success}>{successMessage}</Text> : null}
                 {persistentError ? <ErrorNotice message={persistentError} /> : null}
+
+                <View style={styles.guestDivider}>
+                  <View style={styles.guestDividerLine} />
+                  <Text style={styles.guestDividerText}>or</Text>
+                  <View style={styles.guestDividerLine} />
+                </View>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={handleContinueAsGuest}
+                  disabled={busyAction !== null}
+                  style={({ pressed }) => [styles.guestButton, pressed && styles.pressed]}
+                >
+                  <Text style={styles.guestButtonLabel}>Continue without account</Text>
+                </Pressable>
+                <Text style={styles.helper}>Guest recordings are stored only on this device.</Text>
               </>
             )}
           </GlassCard>
@@ -772,5 +793,18 @@ const styles = StyleSheet.create({
   },
   textButton: { minHeight: 44, alignItems: 'center', justifyContent: 'center' },
   textButtonLabel: { color: colors.deepNavy, fontSize: fontSize.md, fontWeight: '700' },
+  guestDivider: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginTop: spacing.xs },
+  guestDividerLine: { flex: 1, height: 1, backgroundColor: colors.border },
+  guestDividerText: { color: colors.textTertiary, fontSize: fontSize.sm, fontWeight: '600' },
+  guestButton: {
+    minHeight: 56,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.borderStrong,
+    backgroundColor: colors.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  guestButtonLabel: { color: colors.deepNavy, fontSize: fontSize.lg, fontWeight: '700' },
   pressed: { opacity: 0.78 },
 });

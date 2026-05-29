@@ -21,7 +21,9 @@ import { PrimaryButton } from '@/components/PrimaryButton';
 import { SecondaryButton } from '@/components/SecondaryButton';
 import { StatusPill } from '@/components/StatusPill';
 import { colors, fontSize, layout, radius, shadows, spacing } from '@/constants/theme';
+import { useAuth } from '@/lib/auth';
 import { formatClock } from '@/lib/format';
+import { GUEST_MAX_RECORDING_SECONDS, incrementGuestRecordingsUsed } from '@/lib/guest';
 import { pickAndImportPdf } from '@/lib/importMaterial';
 import { logLiveCaptionEvent, logLiveCaptionUnavailable } from '@/lib/liveCaptionDiagnostics';
 import { useLiveCaptions } from '@/lib/liveCaptions';
@@ -36,6 +38,7 @@ const LIVE_CAPTIONS_UNAVAILABLE_MESSAGE = 'Live captions unavailable. Audio reco
 export default function RecordingScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ courseId?: string; lectureTitle?: string }>();
+  const { isGuest, exitGuest } = useAuth();
   const {
     getCourse,
     createLecture,
@@ -96,6 +99,7 @@ export default function RecordingScreen() {
   const isRecordingRef = useRef(false);
   const recoverCaptionsRef = useRef<() => void>(() => {});
   const finishedRef = useRef(false);
+  const guestAutoStopped = useRef(false);
   const lecturesRef = useRef(lectures);
 
   const granted = permissionStatus === 'granted';
@@ -178,13 +182,15 @@ export default function RecordingScreen() {
     if (autoStarted.current || !granted) return;
     autoStarted.current = true;
     void startRecording().then((started) => {
-      if (started) void startCaptionPipeline();
+      // Guests record locally only — no live caption WebSocket / backend calls.
+      if (started && !isGuest) void startCaptionPipeline();
     });
-  }, [granted]);
+  }, [granted, isGuest]);
 
   // Keep this fresh for the mount-once AppState listener below.
   isRecordingRef.current = isRecording;
   recoverCaptionsRef.current = () => {
+    if (isGuest) return;
     if (!granted || finishing || isPaused || !isRecording) return;
     if (
       liveCaptionStatus === 'unavailable' ||
@@ -208,13 +214,13 @@ export default function RecordingScreen() {
   const handleAllow = async () => {
     autoStarted.current = true;
     const started = await startRecording();
-    if (started) await startCaptionPipeline();
+    if (started && !isGuest) await startCaptionPipeline();
   };
 
   const togglePause = () => {
     if (isPaused) {
       resumeRecording();
-      void startCaptionPipeline();
+      if (!isGuest) void startCaptionPipeline();
     } else {
       pauseRecording();
       stopMicStream();
@@ -247,13 +253,41 @@ export default function RecordingScreen() {
       durationMillis: finalDuration,
       localAudioUri: uri,
       markedTimestamps: marks.map((mark) => mark.timestampMillis),
-      liveTranscript: finalCaptions.join('\n'),
+      liveTranscript: isGuest ? '' : finalCaptions.join('\n'),
       notes: draftNotes,
       noteStrokes: draftStrokes,
     });
     resetDraft();
+
+    // Guest recordings stay on this device — no cloud upload, no backend
+    // processing, no transcript/summary generation. Count the recording
+    // against the local guest cap and invite the user to sign in.
+    if (isGuest) {
+      await incrementGuestRecordingsUsed();
+      router.replace('/(tabs)');
+      Alert.alert(
+        'Recording saved on this device',
+        'Sign in to generate transcripts and summaries.',
+        [
+          { text: 'Not now', style: 'cancel' },
+          { text: 'Sign In', onPress: () => { void exitGuest().then(() => router.replace('/auth')); } },
+        ],
+      );
+      return;
+    }
+
     router.replace({ pathname: '/processing', params: { lectureId: lecture.id } });
   };
+
+  // Guest recordings are capped at 2 minutes. When the cap is reached we finish
+  // the recording cleanly (same path as tapping Finish), exactly once.
+  useEffect(() => {
+    if (!isGuest || finishing || guestAutoStopped.current) return;
+    if (seconds >= GUEST_MAX_RECORDING_SECONDS && (isRecording || isPaused)) {
+      guestAutoStopped.current = true;
+      void finish();
+    }
+  }, [isGuest, seconds, isRecording, isPaused, finishing]);
 
   const openMiniCaption = () => {
     router.push({ pathname: '/mini-caption', params: { elapsed: String(seconds) } });
@@ -302,7 +336,7 @@ export default function RecordingScreen() {
           {courseName}
         </Text>
 
-        {granted ? (
+        {granted && !isGuest ? (
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Mini caption mode"
@@ -399,6 +433,23 @@ export default function RecordingScreen() {
                 </View>
               ) : null}
 
+              {isGuest ? (
+                <GlassCard padding={spacing.xl}>
+                  <View style={styles.stateHeader}>
+                    <View style={styles.stateIcon}>
+                      <Ionicons name="lock-closed-outline" size={20} color={colors.deepNavy} />
+                    </View>
+                    <View style={styles.stateHeaderText}>
+                      <Text style={styles.stateTitle}>Local recording</Text>
+                      <Text style={styles.stateStatus}>Saved on this device</Text>
+                    </View>
+                  </View>
+                  <Text style={styles.stateBody}>
+                    Sign in to generate transcripts and summaries. Guest recordings are stored only
+                    on this device.
+                  </Text>
+                </GlassCard>
+              ) : (
               <GlassCard padding={spacing.xl}>
                 <View style={styles.stateHeader}>
                   <View style={[styles.stateIcon, isPaused && styles.stateIconPaused]}>
@@ -466,6 +517,7 @@ export default function RecordingScreen() {
                   </View>
                 )}
               </GlassCard>
+              )}
             </View>
           </ScrollView>
 

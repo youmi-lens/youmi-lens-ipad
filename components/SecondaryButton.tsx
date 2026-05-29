@@ -20,7 +20,7 @@ type SecondaryButtonProps = {
 
 /**
  * A quieter companion to PrimaryButton: bordered, light-filled, navy text.
- * Used for secondary actions like "Upgrade Plan" or "Mark Important".
+ * Used for secondary actions like "Retry" or "Mark Important".
  */
 export function SecondaryButton({
   label,

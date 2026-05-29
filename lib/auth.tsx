@@ -1,3 +1,4 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { EmailOtpType, Session, User } from '@supabase/supabase-js';
 import * as Linking from 'expo-linking';
 import {
@@ -10,6 +11,7 @@ import {
   useState,
 } from 'react';
 
+import { GUEST_MODE_KEY } from './guest';
 import { supabase, supabaseConfigError } from './supabase';
 
 export const AUTH_CALLBACK_URL = 'youmilens://auth/callback';
@@ -36,6 +38,12 @@ type AuthContextValue = {
   session: Session | null;
   loading: boolean;
   username: string | null;
+  /** True when the user chose to continue without an account (local-only guest). */
+  isGuest: boolean;
+  /** Enter the app without an account. Guest state is local-only on this device. */
+  continueAsGuest: () => Promise<void>;
+  /** Leave guest mode (e.g. when heading to the sign-in screen). */
+  exitGuest: () => Promise<void>;
   /** True while the active session is a recovery session (set new password flow). */
   isResettingPassword: boolean;
   createProfileWithPassword: (email: string, password: string, username: string) => Promise<VerifySignupResult>;
@@ -120,6 +128,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [username, setUsername] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // True when the user chose "Continue without account". A real session always
+  // supersedes guest mode, so signing in clears this flag.
+  const [isGuest, setIsGuest] = useState(false);
   // True between PASSWORD_RECOVERY and the next SIGNED_OUT. Lets the AuthGate
   // keep the user on /auth long enough to enter a new password.
   const [isResettingPassword, setIsResettingPassword] = useState(false);
@@ -164,7 +175,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .getSession()
       .then(async ({ data, error }) => {
         if (!mounted) return;
-        await applySessionState(error ? null : data.session);
+        const nextSession = error ? null : data.session;
+        await applySessionState(nextSession);
+        if (nextSession) {
+          // A real session supersedes any persisted guest choice.
+          setIsGuest(false);
+          await AsyncStorage.removeItem(GUEST_MODE_KEY).catch(() => {});
+        } else {
+          const flag = await AsyncStorage.getItem(GUEST_MODE_KEY).catch(() => null);
+          if (mounted && flag === '1') setIsGuest(true);
+        }
       })
       .finally(() => {
         if (mounted) setLoading(false);
@@ -177,6 +197,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // SIGNED_OUT clears the flag so subsequent sign-ins behave normally.
       if (event === 'PASSWORD_RECOVERY') setIsResettingPassword(true);
       else if (event === 'SIGNED_OUT') setIsResettingPassword(false);
+      // Signing in always leaves guest mode behind.
+      if (nextSession) {
+        setIsGuest(false);
+        void AsyncStorage.removeItem(GUEST_MODE_KEY).catch(() => {});
+      }
       void applySessionState(nextSession);
       setLoading(false);
     });
@@ -464,12 +489,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await applySessionState(null);
   }, [applySessionState]);
 
+  const continueAsGuest = useCallback(async (): Promise<void> => {
+    await AsyncStorage.setItem(GUEST_MODE_KEY, '1').catch(() => {});
+    setIsGuest(true);
+  }, []);
+
+  const exitGuest = useCallback(async (): Promise<void> => {
+    await AsyncStorage.removeItem(GUEST_MODE_KEY).catch(() => {});
+    setIsGuest(false);
+  }, []);
+
   const value = useMemo<AuthContextValue>(
     () => ({
       user,
       session,
       loading,
       username,
+      isGuest,
+      continueAsGuest,
+      exitGuest,
       isResettingPassword,
       createProfileWithPassword,
       verifySignupCode,
@@ -490,6 +528,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       session,
       loading,
       username,
+      isGuest,
+      continueAsGuest,
+      exitGuest,
       isResettingPassword,
       createProfileWithPassword,
       verifySignupCode,

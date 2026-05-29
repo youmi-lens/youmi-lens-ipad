@@ -1,9 +1,9 @@
 /**
- * Access & Usage screen (route: /plans).
+ * Account & Usage screen (route: /plans).
  *
- * Youmi Lens is free for students. This screen shows the user's current
- * access tier, monthly + daily minute budgets, recordings used today, and
- * per-recording / per-live-session caps. All numbers come from the backend
+ * This screen shows the signed-in user's account status and lecture activity —
+ * monthly + daily minutes, recordings today, and per-recording / per-live-session
+ * details for the account. All numbers come from the backend
  * `/api/quota/status` — the same endpoint the Settings Plan card uses, and
  * the same backend the Mac client reads from. Quota is account-level
  * (Supabase user_id), so usage on iPad and Mac shares the same numbers.
@@ -27,7 +27,7 @@ import { GlassCard } from '@/components/GlassCard';
 import { SecondaryButton } from '@/components/SecondaryButton';
 import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
-import { fetchPlanStatus, PlanStatus } from '@/lib/planStatus';
+import { fetchPlanStatus, PlanStatus, safeAccessLabel } from '@/lib/planStatus';
 
 const CONTACT_EMAIL = 'youmilens@gmail.com';
 
@@ -44,7 +44,7 @@ export default function PlansScreen() {
     if (!accessToken) {
       setPlanStatus(null);
       setLoading(false);
-      setError('Sign in to view your access.');
+      setError('Sign in to view your account.');
       return;
     }
     setLoading(true);
@@ -52,7 +52,7 @@ export default function PlansScreen() {
     try {
       setPlanStatus(await fetchPlanStatus(accessToken));
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Access information is unavailable.');
+      setError(err instanceof Error ? err.message : 'Account status is unavailable.');
     } finally {
       setLoading(false);
     }
@@ -84,17 +84,17 @@ export default function PlansScreen() {
         >
           <Ionicons name="chevron-back" size={24} color={colors.deepNavy} />
         </Pressable>
-        <Text style={styles.headerTitle}>Access & Usage</Text>
+        <Text style={styles.headerTitle}>Account & Usage</Text>
         <View style={styles.headerSpacer} />
       </View>
 
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         <View style={styles.content}>
           <View style={styles.heroBlock}>
-            <Text style={styles.heroTitle}>Youmi Lens is free for students.</Text>
+            <Text style={styles.heroTitle}>Account status</Text>
             <Text style={styles.heroSubtitle}>
-              Daily and monthly limits help keep the service stable for students. Your usage is
-              shared across iPad and Mac.
+              Review your account status and lecture activity. Your activity is shared across iPad
+              and Mac.
             </Text>
           </View>
 
@@ -132,8 +132,7 @@ export default function PlansScreen() {
           </GlassCard>
 
           <Text style={styles.footerNote}>
-            Youmi Lens is available with free student access. Usage limits help keep the service
-            stable.
+            Your account status and lecture activity are shared across iPad and Mac.
           </Text>
         </View>
       </ScrollView>
@@ -142,11 +141,13 @@ export default function PlansScreen() {
 }
 
 function AccessCards({ status }: { status: PlanStatus }) {
+  const accessLabel = safeAccessLabel(status.planType, status.displayName);
+
   if (status.status === 'suspended') {
     return (
       <GlassCard style={styles.tierCard}>
         <View style={styles.tierHeader}>
-          <Text style={styles.tierName}>{status.displayName}</Text>
+          <Text style={styles.tierName}>{accessLabel}</Text>
           <View style={styles.suspendedPill}>
             <Text style={styles.suspendedPillText}>ON HOLD</Text>
           </View>
@@ -162,13 +163,13 @@ function AccessCards({ status }: { status: PlanStatus }) {
     return (
       <GlassCard style={styles.tierCard}>
         <View style={styles.tierHeader}>
-          <Text style={styles.tierName}>{status.displayName}</Text>
+          <Text style={styles.tierName}>{accessLabel}</Text>
           <View style={styles.activePill}>
             <Ionicons name="checkmark" size={12} color="#157A58" />
-            <Text style={styles.activePillText}>UNLIMITED</Text>
+            <Text style={styles.activePillText}>ACTIVE</Text>
           </View>
         </View>
-        <Text style={styles.tierBlurb}>Usage limits are bypassed for this account.</Text>
+        <Text style={styles.tierBlurb}>This account has full access.</Text>
       </GlassCard>
     );
   }
@@ -177,7 +178,7 @@ function AccessCards({ status }: { status: PlanStatus }) {
     <View style={styles.cards}>
       <GlassCard style={styles.tierCard}>
         <View style={styles.tierHeader}>
-          <Text style={styles.tierName}>{status.displayName}</Text>
+          <Text style={styles.tierName}>{accessLabel}</Text>
           <View style={styles.activePill}>
             <Ionicons name="checkmark" size={12} color="#157A58" />
             <Text style={styles.activePillText}>ACTIVE</Text>
@@ -189,14 +190,14 @@ function AccessCards({ status }: { status: PlanStatus }) {
       </GlassCard>
 
       <UsageCard
-        title="Monthly minutes"
+        title="Monthly activity"
         used={status.minutesUsed}
         limit={status.minutesLimit}
         remaining={status.minutesRemaining}
         unit="min"
       />
       <UsageCard
-        title="Daily minutes"
+        title="Daily activity"
         used={status.dailyMinutesUsed}
         limit={status.dailyMinutesLimit}
         remaining={status.dailyMinutesRemaining}
@@ -211,13 +212,13 @@ function AccessCards({ status }: { status: PlanStatus }) {
       />
 
       <GlassCard style={styles.limitsCard}>
-        <Text style={styles.limitsTitle}>Per-session limits</Text>
+        <Text style={styles.limitsTitle}>Recording details</Text>
         <LimitLine
-          label="Max recording length"
+          label="Recording length"
           value={formatMinutes(status.maxRecordingMinutes)}
         />
         <LimitLine
-          label="Max live session length"
+          label="Live session length"
           value={formatMinutes(status.maxLiveSessionMinutes)}
         />
       </GlassCard>
@@ -242,17 +243,11 @@ function UsageCard({
   const limitDisplay = limit == null ? '—' : Math.round(limit).toString();
   const remainingDisplay =
     remaining == null ? null : Math.max(0, Math.round(remaining)).toString();
-  const exhausted = remaining != null && Number(remaining) <= 0;
 
   return (
     <GlassCard style={styles.usageCard}>
       <View style={styles.usageHeader}>
         <Text style={styles.usageTitle}>{title}</Text>
-        {exhausted ? (
-          <View style={styles.warningPill}>
-            <Text style={styles.warningPillText}>LIMIT REACHED</Text>
-          </View>
-        ) : null}
       </View>
       <Text style={styles.usageMain}>
         <Text style={styles.usageMainUsed}>{usedDisplay}</Text>
@@ -279,7 +274,7 @@ function LimitLine({ label, value }: { label: string; value: string }) {
 function ErrorCard({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
     <GlassCard style={styles.tierCard}>
-      <Text style={styles.tierName}>Access unavailable</Text>
+      <Text style={styles.tierName}>Account status unavailable</Text>
       <Text style={styles.tierBlurb}>{message}</Text>
       <SecondaryButton
         label="Retry"
@@ -294,14 +289,14 @@ function ErrorCard({ message, onRetry }: { message: string; onRetry: () => void 
 function tierBlurbFor(planType: string): string {
   switch (planType) {
     case 'public_trial':
-      return 'Free student access. Usage limits help keep the service stable.';
+      return 'Student access for your account.';
     case 'core_tester':
       return 'Extended access for active users.';
     case 'admin':
     case 'developer':
-      return 'Developer account — limits are bypassed.';
+      return 'Developer account with full access.';
     default:
-      return 'Free access. Usage limits help keep the service stable.';
+      return 'Student access for your account.';
   }
 }
 

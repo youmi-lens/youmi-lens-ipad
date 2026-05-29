@@ -3,6 +3,7 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import { ComponentProps, useCallback, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -21,8 +22,9 @@ import { colors, fontSize, layout, radius, shadows, spacing } from '@/constants/
 import { user } from '@/data/mockData';
 import { useAuth } from '@/lib/auth';
 import { greetingForNow } from '@/lib/format';
+import { useGuestRecordingUsage } from '@/lib/guest';
 import { COURSE_PRESETS } from '@/lib/models';
-import { fetchPlanStatus, PlanStatus } from '@/lib/planStatus';
+import { fetchPlanStatus, PlanStatus, safeAccessLabel } from '@/lib/planStatus';
 import { useData } from '@/lib/store';
 
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
@@ -33,29 +35,28 @@ const VALUE_POINTS: { icon: IoniconName; label: string }[] = [
   { icon: 'document-text-outline', label: 'Smart notes' },
 ];
 
-/** Current Plan card text, derived from the live /api/quota/status response. */
-function planCardDisplay(
+/** Account card text, derived from the live /api/quota/status response. */
+function accountCardDisplay(
   planStatus: PlanStatus | null,
   planLoading: boolean,
 ): { rightValue: string; subtitle: string } {
   if (planStatus) {
     if (planStatus.status === 'suspended') {
-      return { rightValue: 'Suspended', subtitle: 'Contact support for access.' };
+      return { rightValue: 'On hold', subtitle: 'Contact support to continue.' };
     }
+    const label = safeAccessLabel(planStatus.planType, planStatus.displayName);
     if (planStatus.unlimited) {
-      return { rightValue: planStatus.displayName, subtitle: 'Unlimited access' };
+      return { rightValue: label, subtitle: 'Account active' };
     }
     const used = planStatus.recordingsUsedToday ?? 0;
-    const perDay = planStatus.maxRecordingsPerDay ?? 0;
-    const minutes = planStatus.maxRecordingMinutes ?? 0;
     return {
-      rightValue: planStatus.displayName,
-      subtitle: `Today: ${used} / ${perDay} recordings used · ${minutes} min per recording`,
+      rightValue: label,
+      subtitle: `Recordings today: ${used}`,
     };
   }
   return planLoading
-    ? { rightValue: '—', subtitle: 'Loading plan…' }
-    : { rightValue: '—', subtitle: 'Plan unavailable' };
+    ? { rightValue: '—', subtitle: 'Loading account…' }
+    : { rightValue: '—', subtitle: 'Account status unavailable' };
 }
 
 export default function RecordHomeScreen() {
@@ -73,7 +74,8 @@ export default function RecordHomeScreen() {
   const [lectureTitle, setLectureTitle] = useState('');
 
   // Live plan/quota — same backend source as the Settings Plan section.
-  const { session } = useAuth();
+  const { session, isGuest, exitGuest } = useAuth();
+  const { remaining: guestRemaining } = useGuestRecordingUsage();
   const [planStatus, setPlanStatus] = useState<PlanStatus | null>(null);
   const [planLoading, setPlanLoading] = useState(true);
 
@@ -102,7 +104,7 @@ export default function RecordHomeScreen() {
     }, [loadPlan]),
   );
 
-  const planCard = planCardDisplay(planStatus, planLoading);
+  const accountCard = accountCardDisplay(planStatus, planLoading);
   const selectedCourse = getCourse(selectedCourseId) ?? courses[0];
   const recentLectures = [...lectures]
     .sort((a, b) => b.date.localeCompare(a.date))
@@ -110,7 +112,30 @@ export default function RecordHomeScreen() {
 
   const openCreateCourse = () => router.push('/create-course');
 
+  const goToSignIn = () => {
+    void exitGuest().then(() => router.replace('/auth'));
+  };
+
+  // Guests may record a small number of short lectures on this device. Once the
+  // local cap is reached, recording is replaced by an invitation to sign in.
+  const guestAllowanceUsedUp = isGuest && guestRemaining <= 0;
+
+  const promptGuestSignIn = () => {
+    Alert.alert(
+      'Sign in to continue',
+      'Sign in to continue recording lectures. Guest recordings are stored only on this device.',
+      [
+        { text: 'Not now', style: 'cancel' },
+        { text: 'Sign In', onPress: goToSignIn },
+      ],
+    );
+  };
+
   const startQuickRecording = () => {
+    if (guestAllowanceUsedUp) {
+      promptGuestSignIn();
+      return;
+    }
     const preset = COURSE_PRESETS[0];
     const course = createCourse({
       name: 'General Lectures',
@@ -126,6 +151,10 @@ export default function RecordHomeScreen() {
 
   const startRecording = () => {
     if (!selectedCourse) return;
+    if (guestAllowanceUsedUp) {
+      promptGuestSignIn();
+      return;
+    }
     router.push({
       pathname: '/recording',
       params: { courseId: selectedCourse.id, lectureTitle: lectureTitle.trim() },
@@ -321,17 +350,40 @@ export default function RecordHomeScreen() {
                 </GlassCard>
               )}
 
-              {/* ---- Current Plan — live from the backend (same as Settings) ---- */}
-              <GlassCard>
-                <View style={styles.planHeader}>
-                  <View style={styles.planLabelRow}>
-                    <Ionicons name="diamond-outline" size={15} color={colors.mutedBlueGray} />
-                    <Text style={styles.cardLabel}>CURRENT PLAN</Text>
+              {/* ---- Guest: on-device recording · Signed in: account status ---- */}
+              {isGuest ? (
+                <GlassCard>
+                  <View style={styles.planHeader}>
+                    <View style={styles.planLabelRow}>
+                      <Ionicons name="phone-portrait-outline" size={15} color={colors.mutedBlueGray} />
+                      <Text style={styles.cardLabel}>LOCAL RECORDING</Text>
+                    </View>
                   </View>
-                  <Text style={styles.planName}>{planCard.rightValue}</Text>
-                </View>
-                <Text style={styles.planSubtitle}>{planCard.subtitle}</Text>
-              </GlassCard>
+                  <Text style={styles.planSubtitle}>
+                    {guestAllowanceUsedUp
+                      ? 'Sign in to continue recording lectures.'
+                      : 'Record on this device without signing in. Guest recordings are stored only on this device.'}
+                  </Text>
+                  <SecondaryButton
+                    label="Sign In"
+                    icon="log-in-outline"
+                    tone="ice"
+                    onPress={goToSignIn}
+                    style={styles.guestSignInButton}
+                  />
+                </GlassCard>
+              ) : (
+                <GlassCard>
+                  <View style={styles.planHeader}>
+                    <View style={styles.planLabelRow}>
+                      <Ionicons name="person-circle-outline" size={15} color={colors.mutedBlueGray} />
+                      <Text style={styles.cardLabel}>ACCOUNT</Text>
+                    </View>
+                    <Text style={styles.planName}>{accountCard.rightValue}</Text>
+                  </View>
+                  <Text style={styles.planSubtitle}>{accountCard.subtitle}</Text>
+                </GlassCard>
+              )}
             </>
           )}
         </View>
@@ -610,5 +662,9 @@ const styles = StyleSheet.create({
     lineHeight: fontSize.sm * 1.5,
     color: colors.textSecondary,
     fontWeight: '500',
+  },
+  guestSignInButton: {
+    marginTop: spacing.lg,
+    alignSelf: 'flex-start',
   },
 });
