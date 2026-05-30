@@ -246,6 +246,24 @@ export default function RecordingScreen() {
     stopMicStream();
     stopLiveCaptions();
     const uri = await stopRecording();
+
+    // Finish only saves when real audio was captured. If the recorder never
+    // engaged (e.g. a permission/hardware edge), do NOT save an empty lecture
+    // or count it against the guest cap — surface a clear error and return so
+    // the user can record again. The valid-recording paths below (guest local
+    // save and signed-in upload/process) are unchanged.
+    if (!uri || finalDuration <= 0) {
+      finishedRef.current = false;
+      guestAutoStopped.current = false;
+      setFinishing(false);
+      router.back();
+      Alert.alert(
+        'Recording not saved',
+        'We couldn’t capture any audio for this recording. Please check microphone access and try again.',
+      );
+      return;
+    }
+
     const lecture = createLecture({
       id: pendingLectureId,
       courseId: params.courseId ?? '',
@@ -436,12 +454,22 @@ export default function RecordingScreen() {
               {isGuest ? (
                 <GlassCard padding={spacing.xl}>
                   <View style={styles.stateHeader}>
-                    <View style={styles.stateIcon}>
-                      <Ionicons name="lock-closed-outline" size={20} color={colors.deepNavy} />
+                    <View style={[styles.stateIcon, isPaused && styles.stateIconPaused]}>
+                      <Ionicons
+                        name={isPaused ? 'pause' : 'mic'}
+                        size={20}
+                        color={isPaused ? colors.mutedBlueGray : colors.deepNavy}
+                      />
                     </View>
                     <View style={styles.stateHeaderText}>
                       <Text style={styles.stateTitle}>Local recording</Text>
-                      <Text style={styles.stateStatus}>Saved on this device</Text>
+                      <Text style={styles.stateStatus}>
+                        {isPaused
+                          ? 'Paused'
+                          : recordingSessionActive
+                            ? 'Recording to this device…'
+                            : 'Preparing microphone…'}
+                      </Text>
                     </View>
                   </View>
                   <Text style={styles.stateBody}>
