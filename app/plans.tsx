@@ -1,17 +1,6 @@
-/**
- * Account & Usage screen (route: /plans).
- *
- * This screen shows the signed-in user's account status and lecture activity —
- * monthly + daily minutes, recordings today, and per-recording / per-live-session
- * details for the account. All numbers come from the backend
- * `/api/quota/status` — the same endpoint the Settings Plan card uses, and
- * the same backend the Mac client reads from. Quota is account-level
- * (Supabase user_id), so usage on iPad and Mac shares the same numbers.
- */
 import { Ionicons } from '@expo/vector-icons';
-import * as Linking from 'expo-linking';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -28,49 +17,128 @@ import { SecondaryButton } from '@/components/SecondaryButton';
 import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
 import { fetchPlanStatus, PlanStatus, safeAccessLabel } from '@/lib/planStatus';
+import {
+  purchaseService,
+  restoreMessageForCode,
+  shouldShowPurchaseEntry,
+  STUDENT_PASS_PRODUCT_ID,
+  type RestoreResult,
+  type StudentPassProduct,
+} from '@/lib/purchases';
 
-const CONTACT_EMAIL = 'youmilens@gmail.com';
+type BusyAction = 'purchase' | 'restore' | null;
 
 export default function PlansScreen() {
   const router = useRouter();
-  const { session } = useAuth();
+  const { session, isGuest, exitGuest } = useAuth();
   const accessToken = session?.access_token ?? null;
 
   const [planStatus, setPlanStatus] = useState<PlanStatus | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [product, setProduct] = useState<StudentPassProduct | null>(null);
+  const [productLoading, setProductLoading] = useState(true);
+  const [statusLoading, setStatusLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<BusyAction>(null);
+  const [restoreResult, setRestoreResult] = useState<RestoreResult | null>(null);
 
   const loadStatus = useCallback(async () => {
     if (!accessToken) {
       setPlanStatus(null);
-      setLoading(false);
-      setError('Sign in to view your account.');
+      setStatusLoading(false);
       return;
     }
-    setLoading(true);
+    setStatusLoading(true);
     setError(null);
     try {
       setPlanStatus(await fetchPlanStatus(accessToken));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Account status is unavailable.');
     } finally {
-      setLoading(false);
+      setStatusLoading(false);
     }
   }, [accessToken]);
 
-  // Refetch every time the screen regains focus — keeps the numbers in
-  // sync with Mac-side usage, which is the whole point of this page.
+  const loadProduct = useCallback(async () => {
+    setProductLoading(true);
+    try {
+      setProduct(await purchaseService.getStudentPassProduct());
+    } catch {
+      setProduct(null);
+    } finally {
+      setProductLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadProduct();
+    return () => purchaseService.cleanup();
+  }, [loadProduct]);
+
   useFocusEffect(
     useCallback(() => {
       void loadStatus();
     }, [loadStatus]),
   );
 
-  const openMailto = useCallback(() => {
-    Linking.openURL(`mailto:${CONTACT_EMAIL}?subject=Youmi%20Lens%20access`).catch(() => {
-      Alert.alert('Could not open mail', `Please email ${CONTACT_EMAIL} manually.`);
-    });
-  }, []);
+  const activeEntitlement = planStatus?.entitlement?.active ? planStatus.entitlement : null;
+  const purchaseVisible = shouldShowPurchaseEntry(planStatus);
+  const purchaseDisabled =
+    isGuest || !accessToken || !purchaseVisible || productLoading || !product || busy !== null;
+
+  const currentPlan = safeAccessLabel(planStatus?.planType, planStatus?.displayName);
+
+  const quotaLines = useMemo(
+    () => [
+      ['Monthly minutes', formatNumber(planStatus?.minutesLimit, 'min')],
+      ['Daily minutes', formatNumber(planStatus?.dailyMinutesLimit, 'min')],
+      ['Recording length', formatNumber(planStatus?.maxRecordingMinutes, 'min')],
+      ['Live session length', formatNumber(planStatus?.maxLiveSessionMinutes, 'min')],
+      ['Recordings per day', formatNumber(planStatus?.maxRecordingsPerDay, 'recordings')],
+      ['Processing jobs per day', formatNumber(planStatus?.maxProcessingJobsPerDay, 'jobs')],
+    ],
+    [planStatus],
+  );
+
+  const handleSignIn = async () => {
+    await exitGuest();
+    router.replace('/auth');
+  };
+
+  const handlePurchase = async () => {
+    if (isGuest || !accessToken) {
+      Alert.alert('Sign in required', 'Sign in before purchasing Student Pass.');
+      return;
+    }
+    setBusy('purchase');
+    setRestoreResult(null);
+    try {
+      const result = await purchaseService.purchaseStudentPass(accessToken);
+      await loadStatus();
+      if (result.ok) {
+        Alert.alert('Student Pass active', result.message);
+      } else {
+        Alert.alert('Purchase not completed', result.message);
+      }
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleRestore = async () => {
+    if (isGuest || !accessToken) {
+      Alert.alert('Sign in required', 'Sign in to restore purchases.');
+      return;
+    }
+    setBusy('restore');
+    try {
+      const result = await purchaseService.restoreStudentPass(accessToken);
+      setRestoreResult(result);
+      await loadStatus();
+      Alert.alert(result.ok ? 'Restore complete' : 'Restore result', result.message);
+    } finally {
+      setBusy(null);
+    }
+  };
 
   return (
     <SafeAreaView style={styles.root} edges={['top', 'left', 'right', 'bottom']}>
@@ -84,55 +152,150 @@ export default function PlansScreen() {
         >
           <Ionicons name="chevron-back" size={24} color={colors.deepNavy} />
         </Pressable>
-        <Text style={styles.headerTitle}>Account & Usage</Text>
+        <Text style={styles.headerTitle}>Student Pass</Text>
         <View style={styles.headerSpacer} />
       </View>
 
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         <View style={styles.content}>
           <View style={styles.heroBlock}>
-            <Text style={styles.heroTitle}>Account status</Text>
-            <Text style={styles.heroSubtitle}>
-              Review your account status and lecture activity. Your activity is shared across iPad
-              and Mac.
-            </Text>
+            <Text style={styles.heroTitle}>Youmi Lens Student Pass</Text>
+            <Text style={styles.heroSubtitle}>30 days of premium access</Text>
+            <Text style={styles.heroFinePrint}>One-time payment. Does not renew automatically.</Text>
           </View>
 
-          {loading && !planStatus ? (
+          {statusLoading && !planStatus ? (
             <View style={styles.loading}>
               <ActivityIndicator color={colors.deepNavy} />
             </View>
-          ) : !planStatus ? (
-            <ErrorCard
-              message={error ?? 'Access information is unavailable.'}
-              onRetry={() => void loadStatus()}
-            />
+          ) : error ? (
+            <ErrorCard message={error} onRetry={() => void loadStatus()} />
           ) : (
-            <AccessCards status={planStatus} />
+            <>
+              <GlassCard style={styles.card}>
+                <Text style={styles.cardTitle}>Current plan</Text>
+                <View style={styles.statusRow}>
+                  <Text style={styles.statusName}>{currentPlan}</Text>
+                  <View style={styles.activePill}>
+                    <Ionicons name="checkmark" size={12} color="#157A58" />
+                    <Text style={styles.activePillText}>ACTIVE</Text>
+                  </View>
+                </View>
+                <LimitLine
+                  label="Student Pass status"
+                  value={activeEntitlement ? 'Active' : 'Not active'}
+                />
+                <LimitLine
+                  label="Student Pass expiry"
+                  value={formatDate(activeEntitlement?.expiresAt)}
+                />
+              </GlassCard>
+
+              <GlassCard style={styles.card}>
+                <Text style={styles.cardTitle}>Current Free plan usage remaining</Text>
+                <UsageLine
+                  icon="calendar-outline"
+                  label="Monthly minutes"
+                  value={formatRemaining(planStatus?.minutesRemaining, 'min')}
+                />
+                <UsageLine
+                  icon="today-outline"
+                  label="Daily minutes"
+                  value={formatRemaining(planStatus?.dailyMinutesRemaining, 'min')}
+                />
+                <UsageLine
+                  icon="mic-outline"
+                  label="Recordings today"
+                  value={formatRemaining(planStatus?.recordingsRemainingToday, 'recordings')}
+                />
+              </GlassCard>
+
+              <GlassCard style={styles.card}>
+                <Text style={styles.cardTitle}>Student Pass benefits</Text>
+                <BenefitLine icon="school-outline" text="Premium lecture recording capacity for coursework." />
+                <BenefitLine icon="albums-outline" text="Higher daily and monthly usage budgets." />
+                <BenefitLine icon="sync-outline" text="Backend-verified access shared across signed-in devices." />
+              </GlassCard>
+
+              <GlassCard style={styles.card}>
+                <Text style={styles.cardTitle}>Server-provided quota limits</Text>
+                {quotaLines.map(([label, value]) => (
+                  <LimitLine key={label} label={label} value={value} />
+                ))}
+              </GlassCard>
+
+              <GlassCard style={styles.card}>
+                <View style={styles.purchaseHeader}>
+                  <View style={styles.purchaseText}>
+                    <Text style={styles.productName}>
+                      {product?.displayName ?? 'Student Pass - 30 Days'}
+                    </Text>
+                    <Text style={styles.productId}>{STUDENT_PASS_PRODUCT_ID}</Text>
+                  </View>
+                  <Text style={styles.price}>
+                    {productLoading ? 'Loading…' : product?.displayPrice ?? 'Unavailable'}
+                  </Text>
+                </View>
+
+                {isGuest || !accessToken ? (
+                  <View style={styles.notice}>
+                    <Ionicons name="lock-closed-outline" size={18} color={colors.deepNavy} />
+                    <Text style={styles.noticeText}>Sign in before purchasing Student Pass.</Text>
+                  </View>
+                ) : null}
+
+                {!purchaseVisible ? (
+                  <View style={styles.notice}>
+                    <Ionicons name="pause-circle-outline" size={18} color={colors.deepNavy} />
+                    <Text style={styles.noticeText}>New Student Pass purchases are unavailable.</Text>
+                  </View>
+                ) : null}
+
+                {!productLoading && !product ? (
+                  <View style={styles.notice}>
+                    <Ionicons name="alert-circle-outline" size={18} color={colors.deepNavy} />
+                    <Text style={styles.noticeText}>
+                      Student Pass could not be fetched from the App Store.
+                    </Text>
+                  </View>
+                ) : null}
+
+                {purchaseVisible ? (
+                  <SecondaryButton
+                    label={busy === 'purchase' ? 'Purchasing…' : 'Purchase Student Pass'}
+                    icon="card-outline"
+                    onPress={handlePurchase}
+                    disabled={purchaseDisabled}
+                    style={styles.actionButton}
+                  />
+                ) : null}
+                <SecondaryButton
+                  label={busy === 'restore' ? 'Restoring…' : 'Restore Purchases'}
+                  icon="refresh-outline"
+                  onPress={handleRestore}
+                  disabled={busy !== null || isGuest || !accessToken}
+                  style={styles.actionButton}
+                />
+                {isGuest ? (
+                  <SecondaryButton
+                    label="Sign In"
+                    icon="log-in-outline"
+                    onPress={handleSignIn}
+                    style={styles.actionButton}
+                  />
+                ) : null}
+                {restoreResult ? (
+                  <Text style={styles.restoreText}>
+                    {restoreResult.message ||
+                      restoreMessageForCode(restoreResult.code)}
+                  </Text>
+                ) : null}
+              </GlassCard>
+            </>
           )}
 
-          <GlassCard style={styles.contactCard}>
-            <View style={styles.contactRow}>
-              <View style={styles.contactIcon}>
-                <Ionicons name="mail-outline" size={20} color={colors.deepNavy} />
-              </View>
-              <View style={styles.contactText}>
-                <Text style={styles.contactTitle}>Need extended access?</Text>
-                <Text style={styles.contactBody}>
-                  If you need more capacity for coursework, contact us.
-                </Text>
-              </View>
-            </View>
-            <SecondaryButton
-              label={CONTACT_EMAIL}
-              icon="mail-outline"
-              onPress={openMailto}
-              style={styles.contactButton}
-            />
-          </GlassCard>
-
           <Text style={styles.footerNote}>
-            Your account status and lecture activity are shared across iPad and Mac.
+            StoreKit transactions are verified by the Youmi Lens backend before access changes.
           </Text>
         </View>
       </ScrollView>
@@ -140,169 +303,80 @@ export default function PlansScreen() {
   );
 }
 
-function AccessCards({ status }: { status: PlanStatus }) {
-  const accessLabel = safeAccessLabel(status.planType, status.displayName);
-
-  if (status.status === 'suspended') {
-    return (
-      <GlassCard style={styles.tierCard}>
-        <View style={styles.tierHeader}>
-          <Text style={styles.tierName}>{accessLabel}</Text>
-          <View style={styles.suspendedPill}>
-            <Text style={styles.suspendedPillText}>ON HOLD</Text>
-          </View>
-        </View>
-        <Text style={styles.tierBlurb}>
-          Your account is currently on hold. Please contact support for help.
-        </Text>
-      </GlassCard>
-    );
-  }
-
-  if (status.unlimited) {
-    return (
-      <GlassCard style={styles.tierCard}>
-        <View style={styles.tierHeader}>
-          <Text style={styles.tierName}>{accessLabel}</Text>
-          <View style={styles.activePill}>
-            <Ionicons name="checkmark" size={12} color="#157A58" />
-            <Text style={styles.activePillText}>ACTIVE</Text>
-          </View>
-        </View>
-        <Text style={styles.tierBlurb}>This account has full access.</Text>
-      </GlassCard>
-    );
-  }
-
+function UsageLine({
+  icon,
+  label,
+  value,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  label: string;
+  value: string;
+}) {
   return (
-    <View style={styles.cards}>
-      <GlassCard style={styles.tierCard}>
-        <View style={styles.tierHeader}>
-          <Text style={styles.tierName}>{accessLabel}</Text>
-          <View style={styles.activePill}>
-            <Ionicons name="checkmark" size={12} color="#157A58" />
-            <Text style={styles.activePillText}>ACTIVE</Text>
-          </View>
-        </View>
-        <Text style={styles.tierBlurb}>
-          {tierBlurbFor(status.planType)}
-        </Text>
-      </GlassCard>
-
-      <UsageCard
-        title="Monthly activity"
-        used={status.minutesUsed}
-        limit={status.minutesLimit}
-        remaining={status.minutesRemaining}
-        unit="min"
-      />
-      <UsageCard
-        title="Daily activity"
-        used={status.dailyMinutesUsed}
-        limit={status.dailyMinutesLimit}
-        remaining={status.dailyMinutesRemaining}
-        unit="min"
-      />
-      <UsageCard
-        title="Recordings today"
-        used={status.recordingsUsedToday}
-        limit={status.maxRecordingsPerDay}
-        remaining={status.recordingsRemainingToday}
-        unit="recordings"
-      />
-
-      <GlassCard style={styles.limitsCard}>
-        <Text style={styles.limitsTitle}>Recording details</Text>
-        <LimitLine
-          label="Recording length"
-          value={formatMinutes(status.maxRecordingMinutes)}
-        />
-        <LimitLine
-          label="Live session length"
-          value={formatMinutes(status.maxLiveSessionMinutes)}
-        />
-      </GlassCard>
+    <View style={styles.usageLine}>
+      <View style={styles.lineIcon}>
+        <Ionicons name={icon} size={18} color={colors.deepNavy} />
+      </View>
+      <Text style={styles.lineLabel}>{label}</Text>
+      <Text style={styles.lineValue}>{value}</Text>
     </View>
   );
 }
 
-function UsageCard({
-  title,
-  used,
-  limit,
-  remaining,
-  unit,
-}: {
-  title: string;
-  used?: number;
-  limit?: number | null;
-  remaining?: number | null;
-  unit: string;
-}) {
-  const usedDisplay = used == null ? '—' : Math.round(used).toString();
-  const limitDisplay = limit == null ? '—' : Math.round(limit).toString();
-  const remainingDisplay =
-    remaining == null ? null : Math.max(0, Math.round(remaining)).toString();
-
+function BenefitLine({ icon, text }: { icon: keyof typeof Ionicons.glyphMap; text: string }) {
   return (
-    <GlassCard style={styles.usageCard}>
-      <View style={styles.usageHeader}>
-        <Text style={styles.usageTitle}>{title}</Text>
+    <View style={styles.benefitLine}>
+      <View style={styles.lineIcon}>
+        <Ionicons name={icon} size={18} color={colors.deepNavy} />
       </View>
-      <Text style={styles.usageMain}>
-        <Text style={styles.usageMainUsed}>{usedDisplay}</Text>
-        <Text style={styles.usageMainSep}> / </Text>
-        <Text style={styles.usageMainLimit}>{limitDisplay} </Text>
-        <Text style={styles.usageMainUnit}>{unit}</Text>
-      </Text>
-      {remainingDisplay ? (
-        <Text style={styles.usageRemaining}>{remainingDisplay} remaining</Text>
-      ) : null}
-    </GlassCard>
+      <Text style={styles.benefitText}>{text}</Text>
+    </View>
   );
 }
 
 function LimitLine({ label, value }: { label: string; value: string }) {
   return (
-    <View style={styles.limitsLine}>
-      <Text style={styles.limitsLineLabel}>{label}</Text>
-      <Text style={styles.limitsLineValue}>{value}</Text>
+    <View style={styles.limitLine}>
+      <Text style={styles.limitLabel}>{label}</Text>
+      <Text style={styles.limitValue}>{value}</Text>
     </View>
   );
 }
 
 function ErrorCard({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
-    <GlassCard style={styles.tierCard}>
-      <Text style={styles.tierName}>Account status unavailable</Text>
-      <Text style={styles.tierBlurb}>{message}</Text>
+    <GlassCard style={styles.card}>
+      <Text style={styles.cardTitle}>Account status unavailable</Text>
+      <Text style={styles.cardBody}>{message}</Text>
       <SecondaryButton
         label="Retry"
         icon="refresh-outline"
         onPress={onRetry}
-        style={styles.contactButton}
+        style={styles.actionButton}
       />
     </GlassCard>
   );
 }
 
-function tierBlurbFor(planType: string): string {
-  switch (planType) {
-    case 'public_trial':
-      return 'Student access for your account.';
-    case 'core_tester':
-      return 'Extended access for active users.';
-    case 'admin':
-    case 'developer':
-      return 'Developer account with full access.';
-    default:
-      return 'Student access for your account.';
-  }
+function formatNumber(value: number | null | undefined, unit: string): string {
+  if (value == null || Number.isNaN(Number(value))) return '—';
+  return `${Math.round(Number(value))} ${unit}`;
 }
 
-function formatMinutes(value: number | null | undefined): string {
+function formatRemaining(value: number | null | undefined, unit: string): string {
   if (value == null || Number.isNaN(Number(value))) return '—';
-  return `${Math.round(Number(value))} min`;
+  return `${Math.max(0, Math.round(Number(value)))} ${unit}`;
+}
+
+function formatDate(value: string | null | undefined): string {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  });
 }
 
 const styles = StyleSheet.create({
@@ -328,43 +402,40 @@ const styles = StyleSheet.create({
   headerSpacer: { width: 44, height: 44 },
   scroll: { paddingHorizontal: spacing.xl, paddingBottom: spacing.xxxl },
   content: { width: '100%', maxWidth: layout.content, alignSelf: 'center', gap: spacing.xl },
-
-  // Hero
   heroBlock: { gap: spacing.sm },
   heroTitle: {
     fontSize: fontSize.xxl,
     fontWeight: '800',
     color: colors.textPrimary,
-    letterSpacing: -0.3,
   },
   heroSubtitle: {
+    fontSize: fontSize.lg,
+    lineHeight: fontSize.lg * 1.35,
+    color: colors.textPrimary,
+    fontWeight: '700',
+  },
+  heroFinePrint: {
     fontSize: fontSize.md,
-    lineHeight: fontSize.md * 1.5,
+    lineHeight: fontSize.md * 1.45,
     color: colors.textSecondary,
-    fontWeight: '500',
+    fontWeight: '600',
   },
-
-  // States
   loading: { paddingVertical: spacing.xxxl, alignItems: 'center' },
-
-  // Card list
-  cards: { gap: spacing.lg },
-
-  // Tier card
-  tierCard: { gap: spacing.md },
-  tierHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: spacing.md,
-  },
-  tierName: { fontSize: fontSize.xl, fontWeight: '800', color: colors.textPrimary },
-  tierBlurb: {
+  card: { gap: spacing.md },
+  cardTitle: { fontSize: fontSize.lg, fontWeight: '800', color: colors.textPrimary },
+  cardBody: {
     fontSize: fontSize.sm,
     lineHeight: fontSize.sm * 1.5,
     color: colors.textSecondary,
     fontWeight: '500',
   },
+  statusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.md,
+  },
+  statusName: { flex: 1, fontSize: fontSize.xl, fontWeight: '800', color: colors.textPrimary },
   activePill: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -380,95 +451,75 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
     color: '#157A58',
   },
-  suspendedPill: {
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 3,
-    borderRadius: radius.pill,
-    backgroundColor: '#FCE4E0',
-  },
-  suspendedPillText: {
-    fontSize: 10,
-    fontWeight: '800',
-    letterSpacing: 0.5,
-    color: '#C0392B',
-  },
-
-  // Usage card
-  usageCard: { gap: spacing.xs },
-  usageHeader: {
+  usageLine: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
     gap: spacing.md,
   },
-  usageTitle: {
-    fontSize: fontSize.xs,
-    fontWeight: '800',
-    letterSpacing: 1.2,
-    color: colors.textTertiary,
-  },
-  warningPill: {
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 3,
-    borderRadius: radius.pill,
-    backgroundColor: '#FCE4E0',
-  },
-  warningPillText: {
-    fontSize: 10,
-    fontWeight: '800',
-    letterSpacing: 0.5,
-    color: '#C0392B',
-  },
-  usageMain: { color: colors.textPrimary },
-  usageMainUsed: { fontSize: fontSize.xxl, fontWeight: '800', color: colors.textPrimary },
-  usageMainSep: { fontSize: fontSize.lg, fontWeight: '600', color: colors.textTertiary },
-  usageMainLimit: { fontSize: fontSize.lg, fontWeight: '700', color: colors.textSecondary },
-  usageMainUnit: { fontSize: fontSize.sm, fontWeight: '600', color: colors.textTertiary },
-  usageRemaining: { fontSize: fontSize.sm, fontWeight: '600', color: colors.textSecondary },
-
-  // Limits card
-  limitsCard: { gap: spacing.sm },
-  limitsTitle: {
-    fontSize: fontSize.xs,
-    fontWeight: '800',
-    letterSpacing: 1.2,
-    color: colors.textTertiary,
-  },
-  limitsLine: {
+  benefitLine: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
     gap: spacing.md,
   },
-  limitsLineLabel: {
+  lineIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: radius.sm,
+    backgroundColor: colors.iceTint,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  lineLabel: { flex: 1, fontSize: fontSize.sm, color: colors.textSecondary, fontWeight: '700' },
+  lineValue: { fontSize: fontSize.sm, color: colors.textPrimary, fontWeight: '800' },
+  benefitText: {
+    flex: 1,
     fontSize: fontSize.sm,
+    lineHeight: fontSize.sm * 1.45,
     color: colors.textSecondary,
     fontWeight: '600',
   },
-  limitsLineValue: {
-    fontSize: fontSize.sm,
-    color: colors.textPrimary,
-    fontWeight: '700',
+  limitLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.md,
   },
-
-  // Contact
-  contactCard: { gap: spacing.md },
-  contactRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
-  contactIcon: {
-    width: 36,
-    height: 36,
+  limitLabel: { flex: 1, fontSize: fontSize.sm, color: colors.textSecondary, fontWeight: '600' },
+  limitValue: { fontSize: fontSize.sm, color: colors.textPrimary, fontWeight: '800' },
+  purchaseHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: spacing.md,
+  },
+  purchaseText: { flex: 1, gap: 2 },
+  productName: { fontSize: fontSize.lg, color: colors.textPrimary, fontWeight: '800' },
+  productId: { fontSize: fontSize.xs, color: colors.textTertiary, fontWeight: '600' },
+  price: { fontSize: fontSize.xl, color: colors.textPrimary, fontWeight: '800' },
+  notice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    padding: spacing.md,
     borderRadius: radius.md,
     backgroundColor: colors.iceTint,
     borderWidth: 1,
     borderColor: colors.iceBlue,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
-  contactText: { flex: 1, gap: 2 },
-  contactTitle: { fontSize: fontSize.md, fontWeight: '700', color: colors.textPrimary },
-  contactBody: { fontSize: fontSize.sm, color: colors.textSecondary, fontWeight: '500' },
-  contactButton: { alignSelf: 'stretch' },
-
+  noticeText: {
+    flex: 1,
+    fontSize: fontSize.sm,
+    lineHeight: fontSize.sm * 1.35,
+    color: colors.textSecondary,
+    fontWeight: '600',
+  },
+  actionButton: { alignSelf: 'stretch' },
+  restoreText: {
+    fontSize: fontSize.sm,
+    lineHeight: fontSize.sm * 1.45,
+    color: colors.textSecondary,
+    fontWeight: '600',
+  },
   footerNote: {
     fontSize: fontSize.xs,
     lineHeight: fontSize.xs * 1.5,

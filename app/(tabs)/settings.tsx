@@ -12,6 +12,7 @@ import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
 import { deleteAccount } from '@/lib/account';
 import { useAuth } from '@/lib/auth';
 import { fetchPlanStatus, PlanStatus, safeAccessLabel } from '@/lib/planStatus';
+import { purchaseService } from '@/lib/purchases';
 import { useData } from '@/lib/store';
 
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
@@ -88,6 +89,17 @@ function PlanLine({ label, value }: { label: string; value: string }) {
   );
 }
 
+function formatDate(value: string | null | undefined): string {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
 export default function SettingsScreen() {
   const router = useRouter();
   const { courses, lectures, clearAll } = useData();
@@ -100,6 +112,7 @@ export default function SettingsScreen() {
   const [usernameModalVisible, setUsernameModalVisible] = useState(false);
   const [usernameSaving, setUsernameSaving] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
+  const [restoringPurchases, setRestoringPurchases] = useState(false);
 
   // Load the live plan from the backend. Any previously loaded plan stays
   // visible if a refresh fails, so Settings never blocks on a network error.
@@ -184,6 +197,27 @@ export default function SettingsScreen() {
   const handleGuestSignIn = async () => {
     await exitGuest();
     router.replace('/auth');
+  };
+
+  const handleRestorePurchases = async () => {
+    if (isGuest || !session?.access_token) {
+      Alert.alert('Sign in required', 'Sign in to restore purchases.');
+      return;
+    }
+    if (restoringPurchases) return;
+    setRestoringPurchases(true);
+    try {
+      const result = await purchaseService.restoreStudentPass(session.access_token);
+      await loadPlan();
+      Alert.alert(result.ok ? 'Restore complete' : 'Restore result', result.message);
+    } catch (err) {
+      Alert.alert(
+        'Restore failed',
+        err instanceof Error ? err.message : 'Please try again with a network connection.',
+      );
+    } finally {
+      setRestoringPurchases(false);
+    }
   };
 
   const performAccountDeletion = async () => {
@@ -371,6 +405,16 @@ export default function SettingsScreen() {
                 {planStatus.status === 'suspended' ? (
                   <Text style={styles.planHelper}>Contact support to continue.</Text>
                 ) : null}
+                <View style={styles.entitlementBox}>
+                  <PlanLine
+                    label="Student Pass"
+                    value={planStatus.entitlement?.active ? 'Active' : 'Not active'}
+                  />
+                  <PlanLine
+                    label="Expires"
+                    value={formatDate(planStatus.entitlement?.expiresAt)}
+                  />
+                </View>
               </View>
             ) : planLoading ? (
               <View style={styles.planStateBox}>
@@ -392,6 +436,11 @@ export default function SettingsScreen() {
               icon="information-circle-outline"
               label="Account & Usage"
               onPress={() => router.push('/plans')}
+            />
+            <Row
+              icon="refresh-outline"
+              label={restoringPurchases ? 'Restoring Purchases…' : 'Restore Purchases'}
+              onPress={restoringPurchases ? undefined : handleRestorePurchases}
               last
             />
           </Section>
@@ -652,6 +701,13 @@ const styles = StyleSheet.create({
   },
   planLines: {
     gap: spacing.sm,
+  },
+  entitlementBox: {
+    gap: spacing.sm,
+    marginTop: spacing.lg,
+    paddingTop: spacing.lg,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
   },
   planLine: {
     flexDirection: 'row',
