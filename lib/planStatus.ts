@@ -13,7 +13,20 @@ export type PlanStatus = {
   displayName: string;
   status: 'active' | 'suspended';
   unlimited: boolean;
+  entitlement?: {
+    active: boolean;
+    productId: string | null;
+    planType?: string | null;
+    expiresAt: string | null;
+    revoked?: boolean;
+  };
+  studentPass?: {
+    productId: string;
+    isPurchasable: boolean;
+    salesEndAt: string | null;
+  };
   maxRecordingsPerDay?: number;
+  maxProcessingJobsPerDay?: number;
   recordingsUsedToday?: number;
   recordingsRemainingToday?: number;
   maxRecordingMinutes?: number;
@@ -59,6 +72,9 @@ export function safeAccessLabel(
   }
   if (type === 'core_tester' || name.includes('core tester') || name.includes('extended')) {
     return 'Extended Access';
+  }
+  if (type === 'student_pass' || name.includes('student pass')) {
+    return 'Student Pass';
   }
   // public_trial, student_basic/plus/pro, any "Free"/"Beta"/"Trial" historical
   // label, or anything unrecognized → the neutral student-facing label.

@@ -1,7 +1,21 @@
 {
   "identifier" : "A7B1C0D2-0001-4000-A000-000000000001",
   "nonRenewingSubscriptions" : [
-
+    {
+      "displayPrice" : "4.99",
+      "familyShareable" : false,
+      "internalID" : "A7B1C0D2-0006-4000-A000-000000000006",
+      "localizations" : [
+        {
+          "description" : "30 days of premium access. One-time payment. Does not renew automatically.",
+          "displayName" : "Student Pass – 30 Days",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "com.aydenz.youmilensipad.studentpass30d",
+      "referenceName" : "Student Pass 30 Days",
+      "type" : "NonRenewingSubscription"
+    }
   ],
   "products" : [
 
@@ -15,94 +29,7 @@
     "_storefront" : "USA"
   },
   "subscriptionGroups" : [
-    {
-      "id" : "A7B1C0D2-0002-4000-A000-000000000002",
-      "localizations" : [
-        {
-          "description" : "Youmi Lens subscriptions",
-          "displayName" : "Youmi Lens",
-          "locale" : "en_US"
-        }
-      ],
-      "name" : "Youmi Lens",
-      "subscriptions" : [
-        {
-          "adHocOffers" : [
 
-          ],
-          "codeOffers" : [
-
-          ],
-          "displayPrice" : "4.99",
-          "familyShareable" : false,
-          "groupNumber" : 1,
-          "internalID" : "A7B1C0D2-0003-4000-A000-000000000003",
-          "introductoryOffer" : null,
-          "localizations" : [
-            {
-              "description" : "200 minutes per month",
-              "displayName" : "Basic",
-              "locale" : "en_US"
-            }
-          ],
-          "productID" : "com.aydenz.youmilensipad.basic.monthly",
-          "recurringSubscriptionPeriod" : "P1M",
-          "referenceName" : "Basic Monthly",
-          "subscriptionGroupID" : "A7B1C0D2-0002-4000-A000-000000000002",
-          "type" : "RecurringSubscription"
-        },
-        {
-          "adHocOffers" : [
-
-          ],
-          "codeOffers" : [
-
-          ],
-          "displayPrice" : "9.99",
-          "familyShareable" : false,
-          "groupNumber" : 2,
-          "internalID" : "A7B1C0D2-0004-4000-A000-000000000004",
-          "introductoryOffer" : null,
-          "localizations" : [
-            {
-              "description" : "600 minutes per month",
-              "displayName" : "Plus",
-              "locale" : "en_US"
-            }
-          ],
-          "productID" : "com.aydenz.youmilensipad.plus.monthly",
-          "recurringSubscriptionPeriod" : "P1M",
-          "referenceName" : "Plus Monthly",
-          "subscriptionGroupID" : "A7B1C0D2-0002-4000-A000-000000000002",
-          "type" : "RecurringSubscription"
-        },
-        {
-          "adHocOffers" : [
-
-          ],
-          "codeOffers" : [
-
-          ],
-          "displayPrice" : "19.99",
-          "familyShareable" : false,
-          "groupNumber" : 3,
-          "internalID" : "A7B1C0D2-0005-4000-A000-000000000005",
-          "introductoryOffer" : null,
-          "localizations" : [
-            {
-              "description" : "1500 minutes per month",
-              "displayName" : "Pro",
-              "locale" : "en_US"
-            }
-          ],
-          "productID" : "com.aydenz.youmilensipad.pro.monthly",
-          "recurringSubscriptionPeriod" : "P1M",
-          "referenceName" : "Pro Monthly",
-          "subscriptionGroupID" : "A7B1C0D2-0002-4000-A000-000000000002",
-          "type" : "RecurringSubscription"
-        }
-      ]
-    }
   ],
   "version" : {
     "major" : 3,
