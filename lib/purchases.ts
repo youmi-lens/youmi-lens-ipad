@@ -33,10 +33,22 @@ export type StudentPassProduct = {
 
 export type BackendEntitlement = {
   active: boolean;
+  status?: 'active' | 'expired' | 'revoked' | 'refunded' | 'none' | string | null;
   productId: string | null;
   planType?: string | null;
+  startsAt?: string | null;
   expiresAt: string | null;
   revoked?: boolean;
+  currentEntitlement?: BackendEntitlementSnapshot | null;
+  latestEntitlement?: BackendEntitlementSnapshot | null;
+};
+
+export type BackendEntitlementSnapshot = {
+  productId: string;
+  planType?: string | null;
+  startsAt: string;
+  expiresAt: string;
+  status: string;
 };
 
 export type EntitlementResponse = {
@@ -209,7 +221,7 @@ function purchaseMessageForCode(code: PurchaseResultCode, backendMessage?: strin
     case 'already_linked':
       return 'This purchase belongs to another Youmi Lens account.';
     case 'deleted_account_binding':
-      return 'This purchase is linked to a deleted Youmi Lens account.';
+      return 'This purchase is linked to another Youmi Lens account.';
     case 'expired':
       return 'This Student Pass purchase has expired.';
     case 'sales_closed':
@@ -229,15 +241,15 @@ export function restoreMessageForCode(code: RestoreResultCode): string {
     case 'active_restored':
       return 'Active Student Pass restored.';
     case 'expired':
-      return 'Student Pass expired.';
+      return 'Your Student Pass has expired.';
     case 'revoked':
-      return 'Student Pass was refunded or revoked.';
+      return 'This purchase was refunded or revoked.';
     case 'already_linked':
-      return 'Purchase belongs to another Youmi Lens account.';
+      return 'This purchase is linked to another Youmi Lens account.';
     case 'no_eligible_purchase':
-      return 'No eligible purchase found.';
+      return 'No eligible Student Pass was found.';
     case 'unverified_history_unavailable':
-      return 'Restore could not recover an unverified historical purchase.';
+      return 'Restore could not recover the purchase.';
     case 'sign_in_required':
       return 'Sign in to restore purchases.';
     case 'failed':
@@ -261,7 +273,18 @@ function entitlementRestoreResult(
     };
   }
 
-  if (entitlement?.revoked) {
+  if (entitlement?.status === 'expired') {
+    return {
+      ok: true,
+      code: 'expired',
+      message: restoreMessageForCode('expired'),
+      entitlement,
+      quotaStatus,
+      usedStoreKitRecovery: false,
+    };
+  }
+
+  if (entitlement?.status === 'revoked' || entitlement?.status === 'refunded' || entitlement?.revoked) {
     return {
       ok: true,
       code: 'revoked',
@@ -438,15 +461,18 @@ class RealPurchaseService implements PurchaseService {
     if (recoveryPurchases.length === 0) {
       const finalEntitlement = await this.getBackendEntitlement(accessToken);
       const finalResult = entitlementRestoreResult(finalEntitlement.entitlement, finalEntitlement.quotaStatus ?? null);
-      return (
-        finalResult ?? {
-          ok: false,
-          code: 'unverified_history_unavailable',
-          message: restoreMessageForCode('unverified_history_unavailable'),
-          entitlement: finalEntitlement.entitlement,
-          usedStoreKitRecovery: true,
-        }
-      );
+      if (finalResult) return finalResult;
+      const code: RestoreResultCode =
+        finalEntitlement.entitlement.status === 'none' || !finalEntitlement.entitlement.status
+          ? 'no_eligible_purchase'
+          : 'unverified_history_unavailable';
+      return {
+        ok: false,
+        code,
+        message: restoreMessageForCode(code),
+        entitlement: finalEntitlement.entitlement,
+        usedStoreKitRecovery: true,
+      };
     }
 
     const restorePayload = recoveryPurchases.map((purchase) => ({
@@ -602,20 +628,23 @@ class MockPurchaseService implements PurchaseService {
   async getBackendEntitlement(): Promise<EntitlementResponse> {
     const active = this.state === 'active_entitlement';
     const expired = this.state === 'expired_entitlement';
+    const revoked = this.state === 'revoked_entitlement' || this.state === 'refunded_entitlement';
     return {
       ok: true,
       entitlement: active
         ? {
             active: true,
+            status: 'active',
             productId: STUDENT_PASS_PRODUCT_ID,
             planType: STUDENT_PASS_PLAN_TYPE,
             expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
           }
         : {
             active: false,
-            productId: expired ? STUDENT_PASS_PRODUCT_ID : null,
-            planType: expired ? STUDENT_PASS_PLAN_TYPE : null,
-            expiresAt: expired ? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString() : null,
+            status: expired ? 'expired' : revoked ? (this.state === 'refunded_entitlement' ? 'refunded' : 'revoked') : 'none',
+            productId: expired || revoked ? STUDENT_PASS_PRODUCT_ID : null,
+            planType: expired || revoked ? STUDENT_PASS_PLAN_TYPE : null,
+            expiresAt: expired || revoked ? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString() : null,
           },
     };
   }
@@ -663,6 +692,9 @@ class MockPurchaseService implements PurchaseService {
     }
     if (this.state === 'expired_entitlement') {
       return { ok: true, code: 'expired', message: restoreMessageForCode('expired'), entitlement };
+    }
+    if (this.state === 'revoked_entitlement' || this.state === 'refunded_entitlement') {
+      return { ok: true, code: 'revoked', message: restoreMessageForCode('revoked'), entitlement };
     }
     if (this.state === 'already_linked') {
       return { ok: false, code: 'already_linked', message: restoreMessageForCode('already_linked') };

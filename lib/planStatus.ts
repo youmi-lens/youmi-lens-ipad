@@ -15,10 +15,26 @@ export type PlanStatus = {
   unlimited: boolean;
   entitlement?: {
     active: boolean;
+    status?: 'active' | 'expired' | 'revoked' | 'refunded' | 'none' | string | null;
     productId: string | null;
     planType?: string | null;
+    startsAt?: string | null;
     expiresAt: string | null;
     revoked?: boolean;
+    currentEntitlement?: {
+      productId: string;
+      planType?: string | null;
+      startsAt: string;
+      expiresAt: string;
+      status: string;
+    } | null;
+    latestEntitlement?: {
+      productId: string;
+      planType?: string | null;
+      startsAt: string;
+      expiresAt: string;
+      status: string;
+    } | null;
   };
   studentPass?: {
     productId: string;

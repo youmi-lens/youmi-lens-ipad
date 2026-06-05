@@ -32,6 +32,8 @@ assert.match(purchases, /const PRODUCT_QUERY_TYPE = 'in-app'/, 'non-renewing sub
 assert.doesNotMatch(purchases, /getActiveSubscriptions/, 'restore does not use auto-renewable subscription API');
 assert.match(purchases, /\/api\/iap\/apple\/verify/, 'purchase sends signed transaction to verify endpoint');
 assert.match(purchases, /\/api\/iap\/entitlement/, 'restore checks backend entitlement endpoint');
+assert.match(purchases, /status\?: 'active' \| 'expired' \| 'revoked' \| 'refunded' \| 'none'/, 'client models enhanced entitlement status');
+assert.match(purchases, /latestEntitlement\?: BackendEntitlementSnapshot \| null/, 'client models latest known entitlement snapshot');
 assert.match(purchases, /\/api\/iap\/restore/, 'recovery sends discovered transactions to restore endpoint');
 assert.match(purchases, /finishTransaction\(\{ purchase, isConsumable: false \}\)/, 'transactions finish only through explicit finish path');
 
@@ -48,6 +50,13 @@ assert.match(purchases, /getAllTransactionsIOS\(\)/, 'recovery attempts public t
 assert.match(purchases, /onlyIncludeActiveItemsIOS:\s*false/, 'available purchases fallback is not active-only');
 assert.match(purchases, /unverified_history_unavailable/, 'restore exposes historical recovery limitation');
 assert.doesNotMatch(purchases, /AsyncStorage/, 'purchase service does not persist local paid plan');
+assert.match(purchases, /Active Student Pass restored\./, 'restore active message is user-safe');
+assert.match(purchases, /Your Student Pass has expired\./, 'restore expired message is user-safe');
+assert.match(purchases, /This purchase was refunded or revoked\./, 'restore revoked message is user-safe');
+assert.match(purchases, /No eligible Student Pass was found\./, 'restore none message is user-safe');
+assert.match(purchases, /This purchase is linked to another Youmi Lens account\./, 'restore ownership message is user-safe');
+assert.match(purchases, /Restore could not recover the purchase\./, 'restore recovery failure message is user-safe');
+assert.doesNotMatch(purchases, /deleted Youmi Lens account/, 'client does not expose deleted-account binding');
 
 assert.match(plans, /30 days of premium access/, 'paywall includes required duration copy');
 assert.match(plans, /One-time payment\. Does not renew automatically\./, 'paywall includes required payment copy');
