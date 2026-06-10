@@ -28,7 +28,7 @@ const forbiddenPaywallCopy = [
 
 assert.match(purchases, new RegExp(productId), 'purchase service uses Student Pass product');
 assert.match(purchases, /fetchProducts\(\{\s*skus:\s*\[STUDENT_PASS_PRODUCT_ID\],[\s\S]*type:\s*PRODUCT_QUERY_TYPE/, 'product fetch uses configured product type');
-assert.match(purchases, /const PRODUCT_QUERY_TYPE = 'in-app'/, 'non-renewing subscription is queried as StoreKit in-app product');
+assert.match(purchases, /const PRODUCT_QUERY_TYPE = 'in-app'/, 'non-consumable is queried as StoreKit in-app product');
 assert.doesNotMatch(purchases, /getActiveSubscriptions/, 'restore does not use auto-renewable subscription API');
 assert.match(purchases, /\/api\/iap\/apple\/verify/, 'purchase sends signed transaction to verify endpoint');
 assert.match(purchases, /\/api\/iap\/entitlement/, 'restore checks backend entitlement endpoint');
@@ -81,10 +81,11 @@ for (const oldProductId of oldProductIds) {
   assert.doesNotMatch(plans, new RegExp(oldProductId), `paywall removed ${oldProductId}`);
 }
 
-assert.equal(storekit.nonRenewingSubscriptions.length, 1, 'StoreKit has one non-renewing subscription');
+assert.equal(storekit.nonRenewingSubscriptions.length, 0, 'StoreKit has no non-renewing subscriptions');
 assert.equal(storekit.subscriptionGroups.length, 0, 'StoreKit has no recurring subscription group');
-assert.equal(storekit.nonRenewingSubscriptions[0].productID, productId, 'StoreKit product ID matches approved Student Pass');
-assert.equal(storekit.nonRenewingSubscriptions[0].type, 'NonRenewingSubscription', 'StoreKit product type is non-renewing subscription');
-assert.equal(storekit.nonRenewingSubscriptions[0].displayPrice, '4.99', 'StoreKit local test price is 4.99');
+assert.equal(storekit.products.length, 1, 'StoreKit has one in-app product');
+assert.equal(storekit.products[0].productID, productId, 'StoreKit product ID matches approved Student Pass');
+assert.equal(storekit.products[0].type, 'NonConsumable', 'StoreKit product type is non-consumable');
+assert.equal(storekit.products[0].displayPrice, '4.99', 'StoreKit local test price is 4.99');
 
 console.log('Phase 3 purchase static tests passed.');

@@ -1,6 +1,9 @@
 {
   "identifier" : "A7B1C0D2-0001-4000-A000-000000000001",
   "nonRenewingSubscriptions" : [
+
+  ],
+  "products" : [
     {
       "displayPrice" : "4.99",
       "familyShareable" : false,
@@ -14,11 +17,8 @@
       ],
       "productID" : "com.aydenz.youmilensipad.studentpass30d",
       "referenceName" : "Student Pass 30 Days",
-      "type" : "NonRenewingSubscription"
+      "type" : "NonConsumable"
     }
-  ],
-  "products" : [
-
   ],
   "settings" : {
     "_failTransactionsEnabled" : false,
