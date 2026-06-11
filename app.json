@@ -2,7 +2,7 @@
   "expo": {
     "name": "Youmi Lens",
     "slug": "youmi-lens-ipad",
-    "version": "0.1.2",
+    "version": "0.1.3",
     "orientation": "default",
     "icon": "./assets/images/icon.png",
     "scheme": "youmilens",
@@ -18,7 +18,7 @@
         "ITSAppUsesNonExemptEncryption": false
       },
       "bundleIdentifier": "com.aydenz.youmilensipad",
-      "buildNumber": "16"
+      "buildNumber": "17"
     },
     "android": {
       "adaptiveIcon": {
