@@ -1,4 +1,5 @@
 import {
+  ErrorCode,
   currentEntitlementIOS,
   endConnection,
   fetchProducts,
@@ -71,6 +72,7 @@ export type PurchaseResultCode =
   | 'expired'
   | 'sales_closed'
   | 'offline'
+  | 'apple_account_already_purchased'
   | 'storekit_error';
 
 export type PurchaseResult = {
@@ -134,6 +136,8 @@ const USE_REAL_IAP =
   process.env.EXPO_PUBLIC_USE_REAL_IAP === '1' ||
   process.env.EXPO_PUBLIC_USE_REAL_IAP === 'true';
 const PRODUCT_QUERY_TYPE = 'in-app' as const;
+const APPLE_ACCOUNT_MISMATCH_MESSAGE =
+  'This Apple ID has already purchased this pass for another Youmi Lens account. To use it, sign in to that Youmi Lens account, or use a different Apple ID/Sandbox tester for a separate account.';
 
 function productIdOf(product: Product): string {
   return product.id;
@@ -219,7 +223,8 @@ function purchaseMessageForCode(code: PurchaseResultCode, backendMessage?: strin
     case 'sign_in_required':
       return 'Sign in before purchasing Student Pass.';
     case 'already_linked':
-      return 'This purchase belongs to another Youmi Lens account.';
+    case 'apple_account_already_purchased':
+      return APPLE_ACCOUNT_MISMATCH_MESSAGE;
     case 'deleted_account_binding':
       return 'This purchase is linked to another Youmi Lens account.';
     case 'expired':
@@ -245,7 +250,7 @@ export function restoreMessageForCode(code: RestoreResultCode): string {
     case 'revoked':
       return 'This purchase was refunded or revoked.';
     case 'already_linked':
-      return 'This purchase is linked to another Youmi Lens account.';
+      return APPLE_ACCOUNT_MISMATCH_MESSAGE;
     case 'no_eligible_purchase':
       return 'No eligible Student Pass was found.';
     case 'unverified_history_unavailable':
@@ -440,6 +445,17 @@ class RealPurchaseService implements PurchaseService {
       const message = error instanceof Error ? error.message : undefined;
       if (name.includes('cancel') || message?.toLowerCase().includes('cancel')) {
         return { ok: false, code: 'cancelled', message: purchaseMessageForCode('cancelled') };
+      }
+      if (
+        name === ErrorCode.AlreadyOwned ||
+        name === ErrorCode.DuplicatePurchase ||
+        /already (purchased|owned)|duplicate purchase/i.test(message ?? '')
+      ) {
+        return {
+          ok: false,
+          code: 'apple_account_already_purchased',
+          message: purchaseMessageForCode('apple_account_already_purchased'),
+        };
       }
       return { ok: false, code: 'storekit_error', message: purchaseMessageForCode('storekit_error', message) };
     }

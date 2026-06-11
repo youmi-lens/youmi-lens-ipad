@@ -31,6 +31,10 @@ assert.match(purchases, /fetchProducts\(\{\s*skus:\s*\[STUDENT_PASS_PRODUCT_ID\]
 assert.match(purchases, /const PRODUCT_QUERY_TYPE = 'in-app'/, 'non-consumable is queried as StoreKit in-app product');
 assert.doesNotMatch(purchases, /getActiveSubscriptions/, 'restore does not use auto-renewable subscription API');
 assert.match(purchases, /\/api\/iap\/apple\/verify/, 'purchase sends signed transaction to verify endpoint');
+assert.ok(
+  purchases.indexOf('await requestPurchase({') < purchases.indexOf('return await this.verifyPurchaseWithBackend(purchase, accessToken!)'),
+  'purchase flow reaches StoreKit before backend transaction ownership validation',
+);
 assert.match(purchases, /\/api\/iap\/entitlement/, 'restore checks backend entitlement endpoint');
 assert.match(purchases, /status\?: 'active' \| 'expired' \| 'revoked' \| 'refunded' \| 'none'/, 'client models enhanced entitlement status');
 assert.match(purchases, /latestEntitlement\?: BackendEntitlementSnapshot \| null/, 'client models latest known entitlement snapshot');
@@ -54,7 +58,13 @@ assert.match(purchases, /Active Student Pass restored\./, 'restore active messag
 assert.match(purchases, /Your Student Pass has expired\./, 'restore expired message is user-safe');
 assert.match(purchases, /This purchase was refunded or revoked\./, 'restore revoked message is user-safe');
 assert.match(purchases, /No eligible Student Pass was found\./, 'restore none message is user-safe');
-assert.match(purchases, /This purchase is linked to another Youmi Lens account\./, 'restore ownership message is user-safe');
+assert.match(
+  purchases,
+  /This Apple ID has already purchased this pass for another Youmi Lens account\./,
+  'purchase and restore explain Apple-ID and Youmi-account ownership mismatch',
+);
+assert.match(purchases, /ErrorCode\.AlreadyOwned/, 'StoreKit already-owned errors use the account mismatch message');
+assert.match(purchases, /ErrorCode\.DuplicatePurchase/, 'StoreKit duplicate-purchase errors use the account mismatch message');
 assert.match(purchases, /Restore could not recover the purchase\./, 'restore recovery failure message is user-safe');
 assert.doesNotMatch(purchases, /deleted Youmi Lens account/, 'client does not expose deleted-account binding');
 
