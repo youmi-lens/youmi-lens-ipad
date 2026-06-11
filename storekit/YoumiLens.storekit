@@ -10,13 +10,28 @@
       "internalID" : "A7B1C0D2-0006-4000-A000-000000000006",
       "localizations" : [
         {
-          "description" : "30 days of premium access. One-time payment. Does not renew automatically.",
+          "description" : "30 days of Student Basic access. One-time purchase.",
+          "displayName" : "Student Basic – 30 Days",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "com.aydenz.youmilensipad.studentbasic30d",
+      "referenceName" : "Student Basic 30 Days",
+      "type" : "Consumable"
+    },
+    {
+      "displayPrice" : "4.99",
+      "familyShareable" : false,
+      "internalID" : "A7B1C0D2-0007-4000-A000-000000000007",
+      "localizations" : [
+        {
+          "description" : "Legacy Student Pass compatibility product.",
           "displayName" : "Student Pass – 30 Days",
           "locale" : "en_US"
         }
       ],
       "productID" : "com.aydenz.youmilensipad.studentpass30d",
-      "referenceName" : "Student Pass 30 Days",
+      "referenceName" : "Student Pass 30 Days (Legacy)",
       "type" : "NonConsumable"
     }
   ],

@@ -201,7 +201,7 @@ export default function SettingsScreen() {
 
   const handleRestorePurchases = async () => {
     if (isGuest || !session?.access_token) {
-      Alert.alert('Sign in required', 'Sign in to restore purchases.');
+      Alert.alert('Sign in required', 'Sign in to refresh your purchase status.');
       return;
     }
     if (restoringPurchases) return;
@@ -209,10 +209,10 @@ export default function SettingsScreen() {
     try {
       const result = await purchaseService.restoreStudentPass(session.access_token);
       await loadPlan();
-      Alert.alert(result.ok ? 'Restore complete' : 'Restore result', result.message);
+      Alert.alert(result.ok ? 'Access refreshed' : 'Access status', result.message);
     } catch (err) {
       Alert.alert(
-        'Restore failed',
+        'Access refresh failed',
         err instanceof Error ? err.message : 'Please try again with a network connection.',
       );
     } finally {
@@ -407,7 +407,7 @@ export default function SettingsScreen() {
                 ) : null}
                 <View style={styles.entitlementBox}>
                   <PlanLine
-                    label="Student Pass"
+                    label="Student Basic"
                     value={planStatus.entitlement?.active ? 'Active' : 'Not active'}
                   />
                   <PlanLine
@@ -439,7 +439,7 @@ export default function SettingsScreen() {
             />
             <Row
               icon="refresh-outline"
-              label={restoringPurchases ? 'Restoring Purchases…' : 'Restore Purchases'}
+              label={restoringPurchases ? 'Refreshing Access…' : 'Refresh Purchase Access'}
               onPress={restoringPurchases ? undefined : handleRestorePurchases}
               last
             />

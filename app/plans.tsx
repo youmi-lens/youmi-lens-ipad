@@ -106,7 +106,7 @@ export default function PlansScreen() {
 
   const handlePurchase = async () => {
     if (isGuest || !accessToken) {
-      Alert.alert('Sign in required', 'Sign in before purchasing Student Pass.');
+      Alert.alert('Sign in required', 'Sign in before purchasing Student Basic.');
       return;
     }
     setBusy('purchase');
@@ -115,7 +115,7 @@ export default function PlansScreen() {
       const result = await purchaseService.purchaseStudentPass(accessToken);
       await loadStatus();
       if (result.ok) {
-        Alert.alert('Student Pass active', result.message);
+        Alert.alert('Student Basic active', result.message);
       } else {
         Alert.alert('Purchase not completed', result.message);
       }
@@ -126,7 +126,7 @@ export default function PlansScreen() {
 
   const handleRestore = async () => {
     if (isGuest || !accessToken) {
-      Alert.alert('Sign in required', 'Sign in to restore purchases.');
+      Alert.alert('Sign in required', 'Sign in to refresh your purchase status.');
       return;
     }
     setBusy('restore');
@@ -134,7 +134,7 @@ export default function PlansScreen() {
       const result = await purchaseService.restoreStudentPass(accessToken);
       setRestoreResult(result);
       await loadStatus();
-      Alert.alert(result.ok ? 'Restore complete' : 'Restore result', result.message);
+      Alert.alert(result.ok ? 'Access refreshed' : 'Access status', result.message);
     } finally {
       setBusy(null);
     }
@@ -152,15 +152,15 @@ export default function PlansScreen() {
         >
           <Ionicons name="chevron-back" size={24} color={colors.deepNavy} />
         </Pressable>
-        <Text style={styles.headerTitle}>Student Pass</Text>
+        <Text style={styles.headerTitle}>Student Basic</Text>
         <View style={styles.headerSpacer} />
       </View>
 
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         <View style={styles.content}>
           <View style={styles.heroBlock}>
-            <Text style={styles.heroTitle}>Youmi Lens Student Pass</Text>
-            <Text style={styles.heroSubtitle}>30 days of premium access</Text>
+            <Text style={styles.heroTitle}>Youmi Lens Student Basic</Text>
+            <Text style={styles.heroSubtitle}>30 days of Student Basic access.</Text>
             <Text style={styles.heroFinePrint}>One-time payment. Does not renew automatically.</Text>
           </View>
 
@@ -182,11 +182,11 @@ export default function PlansScreen() {
                   </View>
                 </View>
                 <LimitLine
-                  label="Student Pass status"
+                  label="Student Basic status"
                   value={activeEntitlement ? 'Active' : 'Not active'}
                 />
                 <LimitLine
-                  label="Student Pass expiry"
+                  label="Student Basic expiry"
                   value={formatDate(activeEntitlement?.expiresAt)}
                 />
               </GlassCard>
@@ -211,7 +211,7 @@ export default function PlansScreen() {
               </GlassCard>
 
               <GlassCard style={styles.card}>
-                <Text style={styles.cardTitle}>Student Pass benefits</Text>
+                <Text style={styles.cardTitle}>Student Basic benefits</Text>
                 <BenefitLine icon="school-outline" text="Premium lecture recording capacity for coursework." />
                 <BenefitLine icon="albums-outline" text="Higher daily and monthly usage budgets." />
                 <BenefitLine icon="sync-outline" text="Backend-verified access shared across signed-in devices." />
@@ -228,7 +228,7 @@ export default function PlansScreen() {
                 <View style={styles.purchaseHeader}>
                   <View style={styles.purchaseText}>
                     <Text style={styles.productName}>
-                      {product?.displayName ?? 'Student Pass - 30 Days'}
+                      {product?.displayName ?? 'Student Basic - 30 Days'}
                     </Text>
                     <Text style={styles.productId}>{STUDENT_PASS_PRODUCT_ID}</Text>
                   </View>
@@ -240,14 +240,14 @@ export default function PlansScreen() {
                 {isGuest || !accessToken ? (
                   <View style={styles.notice}>
                     <Ionicons name="lock-closed-outline" size={18} color={colors.deepNavy} />
-                    <Text style={styles.noticeText}>Sign in before purchasing Student Pass.</Text>
+                    <Text style={styles.noticeText}>Sign in before purchasing Student Basic.</Text>
                   </View>
                 ) : null}
 
                 {!purchaseVisible ? (
                   <View style={styles.notice}>
                     <Ionicons name="pause-circle-outline" size={18} color={colors.deepNavy} />
-                    <Text style={styles.noticeText}>New Student Pass purchases are unavailable.</Text>
+                    <Text style={styles.noticeText}>New Student Basic purchases are unavailable.</Text>
                   </View>
                 ) : null}
 
@@ -255,14 +255,14 @@ export default function PlansScreen() {
                   <View style={styles.notice}>
                     <Ionicons name="alert-circle-outline" size={18} color={colors.deepNavy} />
                     <Text style={styles.noticeText}>
-                      Student Pass could not be fetched from the App Store.
+                      Student Basic could not be fetched from the App Store.
                     </Text>
                   </View>
                 ) : null}
 
                 {purchaseVisible ? (
                   <SecondaryButton
-                    label={busy === 'purchase' ? 'Purchasing…' : 'Purchase Student Pass'}
+                    label={busy === 'purchase' ? 'Purchasing…' : 'Purchase Student Basic'}
                     icon="card-outline"
                     onPress={handlePurchase}
                     disabled={purchaseDisabled}
@@ -270,7 +270,7 @@ export default function PlansScreen() {
                   />
                 ) : null}
                 <SecondaryButton
-                  label={busy === 'restore' ? 'Restoring…' : 'Restore Purchases'}
+                  label={busy === 'restore' ? 'Refreshing…' : 'Refresh Access'}
                   icon="refresh-outline"
                   onPress={handleRestore}
                   disabled={busy !== null || isGuest || !accessToken}

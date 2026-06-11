@@ -1,17 +1,12 @@
 import {
   ErrorCode,
-  currentEntitlementIOS,
   endConnection,
   fetchProducts,
   finishTransaction,
-  getAllTransactionsIOS,
-  getAvailablePurchases,
   initConnection,
-  latestTransactionIOS,
   purchaseErrorListener,
   purchaseUpdatedListener,
   requestPurchase,
-  restorePurchases,
   type Product,
   type Purchase,
 } from 'expo-iap';
@@ -20,8 +15,13 @@ import { Platform } from 'react-native';
 import { API_BASE_URL } from './config';
 import type { PlanStatus } from './planStatus';
 
-export const STUDENT_PASS_PRODUCT_ID = 'com.aydenz.youmilensipad.studentpass30d';
+export const STUDENT_PASS_PRODUCT_ID = 'com.aydenz.youmilensipad.studentbasic30d';
+export const LEGACY_STUDENT_PASS_PRODUCT_ID = 'com.aydenz.youmilensipad.studentpass30d';
 export const STUDENT_PASS_PLAN_TYPE = 'student_pass';
+const STUDENT_ACCESS_PRODUCT_IDS = new Set([
+  STUDENT_PASS_PRODUCT_ID,
+  LEGACY_STUDENT_PASS_PRODUCT_ID,
+]);
 
 export type PlanId = 'free' | 'student_pass';
 
@@ -113,17 +113,6 @@ type VerifyResponse = {
   quotaStatus?: PlanStatus | null;
 };
 
-type RestoreResponse = {
-  ok?: boolean;
-  alreadyLinked?: boolean;
-  restoredCount?: number;
-  activeRestoredCount?: number;
-  entitlement?: BackendEntitlement | null;
-  quotaStatus?: PlanStatus | null;
-  error?: string | null;
-  message?: string | null;
-};
-
 export type PurchaseService = {
   getStudentPassProduct(): Promise<StudentPassProduct | null>;
   getBackendEntitlement(accessToken: string | null | undefined): Promise<EntitlementResponse>;
@@ -150,7 +139,7 @@ function normalizeProduct(product: Product): StudentPassProduct {
       ? product.displayNameIOS
       : null) ||
     product.title ||
-    'Student Pass - 30 Days';
+    'Student Basic - 30 Days';
 
   return {
     productId: productIdOf(product),
@@ -213,24 +202,24 @@ function mapBackendError(payload: VerifyResponse, status: number): PurchaseResul
 function purchaseMessageForCode(code: PurchaseResultCode, backendMessage?: string): string {
   switch (code) {
     case 'success':
-      return 'Student Pass is active.';
+      return 'Student Basic access is active.';
     case 'cancelled':
       return 'Purchase cancelled.';
     case 'pending':
       return 'Purchase is pending. Open Youmi Lens again after Apple finishes processing it.';
     case 'product_unavailable':
-      return 'Student Pass is not available from the App Store right now.';
+      return 'Student Basic is not available from the App Store right now.';
     case 'sign_in_required':
-      return 'Sign in before purchasing Student Pass.';
+      return 'Sign in before purchasing Student Basic.';
     case 'already_linked':
     case 'apple_account_already_purchased':
       return APPLE_ACCOUNT_MISMATCH_MESSAGE;
     case 'deleted_account_binding':
       return 'This purchase is linked to another Youmi Lens account.';
     case 'expired':
-      return 'This Student Pass purchase has expired.';
+      return 'This Student Basic purchase has expired.';
     case 'sales_closed':
-      return 'Student Pass purchases are no longer available.';
+      return 'Student Basic purchases are no longer available.';
     case 'offline':
       return 'Could not reach the backend. Check your connection and try again.';
     case 'storekit_error':
@@ -244,22 +233,22 @@ function purchaseMessageForCode(code: PurchaseResultCode, backendMessage?: strin
 export function restoreMessageForCode(code: RestoreResultCode): string {
   switch (code) {
     case 'active_restored':
-      return 'Active Student Pass restored.';
+      return 'Student Basic access refreshed from your Youmi Lens account.';
     case 'expired':
-      return 'Your Student Pass has expired.';
+      return 'Your Student Basic access has expired.';
     case 'revoked':
       return 'This purchase was refunded or revoked.';
     case 'already_linked':
       return APPLE_ACCOUNT_MISMATCH_MESSAGE;
     case 'no_eligible_purchase':
-      return 'No eligible Student Pass was found.';
+      return 'No Student Basic access is linked to this Youmi Lens account.';
     case 'unverified_history_unavailable':
-      return 'Restore could not recover the purchase.';
+      return 'Consumable purchases are not restored from App Store history. Sign in to the Youmi Lens account used for purchase.';
     case 'sign_in_required':
-      return 'Sign in to restore purchases.';
+      return 'Sign in to refresh your purchase status.';
     case 'failed':
     default:
-      return 'Restore failed.';
+      return 'Purchase status refresh failed.';
   }
 }
 
@@ -267,7 +256,11 @@ function entitlementRestoreResult(
   entitlement: BackendEntitlement | null | undefined,
   quotaStatus?: PlanStatus | null,
 ): RestoreResult | null {
-  if (entitlement?.active && entitlement.productId === STUDENT_PASS_PRODUCT_ID) {
+  if (
+    entitlement?.active &&
+    entitlement.productId &&
+    STUDENT_ACCESS_PRODUCT_IDS.has(entitlement.productId)
+  ) {
     return {
       ok: true,
       code: 'active_restored',
@@ -340,7 +333,7 @@ class RealPurchaseService implements PurchaseService {
     | null = null;
 
   private async ensureConnection() {
-    if (Platform.OS !== 'ios') throw new Error('Student Pass purchases are available on iPad.');
+    if (Platform.OS !== 'ios') throw new Error('Student Basic purchases are available on iPad.');
     if (this.connected) return;
     await initConnection();
     this.connected = true;
@@ -473,68 +466,17 @@ class RealPurchaseService implements PurchaseService {
     const initialResult = entitlementRestoreResult(initial.entitlement, initial.quotaStatus ?? null);
     if (initialResult) return initialResult;
 
-    const recoveryPurchases = await this.discoverStudentPassTransactions();
-    if (recoveryPurchases.length === 0) {
-      const finalEntitlement = await this.getBackendEntitlement(accessToken);
-      const finalResult = entitlementRestoreResult(finalEntitlement.entitlement, finalEntitlement.quotaStatus ?? null);
-      if (finalResult) return finalResult;
-      const code: RestoreResultCode =
-        finalEntitlement.entitlement.status === 'none' || !finalEntitlement.entitlement.status
-          ? 'no_eligible_purchase'
-          : 'unverified_history_unavailable';
-      return {
-        ok: false,
-        code,
-        message: restoreMessageForCode(code),
-        entitlement: finalEntitlement.entitlement,
-        usedStoreKitRecovery: true,
-      };
-    }
-
-    const restorePayload = recoveryPurchases.map((purchase) => ({
-      productId: purchase.productId,
-      transactionId: transactionIdFor(purchase),
-      originalTransactionId: originalTransactionIdFor(purchase),
-      purchaseToken: signedPayloadFor(purchase),
-    }));
-
-    const { payload } = await fetchJson<RestoreResponse>(`${API_BASE_URL}/api/iap/restore`, accessToken, {
-      method: 'POST',
-      body: JSON.stringify({ platform: 'ios', purchases: restorePayload }),
-    });
-
-    const finalEntitlement = await this.getBackendEntitlement(accessToken);
-    const finalResult = entitlementRestoreResult(finalEntitlement.entitlement, payload?.quotaStatus ?? null);
-    if (finalResult) {
-      return {
-        ...finalResult,
-        recoveredTransactionCount: recoveryPurchases.length,
-        usedStoreKitRecovery: true,
-      };
-    }
-
-    if (payload?.alreadyLinked) {
-      return {
-        ok: false,
-        code: 'already_linked',
-        message: restoreMessageForCode('already_linked'),
-        entitlement: finalEntitlement.entitlement,
-        quotaStatus: payload.quotaStatus ?? finalEntitlement.quotaStatus ?? null,
-        recoveredTransactionCount: recoveryPurchases.length,
-        usedStoreKitRecovery: true,
-      };
-    }
-
     const code: RestoreResultCode =
-      (payload?.restoredCount ?? 0) > 0 ? 'expired' : 'no_eligible_purchase';
+      initial.entitlement.status === 'none' || !initial.entitlement.status
+        ? 'no_eligible_purchase'
+        : 'unverified_history_unavailable';
     return {
-      ok: code === 'expired',
+      ok: false,
       code,
       message: restoreMessageForCode(code),
-      entitlement: finalEntitlement.entitlement,
-      quotaStatus: payload?.quotaStatus ?? finalEntitlement.quotaStatus ?? null,
-      recoveredTransactionCount: recoveryPurchases.length,
-      usedStoreKitRecovery: true,
+      entitlement: initial.entitlement,
+      quotaStatus: initial.quotaStatus ?? null,
+      usedStoreKitRecovery: false,
     };
   }
 
@@ -575,7 +517,7 @@ class RealPurchaseService implements PurchaseService {
     );
 
     if (shouldFinishAfterBackend(payload)) {
-      await finishTransaction({ purchase, isConsumable: false });
+      await finishTransaction({ purchase, isConsumable: true });
     }
 
     if (status >= 200 && status < 300 && payload?.ok && payload.granted) {
@@ -591,41 +533,6 @@ class RealPurchaseService implements PurchaseService {
     return mapBackendError(payload ?? {}, status);
   }
 
-  private async discoverStudentPassTransactions(): Promise<Purchase[]> {
-    await this.ensureConnection();
-    const byId = new Map<string, Purchase>();
-    const add = (purchase: Purchase | null | undefined) => {
-      if (!isStudentPassPurchase(purchase)) return;
-      if (!signedPayloadFor(purchase)) return;
-      byId.set(transactionIdFor(purchase) ?? purchase.id, purchase);
-    };
-
-    const attempts: (() => Promise<Purchase | Purchase[] | null | undefined>)[] = [
-      () => currentEntitlementIOS(STUDENT_PASS_PRODUCT_ID),
-      () => latestTransactionIOS(STUDENT_PASS_PRODUCT_ID),
-      () => getAllTransactionsIOS(),
-      async () => {
-        await restorePurchases().catch(() => undefined);
-        return getAvailablePurchases({
-          alsoPublishToEventListenerIOS: false,
-          onlyIncludeActiveItemsIOS: false,
-        });
-      },
-    ];
-
-    for (const attempt of attempts) {
-      try {
-        const result = await attempt();
-        if (Array.isArray(result)) result.forEach(add);
-        else add(result);
-      } catch {
-        // StoreKit discovery is recovery-only; backend-known restore must not
-        // depend on every discovery API succeeding.
-      }
-    }
-
-    return [...byId.values()].sort((a, b) => (b.transactionDate ?? 0) - (a.transactionDate ?? 0));
-  }
 }
 
 class MockPurchaseService implements PurchaseService {
@@ -635,7 +542,7 @@ class MockPurchaseService implements PurchaseService {
     if (this.state === 'product_unavailable') return null;
     return {
       productId: STUDENT_PASS_PRODUCT_ID,
-      displayName: 'Student Pass - 30 Days',
+      displayName: 'Student Basic - 30 Days',
       displayPrice: '$4.99',
       available: true,
     };
@@ -738,7 +645,7 @@ export function shouldShowPurchaseEntry(status: PlanStatus | null | undefined): 
 }
 
 export const STUDENT_PASS_REQUIRED_COPY = [
-  '30 days of premium access',
+  '30 days of Student Basic access.',
   'One-time payment. Does not renew automatically.',
 ];
 

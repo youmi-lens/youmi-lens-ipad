@@ -79,7 +79,7 @@ type QuotaStatusResponse = {
   error?: string;
 };
 
-const STUDENT_PASS_PRODUCT_ID = 'com.aydenz.youmilensipad.studentpass30d';
+const STUDENT_PASS_PRODUCT_ID = 'com.aydenz.youmilensipad.studentbasic30d';
 
 export function normalizePlanStatus(plan: PlanStatus): PlanStatus {
   if (plan.studentPassActive !== true) return plan;
@@ -90,7 +90,7 @@ export function normalizePlanStatus(plan: PlanStatus): PlanStatus {
   return {
     ...plan,
     planType: plan.effectivePlanType || 'student_pass',
-    displayName: 'Student Pass',
+    displayName: 'Student Basic',
     entitlement: {
       ...plan.entitlement,
       active: true,
@@ -132,8 +132,8 @@ export function safeAccessLabel(
   if (type === 'core_tester' || name.includes('core tester') || name.includes('extended')) {
     return 'Extended Access';
   }
-  if (type === 'student_pass' || name.includes('student pass')) {
-    return 'Student Pass';
+  if (type === 'student_pass' || name.includes('student pass') || name.includes('student basic')) {
+    return 'Student Basic';
   }
   // public_trial, student_basic/plus/pro, any "Free"/"Beta"/"Trial" historical
   // label, or anything unrecognized → the neutral student-facing label.
