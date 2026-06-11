@@ -75,6 +75,16 @@ assert.match(settings, /planStatus\.entitlement\?\.active/, 'settings shows enti
 assert.match(settings, /formatDate\(planStatus\.entitlement\?\.expiresAt\)/, 'settings shows entitlement expiry');
 assert.match(planStatus, /studentPass\?:/, 'quota status type includes purchase availability');
 assert.match(planStatus, /maxProcessingJobsPerDay\?:/, 'quota status type includes processing job limit');
+assert.match(planStatus, /studentPassActive\?:/, 'quota status models explicit Student Pass activity');
+assert.match(planStatus, /studentPassExpiry\?:/, 'quota status models explicit Student Pass expiry');
+assert.match(planStatus, /effectivePlanType\?:/, 'quota status models effective plan type');
+assert.match(planStatus, /export function normalizePlanStatus/, 'quota response is normalized before display');
+assert.match(planStatus, /if \(plan\.studentPassActive !== true\) return plan/, 'legacy status remains unchanged unless Student Pass is active');
+assert.match(planStatus, /planType: plan\.effectivePlanType \|\| 'student_pass'/, 'active Student Pass overrides displayed plan');
+assert.match(planStatus, /expiresAt: expiry/, 'active Student Pass expiry is mapped into the existing entitlement UI');
+assert.match(planStatus, /minutesLimit: quota\?\.monthly_minutes \?\? plan\.minutesLimit/, 'active Student Pass monthly quota overrides legacy limits');
+assert.match(planStatus, /maxProcessingJobsPerDay:[\s\S]*quota\?\.processing_jobs_per_day/, 'active Student Pass processing quota overrides legacy limits');
+assert.match(planStatus, /return normalizePlanStatus\(payload\.plan\)/, 'all plan status consumers receive normalized data');
 
 for (const oldProductId of oldProductIds) {
   assert.doesNotMatch(read('storekit/YoumiLens.storekit'), new RegExp(oldProductId), `StoreKit config removed ${oldProductId}`);

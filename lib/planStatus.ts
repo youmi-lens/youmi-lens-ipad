@@ -13,6 +13,17 @@ export type PlanStatus = {
   displayName: string;
   status: 'active' | 'suspended';
   unlimited: boolean;
+  studentPassActive?: boolean;
+  studentPassExpiry?: string | null;
+  effectivePlanType?: string;
+  quota?: {
+    monthly_minutes?: number | null;
+    daily_minutes?: number | null;
+    max_recording_minutes?: number;
+    max_live_minutes?: number;
+    recordings_per_day?: number;
+    processing_jobs_per_day?: number;
+  };
   entitlement?: {
     active: boolean;
     status?: 'active' | 'expired' | 'revoked' | 'refunded' | 'none' | string | null;
@@ -68,6 +79,38 @@ type QuotaStatusResponse = {
   error?: string;
 };
 
+const STUDENT_PASS_PRODUCT_ID = 'com.aydenz.youmilensipad.studentpass30d';
+
+export function normalizePlanStatus(plan: PlanStatus): PlanStatus {
+  if (plan.studentPassActive !== true) return plan;
+
+  const expiry = plan.studentPassExpiry ?? plan.entitlement?.expiresAt ?? null;
+  const quota = plan.quota;
+
+  return {
+    ...plan,
+    planType: plan.effectivePlanType || 'student_pass',
+    displayName: 'Student Pass',
+    entitlement: {
+      ...plan.entitlement,
+      active: true,
+      status: 'active',
+      productId: plan.entitlement?.productId ?? STUDENT_PASS_PRODUCT_ID,
+      planType: plan.entitlement?.planType ?? 'student_pass',
+      expiresAt: expiry,
+      revoked: false,
+    },
+    monthlyMinutesLimit: quota?.monthly_minutes ?? plan.monthlyMinutesLimit,
+    minutesLimit: quota?.monthly_minutes ?? plan.minutesLimit,
+    dailyMinutesLimit: quota?.daily_minutes ?? plan.dailyMinutesLimit,
+    maxRecordingMinutes: quota?.max_recording_minutes ?? plan.maxRecordingMinutes,
+    maxLiveSessionMinutes: quota?.max_live_minutes ?? plan.maxLiveSessionMinutes,
+    maxRecordingsPerDay: quota?.recordings_per_day ?? plan.maxRecordingsPerDay,
+    maxProcessingJobsPerDay:
+      quota?.processing_jobs_per_day ?? plan.maxProcessingJobsPerDay,
+  };
+}
+
 /**
  * Map a backend plan type / display name to a neutral, App-Store-safe access
  * label for the UI. The backend may still return historical labels such as
@@ -118,5 +161,5 @@ export async function fetchPlanStatus(accessToken: string | null | undefined): P
     );
   }
 
-  return payload.plan;
+  return normalizePlanStatus(payload.plan);
 }
