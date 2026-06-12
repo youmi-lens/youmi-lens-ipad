@@ -1,64 +1,37 @@
-import { Ionicons } from '@expo/vector-icons';
 import { Tabs } from 'expo-router';
-import { Platform } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 
-import { colors, fontSize } from '@/constants/theme';
+import { AppBackground } from '@/components/AppBackground';
+import { YLSidebar } from '@/components/YLSidebar';
+import { colors } from '@/constants/theme';
 
 /**
- * Bottom tab navigation: Record, Courses, Settings.
- * White bar, thin top border, deep-navy active tint — calm and minimal.
+ * iPad split-view foundation: persistent 232pt sidebar with the existing
+ * Record, Courses, and Settings routes rendered in the detail area.
  */
 export default function TabLayout() {
   return (
-    <Tabs
-      screenOptions={{
-        headerShown: false,
-        tabBarActiveTintColor: colors.deepNavy,
-        tabBarInactiveTintColor: colors.mutedBlueGray,
-        tabBarStyle: {
-          backgroundColor: colors.surface,
-          borderTopColor: colors.border,
-          borderTopWidth: 1,
-          height: Platform.OS === 'ios' ? 88 : 72,
-          paddingTop: 8,
-        },
-        tabBarLabelStyle: {
-          fontSize: fontSize.xs,
-          fontWeight: '600',
-          letterSpacing: 0.2,
-        },
-        tabBarItemStyle: {
-          paddingVertical: 4,
-        },
-      }}
-    >
-      <Tabs.Screen
-        name="index"
-        options={{
-          title: 'Record',
-          tabBarIcon: ({ color, focused }) => (
-            <Ionicons name={focused ? 'mic' : 'mic-outline'} size={26} color={color} />
-          ),
+    <View style={styles.root}>
+      <AppBackground />
+      <Tabs
+        tabBar={(props) => <YLSidebar {...props} />}
+        screenOptions={{
+          headerShown: false,
+          tabBarPosition: 'left',
+          sceneStyle: { backgroundColor: 'transparent' },
         }}
-      />
-      <Tabs.Screen
-        name="courses"
-        options={{
-          title: 'Courses',
-          tabBarIcon: ({ color, focused }) => (
-            <Ionicons name={focused ? 'library' : 'library-outline'} size={25} color={color} />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="settings"
-        options={{
-          title: 'Settings',
-          tabBarIcon: ({ color, focused }) => (
-            <Ionicons name={focused ? 'settings' : 'settings-outline'} size={25} color={color} />
-          ),
-        }}
-      />
-    </Tabs>
+      >
+        <Tabs.Screen name="index" options={{ title: 'Record' }} />
+        <Tabs.Screen name="courses" options={{ title: 'Courses' }} />
+        <Tabs.Screen name="settings" options={{ title: 'Settings' }} />
+      </Tabs>
+    </View>
   );
 }
+
+const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+    backgroundColor: colors.background,
+  },
+});

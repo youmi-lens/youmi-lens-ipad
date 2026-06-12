@@ -161,7 +161,7 @@ export default function CoursesScreen() {
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: colors.background,
+    backgroundColor: 'transparent',
   },
   scroll: {
     paddingHorizontal: spacing.xl,

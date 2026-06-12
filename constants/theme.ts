@@ -1,49 +1,58 @@
 /**
  * Youmi Lens for iPad — design tokens.
  *
- * Brand language: deep navy, pearl/ice whites, frosted glass cards,
- * rounded corners, soft shadows, thin borders, calm and professional.
- * No purple, no bright gradients.
+ * Brand language: ink navy, deep-blue actions, translucent glass cards,
+ * rounded corners, soft shadows, and a cool atmospheric background.
  */
 
 export const colors = {
   // ---- Brand palette ----
-  deepNavy: '#061B34',
-  secondaryNavy: '#0A2342',
-  softIceWhite: '#F6F9FC',
+  ink: '#1A2642',
+  navy: '#2B3A5C',
+  accent: '#1D3E8A',
+  accentBright: '#2B52C8',
+  accentGlow: 'rgba(29, 62, 138, 0.24)',
+  deepNavy: '#1D3E8A',
+  secondaryNavy: '#2B3A5C',
+  softIceWhite: '#F6F8FF',
   pearlWhite: '#FFFFFF',
-  iceBlue: '#DCEAF7',
-  mutedBlueGray: '#7A8CA3',
-  recordingRed: '#EF4444',
+  iceBlue: '#C8D7F5',
+  mutedBlueGray: '#8E9BBE',
+  recordingRed: '#E8414A',
 
   // ---- Semantic (light surfaces) ----
-  background: '#F6F9FC',
+  background: '#EEF2FC',
+  backgroundMid: '#F6F8FF',
+  backgroundCool: '#E8F0FA',
+  backgroundLavender: '#F0EEF8',
   surface: '#FFFFFF',
-  surfaceMuted: '#EEF3F9',
-  glass: 'rgba(255, 255, 255, 0.74)',
-  glassEdge: 'rgba(255, 255, 255, 0.9)',
+  surfaceMuted: 'rgba(29, 62, 138, 0.06)',
+  glass: 'rgba(255, 255, 255, 0.72)',
+  glassElevated: 'rgba(255, 255, 255, 0.88)',
+  glassEdge: 'rgba(200, 215, 245, 0.55)',
+  glassHighlight: 'rgba(255, 255, 255, 0.90)',
 
-  textPrimary: '#061B34',
-  textSecondary: '#5C6E85',
-  textTertiary: '#7A8CA3',
+  textPrimary: '#1A2642',
+  textSecondary: '#4A5878',
+  textTertiary: '#8E9BBE',
 
-  border: '#E4ECF5',
-  borderStrong: '#D4E1EF',
+  border: 'rgba(200, 215, 245, 0.55)',
+  borderStrong: 'rgba(29, 62, 138, 0.18)',
 
   // ---- Semantic (navy surfaces) ----
-  navySurface: '#0A2342',
-  navyElevated: '#103056',
+  navySurface: '#2B3A5C',
+  navyElevated: '#35466C',
   navyBorder: 'rgba(220, 234, 247, 0.14)',
   textOnNavy: '#FFFFFF',
   textOnNavyMuted: '#A9BBD0',
 
   // ---- States ----
-  success: '#1FA97A',
-  successTint: '#E4F4EE',
-  recordingTint: '#FDECEC',
-  iceTint: '#EAF2FB',
+  success: '#1EA86A',
+  successTint: 'rgba(30, 168, 106, 0.12)',
+  recordingTint: 'rgba(232, 65, 74, 0.10)',
+  iceTint: 'rgba(29, 62, 138, 0.10)',
   /** Faint navy used for the Y watermark on the hero card. */
-  watermark: 'rgba(6, 27, 52, 0.05)',
+  watermark: 'rgba(29, 62, 138, 0.05)',
   /** Paper colour + ruling for the mini-caption note background. */
   paper: '#FCFDFE',
   noteLine: '#E7EDF4',
@@ -62,22 +71,22 @@ export const spacing = {
 
 export const radius = {
   sm: 8,
-  md: 12,
+  md: 13,
   lg: 16,
-  xl: 22,
+  xl: 20,
   xxl: 28,
   pill: 999,
 } as const;
 
 export const fontSize = {
-  xs: 12,
+  xs: 11,
   sm: 13,
   md: 15,
-  lg: 17,
+  lg: 16,
   xl: 20,
-  xxl: 26,
-  hero: 29,
-  display: 34,
+  xxl: 22,
+  hero: 27,
+  display: 27,
   caption: 23,
   timer: 58,
 } as const;
@@ -85,10 +94,10 @@ export const fontSize = {
 export const shadows = {
   /** Standard card lift */
   card: {
-    shadowColor: '#0A2342',
-    shadowOffset: { width: 0, height: 10 },
+    shadowColor: '#1E3264',
+    shadowOffset: { width: 0, height: 6 },
     shadowOpacity: 0.08,
-    shadowRadius: 24,
+    shadowRadius: 16,
     elevation: 4,
   },
   /** Subtle lift for rows / small surfaces */
@@ -101,9 +110,9 @@ export const shadows = {
   },
   /** Primary button lift */
   button: {
-    shadowColor: '#061B34',
+    shadowColor: '#1D3E8A',
     shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.22,
+    shadowOpacity: 0.24,
     shadowRadius: 16,
     elevation: 6,
   },
@@ -122,6 +131,7 @@ export const layout = {
   content: 760,
   /** Slightly wider for grid-ish screens. */
   wide: 1040,
+  sidebar: 232,
 } as const;
 
 export const theme = { colors, spacing, radius, fontSize, shadows, layout };

@@ -1,5 +1,6 @@
 import { ReactNode } from 'react';
 import { StyleSheet, Text, View, ViewStyle } from 'react-native';
+import Svg, { Path } from 'react-native-svg';
 
 import { colors, fontSize, spacing } from '@/constants/theme';
 
@@ -10,34 +11,30 @@ type LogoMarkProps = {
 };
 
 /**
- * The Youmi Lens mark — a rounded navy tile with the stylised "Y" lens glyph.
+ * The Youmi Lens vector mark.
  * Used inside BrandHeader and anywhere the standalone mark is needed.
  */
 export function LogoMark({ size = 44, onNavy = false }: LogoMarkProps) {
+  const color = onNavy ? colors.pearlWhite : colors.navy;
   return (
-    <View
-      style={[
-        styles.mark,
-        {
-          width: size,
-          height: size,
-          borderRadius: size * 0.3,
-          backgroundColor: onNavy ? colors.pearlWhite : colors.deepNavy,
-        },
-      ]}
-    >
-      <Text
-        style={[
-          styles.markGlyph,
-          {
-            fontSize: size * 0.56,
-            color: onNavy ? colors.deepNavy : colors.pearlWhite,
-          },
-        ]}
-      >
-        Y
-      </Text>
-    </View>
+    <Svg width={size} height={size} viewBox="0 0 28 28">
+      <Path
+        d="M5.2 4.8 14 14l8.8-9.2M14 14v9.2"
+        fill="none"
+        stroke={color}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth={3.2}
+      />
+      <Path
+        d="M20.4 17.5a5.2 5.2 0 1 1-2.5-4.45"
+        fill="none"
+        stroke={color}
+        strokeLinecap="round"
+        strokeWidth={2.2}
+        opacity={0.55}
+      />
+    </Svg>
   );
 }
 
@@ -73,13 +70,8 @@ export function BrandHeader({
       <View style={styles.lockup}>
         <LogoMark size={markSize} onNavy={onNavy} />
         <View style={styles.text}>
-          <Text
-            style={[
-              styles.wordmark,
-              { fontSize: compact ? fontSize.lg : fontSize.xl, color: wordColor },
-            ]}
-          >
-            Youmi Lens
+          <Text style={[styles.wordmark, { fontSize: compact ? fontSize.lg : fontSize.xl, color: wordColor }]}>
+            Youmi <Text style={styles.wordmarkLight}>Lens</Text>
           </Text>
           {subtitle ? (
             <Text style={[styles.subtitle, { color: subColor }]}>{subtitle}</Text>
@@ -102,22 +94,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.md,
   },
-  mark: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  markGlyph: {
-    fontWeight: '800',
-    letterSpacing: 0.5,
-    includeFontPadding: false,
-    marginTop: -2,
-  },
   text: {
     justifyContent: 'center',
   },
   wordmark: {
-    fontWeight: '700',
+    fontWeight: '800',
     letterSpacing: 0.2,
+  },
+  wordmarkLight: {
+    fontWeight: '500',
+    color: colors.textSecondary,
   },
   subtitle: {
     fontSize: fontSize.xs,

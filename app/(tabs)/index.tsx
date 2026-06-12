@@ -13,7 +13,6 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { BrandHeader } from '@/components/BrandHeader';
 import { GlassCard } from '@/components/GlassCard';
 import { LectureListItem } from '@/components/LectureListItem';
 import { PrimaryButton } from '@/components/PrimaryButton';
@@ -177,20 +176,6 @@ export default function RecordHomeScreen() {
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.content}>
-          <BrandHeader
-            subtitle="for iPad"
-            right={
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Account"
-                onPress={() => router.push('/settings')}
-                style={({ pressed }) => [styles.accountBtn, pressed && styles.pressedSoft]}
-              >
-                <Ionicons name="person-outline" size={22} color={colors.deepNavy} />
-              </Pressable>
-            }
-          />
-
           {!loaded ? (
             <View style={styles.loading}>
               <ActivityIndicator color={colors.deepNavy} />
@@ -395,7 +380,7 @@ export default function RecordHomeScreen() {
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: colors.background,
+    backgroundColor: 'transparent',
   },
   scroll: {
     paddingHorizontal: spacing.xl,
@@ -407,16 +392,6 @@ const styles = StyleSheet.create({
     maxWidth: layout.content,
     alignSelf: 'center',
     gap: spacing.xl,
-  },
-  accountBtn: {
-    width: 46,
-    height: 46,
-    borderRadius: radius.pill,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   pressedSoft: {
     opacity: 0.85,

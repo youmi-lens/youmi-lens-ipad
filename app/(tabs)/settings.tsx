@@ -545,7 +545,7 @@ export default function SettingsScreen() {
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: colors.background,
+    backgroundColor: 'transparent',
   },
   scroll: {
     paddingHorizontal: spacing.xl,
