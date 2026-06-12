@@ -105,17 +105,24 @@ export function useLectureRecorder(): LectureRecorder {
         setPermissionStatus('granted');
       }
       setPermissionChecked(true);
+      if (__DEV__) console.info('[recorder] microphone permission checked', { granted });
       if (!granted) return false;
 
       await setAudioModeAsync({ playsInSilentMode: true, allowsRecording: true });
       await recorder.prepareToRecordAsync();
       recorder.record();
+      if (__DEV__) console.info('[recorder] local recording started');
 
       activeRef.current = true;
       setIsPaused(false);
       setRecordingUri(null);
       return true;
-    } catch {
+    } catch (startError) {
+      if (__DEV__) {
+        console.warn('[recorder] local recording start failed', {
+          message: startError instanceof Error ? startError.message : 'unknown',
+        });
+      }
       setError('Could not start the recording. Please try again.');
       return false;
     }
@@ -147,11 +154,17 @@ export function useLectureRecorder(): LectureRecorder {
 
       const uri = recorder.uri ?? null;
       setRecordingUri(uri);
+      if (__DEV__) console.info('[recorder] local recording stopped', { hasUri: Boolean(uri) });
 
       // Reset the audio session so the device returns to normal playback.
       await setAudioModeAsync({ allowsRecording: false }).catch(() => {});
       return uri;
-    } catch {
+    } catch (stopError) {
+      if (__DEV__) {
+        console.warn('[recorder] local recording stop failed', {
+          message: stopError instanceof Error ? stopError.message : 'unknown',
+        });
+      }
       setError('Could not finish the recording.');
       return null;
     }

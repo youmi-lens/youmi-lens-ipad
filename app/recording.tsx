@@ -97,6 +97,7 @@ export default function RecordingScreen() {
   const toast = useRef(new Animated.Value(0)).current;
   const autoStarted = useRef(false);
   const isRecordingRef = useRef(false);
+  const firstPcmFrameLoggedRef = useRef(false);
   const recoverCaptionsRef = useRef<() => void>(() => {});
   const finishedRef = useRef(false);
   const guestAutoStopped = useRef(false);
@@ -119,15 +120,29 @@ export default function RecordingScreen() {
   // mic stream configures the iOS audio session and attaches its tap last.
   // The no-PCM watchdog and single defensive retry live inside liveMicStream.
   const startCaptionPipeline = async () => {
+    if (__DEV__) {
+      console.info('[recording] live caption pipeline requested', {
+        courseSelected: Boolean(course),
+        localRecordingActive: isRecordingRef.current,
+      });
+    }
     resetCaptions();
     setMicStreamError(null);
+    firstPcmFrameLoggedRef.current = false;
     await startLiveCaptions(48_000);
     const micStatus = await startMicStream({
       sampleRate: 48_000,
       onPcm16Frame: (frame) => {
+        if (__DEV__ && !firstPcmFrameLoggedRef.current) {
+          firstPcmFrameLoggedRef.current = true;
+          console.info('[recording] first live PCM frame produced', {
+            byteLength: frame.byteLength,
+          });
+        }
         sendAudioChunk(frame);
       },
       onUnavailable: () => {
+        stopLiveCaptions();
         setMicStreamError(LIVE_CAPTIONS_UNAVAILABLE_MESSAGE);
         const mic = getLiveMicStreamStatus();
         logLiveCaptionUnavailable('no_pcm_callbacks', {
@@ -139,11 +154,19 @@ export default function RecordingScreen() {
       },
     });
     if (micStatus.error) {
+      stopLiveCaptions();
       // The "needs a development build" note is fine to show as-is; any other
       // startup failure is collapsed to the calm user-facing line.
       setMicStreamError(
         micStatus.isSupported ? LIVE_CAPTIONS_UNAVAILABLE_MESSAGE : micStatus.error,
       );
+      if (__DEV__) {
+        console.warn('[recording] live microphone unavailable', {
+          supported: micStatus.isSupported,
+          event: micStatus.lastEvent ?? null,
+          permission: micStatus.permission ?? null,
+        });
+      }
     }
   };
 
@@ -182,6 +205,7 @@ export default function RecordingScreen() {
     if (autoStarted.current || !granted) return;
     autoStarted.current = true;
     void startRecording().then((started) => {
+      if (__DEV__) console.info('[recording] automatic local recording result', { started });
       // Guests record locally only — no live caption WebSocket / backend calls.
       if (started && !isGuest) void startCaptionPipeline();
     });
@@ -214,6 +238,7 @@ export default function RecordingScreen() {
   const handleAllow = async () => {
     autoStarted.current = true;
     const started = await startRecording();
+    if (__DEV__) console.info('[recording] permission CTA recording result', { started });
     if (started && !isGuest) await startCaptionPipeline();
   };
 
@@ -240,12 +265,25 @@ export default function RecordingScreen() {
 
   const finish = async () => {
     if (finishing) return;
+    if (__DEV__) {
+      console.info('[recording] finish pressed', {
+        durationMillis,
+        hasCourse: Boolean(course),
+        hasLectureTitle: Boolean((params.lectureTitle ?? '').trim()),
+      });
+    }
     setFinishing(true);
     finishedRef.current = true;
     const finalDuration = durationMillis;
     stopMicStream();
     stopLiveCaptions();
     const uri = await stopRecording();
+    if (__DEV__) {
+      console.info('[recording] local recording stopped', {
+        hasUri: Boolean(uri),
+        durationMillis: finalDuration,
+      });
+    }
 
     // Finish only saves when real audio was captured. If the recorder never
     // engaged (e.g. a permission/hardware edge), do NOT save an empty lecture
@@ -505,7 +543,17 @@ export default function RecordingScreen() {
                   </View>
                 </View>
 
-                {liveCaptionStatus === 'active' || liveCaptionStatus === 'listening' || visibleEnglishCaption ? (
+                {micStreamError ? (
+                  <View style={styles.captionFallback}>
+                    <Text style={styles.stateBody}>{micStreamError}</Text>
+                    <SecondaryButton
+                      label="Retry captions"
+                      icon="refresh-outline"
+                      onPress={() => void startCaptionPipeline()}
+                      style={styles.retryCaptionsButton}
+                    />
+                  </View>
+                ) : liveCaptionStatus === 'active' || liveCaptionStatus === 'listening' || visibleEnglishCaption ? (
                   <View style={styles.captionBody}>
                     {/* English — primary live caption: large, bold */}
                     <View style={styles.captionSection}>

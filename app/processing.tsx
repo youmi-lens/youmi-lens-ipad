@@ -87,6 +87,12 @@ export default function ProcessingScreen() {
     }
 
     updateLecture(lecture.id, { uploadStatus: 'uploading', uploadError: undefined });
+    if (__DEV__) {
+      console.info('[processing] audio upload started', {
+        hasLocalAudio: Boolean(lecture.localAudioUri),
+        durationMillis: lecture.durationMillis,
+      });
+    }
     void uploadLectureAudio({
       localUri: lecture.localAudioUri,
       lectureId: lecture.id,
@@ -99,6 +105,12 @@ export default function ProcessingScreen() {
       liveTranscript: lecture.liveTranscript,
     })
       .then((result) => {
+        if (__DEV__) {
+          console.info('[processing] audio upload completed', {
+            size: result.size,
+            mime: result.mime,
+          });
+        }
         updateLecture(lecture.id, {
           uploadStatus: 'uploaded',
           storagePath: result.storagePath,
@@ -107,6 +119,11 @@ export default function ProcessingScreen() {
         });
       })
       .catch((error: unknown) => {
+        if (__DEV__) {
+          console.warn('[processing] audio upload failed', {
+            message: error instanceof Error ? error.message : 'unknown',
+          });
+        }
         updateLecture(lecture.id, {
           uploadStatus: 'upload_failed',
           uploadError: error instanceof Error ? error.message : 'Upload failed.',
@@ -123,10 +140,16 @@ export default function ProcessingScreen() {
     startedProcessingFor.current = attemptKey;
 
     updateLecture(lecture.id, { processingStatus: 'processing', processingError: undefined });
+    if (__DEV__) console.info('[processing] backend processing requested');
     void startRemoteProcessing({
       remoteRecordingId: lecture.remoteRecordingId,
       accessToken: session.access_token,
     }).catch((error: unknown) => {
+      if (__DEV__) {
+        console.warn('[processing] backend processing request failed', {
+          message: error instanceof Error ? error.message : 'unknown',
+        });
+      }
       updateLecture(lecture.id, {
         processingStatus: 'failed',
         processingError: error instanceof Error ? error.message : 'Could not start processing.',
