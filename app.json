@@ -72,6 +72,7 @@
       "@config-plugins/react-native-pdf",
       "expo-iap",
       "expo-apple-authentication",
+      "./plugins/with-google-modular-headers",
       [
         "@react-native-google-signin/google-signin",
         {
