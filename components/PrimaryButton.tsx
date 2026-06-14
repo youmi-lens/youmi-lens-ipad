@@ -73,20 +73,20 @@ export function PrimaryButton({
 
 const styles = StyleSheet.create({
   base: {
-    backgroundColor: colors.deepNavy,
+    backgroundColor: colors.navy,
     borderRadius: radius.lg,
     alignItems: 'center',
     justifyContent: 'center',
     ...shadows.button,
   },
   medium: {
-    minHeight: 54,
+    minHeight: 48,
     paddingHorizontal: spacing.xl,
   },
   large: {
-    minHeight: 68,
+    minHeight: 52,
     paddingHorizontal: spacing.xl,
-    borderRadius: radius.xl,
+    borderRadius: 14,
   },
   content: {
     flexDirection: 'row',
@@ -96,11 +96,11 @@ const styles = StyleSheet.create({
   label: {
     color: colors.textOnNavy,
     fontSize: fontSize.lg,
-    fontWeight: '600',
+    fontWeight: '700',
     letterSpacing: 0.2,
   },
   labelLarge: {
-    fontSize: fontSize.xl,
+    fontSize: 15.5,
     fontWeight: '700',
   },
   pressed: {

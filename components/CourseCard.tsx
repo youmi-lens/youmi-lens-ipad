@@ -1,120 +1,61 @@
 import { Ionicons } from '@expo/vector-icons';
 import { ComponentProps } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
-import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
+import { GlassCard } from '@/components/GlassCard';
+import { IconTile } from '@/components/WorkspaceUI';
+import { colors, fontSize, spacing } from '@/constants/theme';
 import type { Course } from '@/lib/models';
 
-type IoniconName = ComponentProps<typeof Ionicons>['name'];
+type IconName = ComponentProps<typeof Ionicons>['name'];
 
-type CourseCardProps = {
+export function CourseCard({
+  course,
+  lectureCount,
+  lastActivity,
+  readyCount = 0,
+  durationLabel,
+  onPress,
+}: {
   course: Course;
-  /** Number of local lectures recorded for this course. */
   lectureCount: number;
-  /** Optional "last activity" label, e.g. the most recent lecture date. */
   lastActivity?: string;
+  readyCount?: number;
+  durationLabel?: string;
   onPress?: () => void;
-};
-
-/**
- * A course tile: a soft course-coloured icon tile, the course name, and a
- * meta line driven by the user's real local lectures.
- */
-export function CourseCard({ course, lectureCount, lastActivity, onPress }: CourseCardProps) {
+}) {
   return (
-    <Pressable
-      accessibilityRole="button"
-      onPress={onPress}
-      style={({ pressed }) => [styles.card, pressed && styles.pressed]}
-    >
-      <View style={[styles.stripe, { backgroundColor: course.accent }]} />
-
+    <GlassCard elevated padding={0} onPress={onPress} style={styles.card}>
       <View style={styles.body}>
-        <View style={[styles.tile, { backgroundColor: course.tint }]}>
-          <Ionicons name={course.icon as IoniconName} size={24} color={course.accent} />
+        <View style={styles.top}>
+          <IconTile icon={course.icon as IconName} color={colors.textSecondary} backgroundColor={colors.surfaceMuted} size={44} />
+          <Ionicons name="chevron-forward" size={19} color={colors.textTertiary} />
         </View>
-
-        <View style={styles.text}>
-          <Text style={styles.name} numberOfLines={1}>
-            {course.name}
-          </Text>
-          <View style={styles.metaRow}>
-            <Ionicons name="albums-outline" size={13} color={colors.textTertiary} />
-            <Text style={styles.meta}>
-              {lectureCount} {lectureCount === 1 ? 'lecture' : 'lectures'}
-            </Text>
-            {lastActivity ? (
-              <>
-                <View style={styles.metaDot} />
-                <Text style={styles.meta}>{lastActivity}</Text>
-              </>
-            ) : null}
-          </View>
+        <Text numberOfLines={2} style={styles.name}>{course.name}</Text>
+        <Text style={styles.stats}>
+          {lectureCount} {lectureCount === 1 ? 'lecture' : 'lectures'}
+          {durationLabel ? ` · ${durationLabel}` : ''}
+        </Text>
+        <View style={styles.divider} />
+        <View style={styles.footer}>
+          <Text style={styles.last}>{lastActivity ?? 'No lectures yet'}</Text>
+          <Text style={styles.ready}>{readyCount} {readyCount === 1 ? 'summary' : 'summaries'} ready</Text>
         </View>
-
-        <Ionicons name="chevron-forward" size={18} color={colors.textTertiary} />
       </View>
-    </Pressable>
+    </GlassCard>
   );
 }
 
 const styles = StyleSheet.create({
-  card: {
-    flexDirection: 'row',
-    backgroundColor: colors.surface,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: colors.border,
-    overflow: 'hidden',
-    ...shadows.soft,
-  },
-  pressed: {
-    opacity: 0.94,
-    transform: [{ scale: 0.99 }],
-  },
-  stripe: {
-    width: 4,
-  },
-  body: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.lg,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.lg,
-  },
-  tile: {
-    width: 52,
-    height: 52,
-    borderRadius: radius.md,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  text: {
-    flex: 1,
-    gap: 5,
-  },
-  name: {
-    fontSize: fontSize.lg,
-    fontWeight: '700',
-    color: colors.textPrimary,
-  },
-  metaRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs + 2,
-  },
-  meta: {
-    fontSize: fontSize.sm,
-    color: colors.textTertiary,
-    fontWeight: '500',
-  },
-  metaDot: {
-    width: 3,
-    height: 3,
-    borderRadius: 2,
-    backgroundColor: colors.textTertiary,
-  },
+  card: { minHeight: 210 },
+  body: { flex: 1, padding: 20 },
+  top: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  name: { marginTop: spacing.lg, color: colors.ink, fontSize: fontSize.lg, lineHeight: 21, fontWeight: '800' },
+  stats: { marginTop: 5, color: colors.textSecondary, fontSize: 12.5 },
+  divider: { height: StyleSheet.hairlineWidth, backgroundColor: colors.border, marginTop: 'auto', marginBottom: spacing.md },
+  footer: { flexDirection: 'row', justifyContent: 'space-between', gap: spacing.sm },
+  last: { flex: 1, color: colors.textTertiary, fontSize: 11.5 },
+  ready: { color: colors.accentBright, fontSize: 11.5, fontWeight: '700' },
 });
 
 export default CourseCard;

@@ -1,6 +1,5 @@
 import { ReactNode } from 'react';
 import { Pressable, StyleSheet, View, ViewStyle } from 'react-native';
-import { BlurView } from 'expo-blur';
 
 import { colors, radius, shadows, spacing } from '@/constants/theme';
 
@@ -18,9 +17,8 @@ type GlassCardProps = {
 };
 
 /**
- * Frosted-glass card: translucent surface, thin border, soft shadow and
- * rounded corners. A real blur can later be layered in with `expo-blur`;
- * this skeleton uses a translucent fill to keep dependencies minimal.
+ * Frosted-glass card built from portable React Native surfaces so it works in
+ * Expo Go and simulator builds without a native blur view implementation.
  */
 export function GlassCard({
   children,
@@ -38,13 +36,7 @@ export function GlassCard({
         : colors.glass,
     borderColor: navy ? colors.navyBorder : colors.glassEdge,
   };
-  const content = navy ? (
-    <View style={[styles.inner, { padding }]}>{children}</View>
-  ) : (
-    <BlurView intensity={28} tint="light" style={[styles.inner, { padding }]}>
-      {children}
-    </BlurView>
-  );
+  const content = <View style={[styles.inner, { padding }]}>{children}</View>;
 
   if (onPress) {
     return (

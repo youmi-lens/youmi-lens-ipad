@@ -7,55 +7,58 @@
 
 export const colors = {
   // ---- Brand palette ----
-  ink: '#1A2642',
-  navy: '#2B3A5C',
-  accent: '#1D3E8A',
-  accentBright: '#2B52C8',
-  accentGlow: 'rgba(29, 62, 138, 0.24)',
-  deepNavy: '#1D3E8A',
-  secondaryNavy: '#2B3A5C',
-  softIceWhite: '#F6F8FF',
+  ink: '#0F172A',
+  navy: '#0B1F3A',
+  accent: '#102A43',
+  accentBright: '#0B1F3A',
+  accentPressed: '#071629',
+  accentGlow: 'rgba(11, 31, 58, 0.16)',
+  deepNavy: '#071629',
+  secondaryNavy: '#102A43',
+  softIceWhite: '#F8FAFC',
   pearlWhite: '#FFFFFF',
-  iceBlue: '#C8D7F5',
-  mutedBlueGray: '#8E9BBE',
-  recordingRed: '#E8414A',
+  iceBlue: '#E5E7EB',
+  mutedBlueGray: '#64748B',
+  recordingRed: '#C2414B',
 
   // ---- Semantic (light surfaces) ----
-  background: '#EEF2FC',
-  backgroundMid: '#F6F8FF',
-  backgroundCool: '#E8F0FA',
-  backgroundLavender: '#F0EEF8',
+  background: '#F8FAFC',
+  backgroundMid: '#F5F7FB',
+  backgroundCool: '#FFFFFF',
+  backgroundLavender: '#F7F7F9',
   surface: '#FFFFFF',
-  surfaceMuted: 'rgba(29, 62, 138, 0.06)',
-  glass: 'rgba(255, 255, 255, 0.72)',
-  glassElevated: 'rgba(255, 255, 255, 0.88)',
-  glassEdge: 'rgba(200, 215, 245, 0.55)',
-  glassHighlight: 'rgba(255, 255, 255, 0.90)',
+  surfaceMuted: 'rgba(15, 23, 42, 0.045)',
+  glass: 'rgba(255, 255, 255, 0.82)',
+  glassElevated: 'rgba(255, 255, 255, 0.92)',
+  glassEdge: 'rgba(15, 23, 42, 0.08)',
+  glassHighlight: 'rgba(255, 255, 255, 0.96)',
 
-  textPrimary: '#1A2642',
-  textSecondary: '#4A5878',
-  textTertiary: '#8E9BBE',
+  textPrimary: '#0F172A',
+  textSecondary: '#475569',
+  textTertiary: '#64748B',
 
-  border: 'rgba(200, 215, 245, 0.55)',
-  borderStrong: 'rgba(29, 62, 138, 0.18)',
+  border: 'rgba(15, 23, 42, 0.08)',
+  borderStrong: 'rgba(15, 23, 42, 0.14)',
 
   // ---- Semantic (navy surfaces) ----
-  navySurface: '#2B3A5C',
-  navyElevated: '#35466C',
-  navyBorder: 'rgba(220, 234, 247, 0.14)',
-  textOnNavy: '#FFFFFF',
-  textOnNavyMuted: '#A9BBD0',
+  navySurface: '#0B1F3A',
+  navyElevated: '#102A43',
+  navyBorder: 'rgba(148, 163, 184, 0.18)',
+  textOnNavy: '#F8FAFC',
+  textOnNavyMuted: '#CBD5E1',
 
   // ---- States ----
-  success: '#1EA86A',
-  successTint: 'rgba(30, 168, 106, 0.12)',
-  recordingTint: 'rgba(232, 65, 74, 0.10)',
-  iceTint: 'rgba(29, 62, 138, 0.10)',
+  success: '#047857',
+  successTint: 'rgba(4, 120, 87, 0.16)',
+  warning: '#B7791F',
+  warningTint: 'rgba(183, 121, 31, 0.16)',
+  recordingTint: 'rgba(15, 23, 42, 0.055)',
+  iceTint: 'rgba(15, 23, 42, 0.055)',
   /** Faint navy used for the Y watermark on the hero card. */
-  watermark: 'rgba(29, 62, 138, 0.05)',
+  watermark: 'rgba(11, 31, 58, 0.04)',
   /** Paper colour + ruling for the mini-caption note background. */
-  paper: '#FCFDFE',
-  noteLine: '#E7EDF4',
+  paper: '#FFFFFF',
+  noteLine: '#E5E7EB',
   noteMargin: 'rgba(196, 132, 132, 0.35)',
 } as const;
 
@@ -94,7 +97,7 @@ export const fontSize = {
 export const shadows = {
   /** Standard card lift */
   card: {
-    shadowColor: '#1E3264',
+    shadowColor: '#000000',
     shadowOffset: { width: 0, height: 6 },
     shadowOpacity: 0.08,
     shadowRadius: 16,
@@ -102,7 +105,7 @@ export const shadows = {
   },
   /** Subtle lift for rows / small surfaces */
   soft: {
-    shadowColor: '#0A2342',
+    shadowColor: '#000000',
     shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.05,
     shadowRadius: 10,
@@ -110,7 +113,7 @@ export const shadows = {
   },
   /** Primary button lift */
   button: {
-    shadowColor: '#1D3E8A',
+    shadowColor: '#1E3A8A',
     shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.24,
     shadowRadius: 16,
@@ -118,7 +121,7 @@ export const shadows = {
   },
   /** Floating mini-caption panel */
   float: {
-    shadowColor: '#061B34',
+    shadowColor: '#000000',
     shadowOffset: { width: 0, height: 18 },
     shadowOpacity: 0.32,
     shadowRadius: 38,
@@ -132,6 +135,7 @@ export const layout = {
   /** Slightly wider for grid-ish screens. */
   wide: 1040,
   sidebar: 232,
+  workspacePadding: 38,
 } as const;
 
 export const theme = { colors, spacing, radius, fontSize, shadows, layout };

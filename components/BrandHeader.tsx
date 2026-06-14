@@ -1,40 +1,24 @@
 import { ReactNode } from 'react';
-import { StyleSheet, Text, View, ViewStyle } from 'react-native';
-import Svg, { Path } from 'react-native-svg';
+import { Image, StyleSheet, Text, View, ViewStyle } from 'react-native';
 
 import { colors, fontSize, spacing } from '@/constants/theme';
 
 type LogoMarkProps = {
   size?: number;
-  /** Render light-on-navy instead of navy-on-light. */
+  /** Retained for call-site compatibility; the official asset is never recolored. */
   onNavy?: boolean;
 };
 
-/**
- * The Youmi Lens vector mark.
- * Used inside BrandHeader and anywhere the standalone mark is needed.
- */
-export function LogoMark({ size = 44, onNavy = false }: LogoMarkProps) {
-  const color = onNavy ? colors.pearlWhite : colors.navy;
+/** Official Youmi Lens mark, rendered without recoloring or cropping. */
+export function LogoMark({ size = 44 }: LogoMarkProps) {
   return (
-    <Svg width={size} height={size} viewBox="0 0 28 28">
-      <Path
-        d="M5.2 4.8 14 14l8.8-9.2M14 14v9.2"
-        fill="none"
-        stroke={color}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth={3.2}
-      />
-      <Path
-        d="M20.4 17.5a5.2 5.2 0 1 1-2.5-4.45"
-        fill="none"
-        stroke={color}
-        strokeLinecap="round"
-        strokeWidth={2.2}
-        opacity={0.55}
-      />
-    </Svg>
+    <Image
+      accessibilityIgnoresInvertColors
+      accessibilityLabel="Youmi Lens"
+      resizeMode="contain"
+      source={require('../assets/images/youmi-lens-mark-navy.png')}
+      style={{ width: size * 0.8, height: size }}
+    />
   );
 }
 

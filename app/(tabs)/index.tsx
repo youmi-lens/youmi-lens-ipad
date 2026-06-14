@@ -14,49 +14,20 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { GlassCard } from '@/components/GlassCard';
-import { LectureListItem } from '@/components/LectureListItem';
+import { LogoMark } from '@/components/BrandHeader';
 import { PrimaryButton } from '@/components/PrimaryButton';
 import { SecondaryButton } from '@/components/SecondaryButton';
-import { colors, fontSize, layout, radius, shadows, spacing } from '@/constants/theme';
+import { IconTile, PageHeading, Pill, ProgressBar, SectionLabel } from '@/components/WorkspaceUI';
+import { colors, layout } from '@/constants/theme';
 import { user } from '@/data/mockData';
 import { useAuth } from '@/lib/auth';
-import { greetingForNow } from '@/lib/format';
+import { formatDuration, formatShortDate, greetingForNow } from '@/lib/format';
 import { useGuestRecordingUsage } from '@/lib/guest';
 import { COURSE_PRESETS } from '@/lib/models';
-import { fetchPlanStatus, PlanStatus, safeAccessLabel } from '@/lib/planStatus';
+import { fetchPlanStatus, PlanStatus } from '@/lib/planStatus';
 import { useData } from '@/lib/store';
 
-type IoniconName = ComponentProps<typeof Ionicons>['name'];
-
-const VALUE_POINTS: { icon: IoniconName; label: string }[] = [
-  { icon: 'mic-outline', label: 'Live captions' },
-  { icon: 'language-outline', label: 'Bilingual summary' },
-  { icon: 'document-text-outline', label: 'Smart notes' },
-];
-
-/** Account card text, derived from the live /api/quota/status response. */
-function accountCardDisplay(
-  planStatus: PlanStatus | null,
-  planLoading: boolean,
-): { rightValue: string; subtitle: string } {
-  if (planStatus) {
-    if (planStatus.status === 'suspended') {
-      return { rightValue: 'On hold', subtitle: 'Contact support to continue.' };
-    }
-    const label = safeAccessLabel(planStatus.planType, planStatus.displayName);
-    if (planStatus.unlimited) {
-      return { rightValue: label, subtitle: 'Account active' };
-    }
-    const used = planStatus.recordingsUsedToday ?? 0;
-    return {
-      rightValue: label,
-      subtitle: `Recordings today: ${used}`,
-    };
-  }
-  return planLoading
-    ? { rightValue: '—', subtitle: 'Loading account…' }
-    : { rightValue: '—', subtitle: 'Account status unavailable' };
-}
+type IconName = ComponentProps<typeof Ionicons>['name'];
 
 export default function RecordHomeScreen() {
   const router = useRouter();
@@ -69,12 +40,9 @@ export default function RecordHomeScreen() {
     getCourse,
     createCourse,
   } = useData();
-
-  const [lectureTitle, setLectureTitle] = useState('');
-
-  // Live plan/quota — same backend source as the Settings Plan section.
   const { session, isGuest, exitGuest } = useAuth();
   const { remaining: guestRemaining } = useGuestRecordingUsage();
+  const [lectureTitle, setLectureTitle] = useState('');
   const [planStatus, setPlanStatus] = useState<PlanStatus | null>(null);
   const [planLoading, setPlanLoading] = useState(true);
 
@@ -89,52 +57,31 @@ export default function RecordHomeScreen() {
     try {
       setPlanStatus(await fetchPlanStatus(token));
     } catch {
-      // Keep any previously loaded plan; a first-load failure shows
-      // "Plan unavailable" (planStatus null, not loading).
+      // Preserve the last backend-provided status when a refresh fails.
     } finally {
       setPlanLoading(false);
     }
   }, [session?.access_token]);
 
-  // Refetch when the Record tab regains focus — the plan may change in the DB.
-  useFocusEffect(
-    useCallback(() => {
-      void loadPlan();
-    }, [loadPlan]),
-  );
+  useFocusEffect(useCallback(() => { void loadPlan(); }, [loadPlan]));
 
-  const accountCard = accountCardDisplay(planStatus, planLoading);
   const selectedCourse = getCourse(selectedCourseId) ?? courses[0];
-  const recentLectures = [...lectures]
-    .sort((a, b) => b.date.localeCompare(a.date))
-    .slice(0, 5);
-
-  const openCreateCourse = () => router.push('/create-course');
-
-  const goToSignIn = () => {
-    void exitGuest().then(() => router.replace('/auth'));
-  };
-
-  // Guests may record a small number of short lectures on this device. Once the
-  // local cap is reached, recording is replaced by an invitation to sign in.
+  const recentLectures = [...lectures].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 3);
+  const recordingsUsed = planStatus?.recordingsUsedToday ?? 0;
+  const recordingsLimit = planStatus?.maxRecordingsPerDay ?? 0;
+  const usageProgress = recordingsLimit > 0 ? recordingsUsed / recordingsLimit : 0;
   const guestAllowanceUsedUp = isGuest && guestRemaining <= 0;
 
+  const openCreateCourse = () => router.push('/create-course');
+  const goToSignIn = () => { void exitGuest().then(() => router.replace('/auth')); };
   const promptGuestSignIn = () => {
-    Alert.alert(
-      'Sign in to continue',
-      'Sign in to continue recording lectures. Guest recordings are stored only on this device.',
-      [
-        { text: 'Not now', style: 'cancel' },
-        { text: 'Sign In', onPress: goToSignIn },
-      ],
-    );
+    Alert.alert('Sign in to continue', 'Sign in to continue recording lectures.', [
+      { text: 'Not now', style: 'cancel' },
+      { text: 'Sign In', onPress: goToSignIn },
+    ]);
   };
-
   const startQuickRecording = () => {
-    if (guestAllowanceUsedUp) {
-      promptGuestSignIn();
-      return;
-    }
+    if (guestAllowanceUsedUp) return promptGuestSignIn();
     const preset = COURSE_PRESETS[0];
     const course = createCourse({
       name: 'General Lectures',
@@ -142,233 +89,158 @@ export default function RecordHomeScreen() {
       tint: preset.tint,
       accent: preset.accent,
     });
-    router.push({
-      pathname: '/recording',
-      params: { courseId: course.id, lectureTitle: '' },
-    });
+    router.push({ pathname: '/recording', params: { courseId: course.id, lectureTitle: '' } });
   };
-
   const startRecording = () => {
     if (!selectedCourse) return;
-    if (guestAllowanceUsedUp) {
-      promptGuestSignIn();
-      return;
-    }
+    if (guestAllowanceUsedUp) return promptGuestSignIn();
     router.push({
       pathname: '/recording',
       params: { courseId: selectedCourse.id, lectureTitle: lectureTitle.trim() },
     });
   };
-
   const cycleCourse = () => {
     if (courses.length < 2 || !selectedCourse) return;
-    const idx = courses.findIndex((c) => c.id === selectedCourse.id);
-    setSelectedCourseId(courses[(idx + 1) % courses.length].id);
+    const index = courses.findIndex((course) => course.id === selectedCourse.id);
+    setSelectedCourseId(courses[(index + 1) % courses.length].id);
   };
-
-  const openLecture = (id: string) =>
-    router.push({ pathname: '/lecture/[id]', params: { id } });
 
   return (
     <SafeAreaView style={styles.root} edges={['top', 'left', 'right']}>
-      <ScrollView
-        contentContainerStyle={styles.scroll}
-        showsVerticalScrollIndicator={false}
-      >
+      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         <View style={styles.content}>
           {!loaded ? (
-            <View style={styles.loading}>
-              <ActivityIndicator color={colors.deepNavy} />
-            </View>
+            <View style={styles.loading}><ActivityIndicator color={colors.accent} /></View>
           ) : courses.length === 0 ? (
-            /* ---- Empty state — no courses yet ---- */
-            <GlassCard style={styles.emptyCard}>
-              <View style={styles.emptyIcon}>
-                <Ionicons name="school-outline" size={34} color={colors.deepNavy} />
+            <>
+              <PageHeading eyebrow="Welcome to Youmi Lens" title="Your lectures, captured and understood" />
+              <View style={styles.emptyGrid}>
+                <GlassCard elevated style={styles.emptyHero}>
+                  <LogoMark size={36} />
+                  <Text style={styles.emptyTitle}>Create your first course</Text>
+                  <Text style={styles.emptyBody}>
+                    Courses keep every recording, transcript and summary organised. Add one, then record your first lecture.
+                  </Text>
+                  <View style={styles.emptyActions}>
+                    <PrimaryButton label="Create course" icon="add" onPress={openCreateCourse} />
+                    <SecondaryButton label="Quick recording" icon="mic-outline" onPress={startQuickRecording} />
+                  </View>
+                </GlassCard>
+                <GlassCard style={styles.stepsCard}>
+                  {[
+                    ['Record in class', 'Live English captions with instant Chinese translation while your professor speaks.'],
+                    ['Review the summary', 'AI outline, key terms and takeaways in both languages, ready after class.'],
+                    ['Keep your notes', 'Mark key moments and export everything as a PDF.'],
+                  ].map(([title, body], index) => (
+                    <View key={title} style={styles.step}>
+                      <View style={styles.stepNumber}><Text style={styles.stepNumberText}>{index + 1}</Text></View>
+                      <View style={styles.stepText}>
+                        <Text style={styles.stepTitle}>{title}</Text>
+                        <Text style={styles.stepBody}>{body}</Text>
+                      </View>
+                    </View>
+                  ))}
+                </GlassCard>
               </View>
-              <Text style={styles.emptyTitle}>Create your first course</Text>
-              <Text style={styles.emptyBody}>
-                Start by adding a course, then record your first lecture.
-              </Text>
-              <PrimaryButton
-                label="Create Course"
-                icon="add"
-                onPress={openCreateCourse}
-                style={styles.emptyPrimary}
-              />
-              <SecondaryButton
-                label="Start Quick Recording"
-                icon="mic"
-                tone="ice"
-                onPress={startQuickRecording}
-                style={styles.emptySecondary}
-              />
-            </GlassCard>
+            </>
           ) : (
             <>
-              {/* ---- Hero ---- */}
-              <View style={styles.heroOuter}>
-                <View style={styles.heroInner}>
-                  <Text style={styles.heroWatermark} allowFontScaling={false}>
-                    Y
-                  </Text>
-
-                  <Text style={styles.heroEyebrow}>
-                    {`${greetingForNow()}, ${user.firstName}`.toUpperCase()}
-                  </Text>
-                  <Text style={styles.heroTitle}>Ready for your next lecture?</Text>
-
-                  <View style={styles.valueRow}>
-                    {VALUE_POINTS.map((point) => (
-                      <View key={point.label} style={styles.valueChip}>
-                        <Ionicons name={point.icon} size={13} color={colors.mutedBlueGray} />
-                        <Text style={styles.valueChipText}>{point.label}</Text>
-                      </View>
-                    ))}
-                  </View>
-
-                  {/* Course selector + add */}
+              <PageHeading
+                eyebrow={`${greetingForNow()}, ${user.firstName}`}
+                title="Ready for your next lecture?"
+              />
+              <View style={styles.homeGrid}>
+                <GlassCard elevated style={styles.recordCard}>
+                  <SectionLabel>Record a lecture</SectionLabel>
                   <View style={styles.selectorRow}>
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel={`Course ${selectedCourse?.name}. Tap to switch.`}
-                      onPress={cycleCourse}
-                      style={({ pressed }) => [
-                        styles.courseSelector,
-                        pressed && styles.pressedSoft,
-                      ]}
-                    >
-                      <View
-                        style={[
-                          styles.courseTile,
-                          { backgroundColor: selectedCourse?.tint ?? colors.iceTint },
-                        ]}
-                      >
-                        <Ionicons
-                          name={(selectedCourse?.icon ?? 'book-outline') as IoniconName}
-                          size={22}
-                          color={selectedCourse?.accent ?? colors.deepNavy}
-                        />
+                    <Pressable onPress={cycleCourse} style={({ pressed }) => [styles.courseSelector, pressed && styles.pressed]}>
+                      <IconTile
+                        icon={(selectedCourse?.icon ?? 'people-outline') as IconName}
+                        color={colors.textSecondary}
+                        backgroundColor={colors.surfaceMuted}
+                      />
+                      <View style={styles.selectorText}>
+                        <Text style={styles.selectorLabel}>COURSE</Text>
+                        <Text style={styles.selectorValue} numberOfLines={1}>{selectedCourse?.name}</Text>
                       </View>
-                      <View style={styles.courseSelectorText}>
-                        <Text style={styles.courseSelectorLabel}>COURSE</Text>
-                        <Text style={styles.courseSelectorValue} numberOfLines={1}>
-                          {selectedCourse?.name}
-                        </Text>
-                      </View>
-                      {courses.length > 1 ? (
-                        <Ionicons name="swap-vertical" size={18} color={colors.textTertiary} />
-                      ) : null}
+                      <Ionicons name="chevron-forward" size={17} color={colors.textTertiary} />
                     </Pressable>
-
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel="New course"
-                      onPress={openCreateCourse}
-                      style={({ pressed }) => [styles.addCourseBtn, pressed && styles.pressedSoft]}
-                    >
-                      <Ionicons name="add" size={24} color={colors.deepNavy} />
+                    <Pressable onPress={openCreateCourse} style={({ pressed }) => [styles.addCourse, pressed && styles.pressed]}>
+                      <Ionicons name="add" size={22} color={colors.textTertiary} />
                     </Pressable>
                   </View>
-
-                  {/* Optional lecture title */}
                   <TextInput
-                    style={styles.titleInput}
                     value={lectureTitle}
                     onChangeText={setLectureTitle}
                     placeholder="Lecture title (optional)"
                     placeholderTextColor={colors.textTertiary}
-                    returnKeyType="done"
+                    style={styles.input}
                     maxLength={60}
                   />
+                  <PrimaryButton label="Start Recording" icon="radio-button-on" size="lg" onPress={startRecording} />
+                  <View style={styles.featureRow}>
+                    <Pill>Live captions</Pill>
+                    <Pill>文A Bilingual</Pill>
+                    <Pill>Smart notes</Pill>
+                  </View>
+                </GlassCard>
 
-                  <PrimaryButton
-                    label="Start Recording"
-                    icon="mic"
-                    size="lg"
-                    onPress={startRecording}
-                    style={styles.startButton}
-                  />
+                <View style={styles.sideStack}>
+                  <GlassCard padding={20}>
+                    <SectionLabel>Today</SectionLabel>
+                    {isGuest ? (
+                      <>
+                        <View style={styles.metricRow}>
+                          <Text style={styles.metricLabel}>Guest recordings left</Text>
+                          <Text style={styles.metricValue}>{guestRemaining}</Text>
+                        </View>
+                        <ProgressBar value={guestRemaining > 0 ? 0.35 : 1} />
+                        <Pressable onPress={goToSignIn}><Text style={styles.accountLink}>Sign in for account access</Text></Pressable>
+                      </>
+                    ) : (
+                      <>
+                        <View style={styles.metricRow}>
+                          <Text style={styles.metricLabel}>Recordings</Text>
+                          <Text style={styles.metricValue}>
+                            {planLoading ? '—' : `${recordingsUsed} / ${recordingsLimit || '—'}`}
+                          </Text>
+                        </View>
+                        <ProgressBar value={usageProgress} />
+                        <View style={styles.metricRow}>
+                          <Text style={styles.metricLabel}>Max length</Text>
+                          <Text style={styles.metricValue}>{planStatus?.maxRecordingMinutes ?? '—'} min</Text>
+                        </View>
+                      </>
+                    )}
+                  </GlassCard>
+
+                  <GlassCard padding={20} style={styles.recentCard}>
+                    <View style={styles.recentHeader}>
+                      <SectionLabel>Recent lectures</SectionLabel>
+                      <Pressable onPress={() => router.push('/courses')}><Text style={styles.viewAll}>View all</Text></Pressable>
+                    </View>
+                    {recentLectures.length ? recentLectures.map((lecture, index) => {
+                      const course = getCourse(lecture.courseId);
+                      return (
+                        <Pressable
+                          key={lecture.id}
+                          onPress={() => router.push({ pathname: '/lecture/[id]', params: { id: lecture.id } })}
+                          style={({ pressed }) => [styles.lectureRow, index < recentLectures.length - 1 && styles.lectureDivider, pressed && styles.pressed]}
+                        >
+                          <IconTile icon="document-text-outline" size={32} />
+                          <View style={styles.lectureText}>
+                            <Text numberOfLines={1} style={styles.lectureTitle}>{lecture.title}</Text>
+                            <Text numberOfLines={1} style={styles.lectureMeta}>{course?.name ?? 'Lecture'} · {formatShortDate(lecture.date)}</Text>
+                          </View>
+                          <Text style={styles.duration}>{formatDuration(lecture.durationMillis)}</Text>
+                        </Pressable>
+                      );
+                    }) : (
+                      <Text style={styles.emptyRecent}>Recorded lectures will appear here.</Text>
+                    )}
+                  </GlassCard>
                 </View>
               </View>
-
-              {/* ---- Recent Lectures ---- */}
-              <View style={styles.sectionHeader}>
-                <View style={styles.sectionTitleRow}>
-                  <Text style={styles.sectionTitle}>Recent Lectures</Text>
-                  {recentLectures.length > 0 ? (
-                    <View style={styles.countBadge}>
-                      <Text style={styles.countBadgeText}>{lectures.length}</Text>
-                    </View>
-                  ) : null}
-                </View>
-                {lectures.length > 0 ? (
-                  <Pressable
-                    accessibilityRole="button"
-                    onPress={() => router.push('/courses')}
-                    hitSlop={8}
-                  >
-                    <Text style={styles.viewAll}>View all</Text>
-                  </Pressable>
-                ) : null}
-              </View>
-
-              {recentLectures.length > 0 ? (
-                <GlassCard padding={spacing.xs}>
-                  {recentLectures.map((lecture, i) => (
-                    <LectureListItem
-                      key={lecture.id}
-                      lecture={lecture}
-                      course={getCourse(lecture.courseId)}
-                      variant="row"
-                      last={i === recentLectures.length - 1}
-                      onPress={() => openLecture(lecture.id)}
-                    />
-                  ))}
-                </GlassCard>
-              ) : (
-                <GlassCard style={styles.lecturesEmpty}>
-                  <Ionicons name="mic-outline" size={22} color={colors.mutedBlueGray} />
-                  <Text style={styles.lecturesEmptyText}>
-                    Your recorded lectures will appear here.
-                  </Text>
-                </GlassCard>
-              )}
-
-              {/* ---- Guest: on-device recording · Signed in: account status ---- */}
-              {isGuest ? (
-                <GlassCard>
-                  <View style={styles.planHeader}>
-                    <View style={styles.planLabelRow}>
-                      <Ionicons name="phone-portrait-outline" size={15} color={colors.mutedBlueGray} />
-                      <Text style={styles.cardLabel}>LOCAL RECORDING</Text>
-                    </View>
-                  </View>
-                  <Text style={styles.planSubtitle}>
-                    {guestAllowanceUsedUp
-                      ? 'Sign in to continue recording lectures.'
-                      : 'Record on this device without signing in. Guest recordings are stored only on this device.'}
-                  </Text>
-                  <SecondaryButton
-                    label="Sign In"
-                    icon="log-in-outline"
-                    tone="ice"
-                    onPress={goToSignIn}
-                    style={styles.guestSignInButton}
-                  />
-                </GlassCard>
-              ) : (
-                <GlassCard>
-                  <View style={styles.planHeader}>
-                    <View style={styles.planLabelRow}>
-                      <Ionicons name="person-circle-outline" size={15} color={colors.mutedBlueGray} />
-                      <Text style={styles.cardLabel}>ACCOUNT</Text>
-                    </View>
-                    <Text style={styles.planName}>{accountCard.rightValue}</Text>
-                  </View>
-                  <Text style={styles.planSubtitle}>{accountCard.subtitle}</Text>
-                </GlassCard>
-              )}
             </>
           )}
         </View>
@@ -378,268 +250,57 @@ export default function RecordHomeScreen() {
 }
 
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: 'transparent',
-  },
-  scroll: {
-    paddingHorizontal: spacing.xl,
-    paddingTop: spacing.md,
-    paddingBottom: spacing.xxxl,
-  },
-  content: {
-    width: '100%',
-    maxWidth: layout.content,
-    alignSelf: 'center',
-    gap: spacing.xl,
-  },
-  pressedSoft: {
-    opacity: 0.85,
-  },
-  loading: {
-    paddingVertical: spacing.xxxl,
-    alignItems: 'center',
-  },
-
-  // ---- Empty state ----
-  emptyCard: {
-    alignItems: 'center',
-    paddingVertical: spacing.xxl,
-  },
-  emptyIcon: {
-    width: 80,
-    height: 80,
-    borderRadius: radius.xl,
-    backgroundColor: colors.iceTint,
-    borderWidth: 1,
-    borderColor: colors.iceBlue,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: spacing.lg,
-  },
-  emptyTitle: {
-    fontSize: fontSize.xxl,
-    fontWeight: '800',
-    color: colors.textPrimary,
-    textAlign: 'center',
-  },
-  emptyBody: {
-    fontSize: fontSize.md,
-    color: colors.textSecondary,
-    fontWeight: '500',
-    textAlign: 'center',
-    lineHeight: fontSize.md * 1.5,
-    marginTop: spacing.sm,
-    maxWidth: 360,
-  },
-  emptyPrimary: {
-    marginTop: spacing.xl,
-    alignSelf: 'stretch',
-  },
-  emptySecondary: {
-    marginTop: spacing.md,
-    alignSelf: 'stretch',
-  },
-
-  // ---- Hero ----
-  heroOuter: {
-    borderRadius: radius.xxl,
-    backgroundColor: colors.surface,
-    ...shadows.card,
-  },
-  heroInner: {
-    borderRadius: radius.xxl,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: colors.glassEdge,
-    backgroundColor: colors.surface,
-    padding: spacing.xxl,
-  },
-  heroWatermark: {
-    position: 'absolute',
-    right: -34,
-    bottom: -76,
-    fontSize: 230,
-    fontWeight: '900',
-    color: colors.watermark,
-  },
-  heroEyebrow: {
-    fontSize: fontSize.xs,
-    fontWeight: '700',
-    letterSpacing: 1.4,
-    color: colors.mutedBlueGray,
-  },
-  heroTitle: {
-    fontSize: fontSize.hero,
-    fontWeight: '800',
-    color: colors.textPrimary,
-    letterSpacing: -0.4,
-    marginTop: spacing.sm,
-    maxWidth: 360,
-  },
-  valueRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
-    marginTop: spacing.lg,
-  },
-  valueChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    backgroundColor: colors.iceTint,
-    paddingHorizontal: spacing.md,
-    paddingVertical: 7,
-    borderRadius: radius.pill,
-  },
-  valueChipText: {
-    fontSize: fontSize.sm,
-    fontWeight: '600',
-    color: colors.textSecondary,
-  },
-  selectorRow: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-    marginTop: spacing.xl,
-  },
+  root: { flex: 1, backgroundColor: 'transparent' },
+  scroll: { paddingHorizontal: layout.workspacePadding, paddingTop: 28, paddingBottom: 40 },
+  content: { width: '100%', maxWidth: 1120, alignSelf: 'center', gap: 22 },
+  loading: { minHeight: 420, alignItems: 'center', justifyContent: 'center' },
+  homeGrid: { flexDirection: 'row', gap: 16, alignItems: 'stretch' },
+  recordCard: { flex: 1.55 },
+  sideStack: { flex: 1, gap: 14 },
+  selectorRow: { flexDirection: 'row', gap: 10, marginTop: 15 },
   courseSelector: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-    backgroundColor: colors.softIceWhite,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md,
+    flex: 1, minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 11,
+    borderWidth: 1, borderColor: colors.border, borderRadius: 12,
+    paddingHorizontal: 12, backgroundColor: 'rgba(255,255,255,0.74)',
   },
-  courseTile: {
-    width: 42,
-    height: 42,
-    borderRadius: radius.sm,
-    alignItems: 'center',
-    justifyContent: 'center',
+  selectorText: { flex: 1 },
+  selectorLabel: { color: colors.textTertiary, fontSize: 10, fontWeight: '700', letterSpacing: 1 },
+  selectorValue: { color: colors.ink, fontSize: 14, fontWeight: '700', marginTop: 2 },
+  addCourse: {
+    width: 54, borderWidth: 1.5, borderStyle: 'dashed', borderColor: colors.borderStrong,
+    borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.62)',
   },
-  courseSelectorText: {
-    flex: 1,
-    gap: 1,
+  input: {
+    height: 46, borderWidth: 1, borderColor: colors.border, borderRadius: 12,
+    paddingHorizontal: 14, marginVertical: 10, color: colors.ink, fontSize: 14.5,
+    fontWeight: '500', backgroundColor: 'rgba(255,255,255,0.86)',
   },
-  courseSelectorLabel: {
-    fontSize: 10,
-    color: colors.textTertiary,
-    fontWeight: '700',
-    letterSpacing: 1,
-  },
-  courseSelectorValue: {
-    fontSize: fontSize.lg,
-    color: colors.textPrimary,
-    fontWeight: '700',
-  },
-  addCourseBtn: {
-    width: 56,
-    borderRadius: radius.md,
-    backgroundColor: colors.softIceWhite,
-    borderWidth: 1,
-    borderColor: colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  titleInput: {
-    minHeight: 50,
-    fontSize: fontSize.md,
-    fontWeight: '600',
-    color: colors.textPrimary,
-    backgroundColor: colors.softIceWhite,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    paddingHorizontal: spacing.lg,
-    marginTop: spacing.md,
-  },
-  startButton: {
-    marginTop: spacing.lg,
-  },
-
-  // ---- Recent Lectures ----
-  sectionHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: -spacing.sm,
-  },
-  sectionTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-  },
-  sectionTitle: {
-    fontSize: fontSize.xl,
-    fontWeight: '700',
-    color: colors.textPrimary,
-  },
-  countBadge: {
-    minWidth: 22,
-    height: 22,
-    borderRadius: 11,
-    paddingHorizontal: 6,
-    backgroundColor: colors.iceTint,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  countBadgeText: {
-    fontSize: fontSize.xs,
-    fontWeight: '700',
-    color: colors.deepNavy,
-  },
-  viewAll: {
-    fontSize: fontSize.md,
-    fontWeight: '600',
-    color: colors.mutedBlueGray,
-  },
-  lecturesEmpty: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-  },
-  lecturesEmptyText: {
-    flex: 1,
-    fontSize: fontSize.md,
-    color: colors.textTertiary,
-    fontWeight: '500',
-  },
-
-  // ---- Plan ----
-  planHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: spacing.lg,
-  },
-  planLabelRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs + 2,
-  },
-  cardLabel: {
-    fontSize: fontSize.xs,
-    fontWeight: '700',
-    letterSpacing: 1.2,
-    color: colors.textTertiary,
-  },
-  planName: {
-    fontSize: fontSize.xl,
-    fontWeight: '800',
-    color: colors.textPrimary,
-  },
-  planSubtitle: {
-    fontSize: fontSize.sm,
-    lineHeight: fontSize.sm * 1.5,
-    color: colors.textSecondary,
-    fontWeight: '500',
-  },
-  guestSignInButton: {
-    marginTop: spacing.lg,
-    alignSelf: 'flex-start',
-  },
+  featureRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 12 },
+  metricRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', marginTop: 11, marginBottom: 6 },
+  metricLabel: { color: colors.textSecondary, fontSize: 13 },
+  metricValue: { color: colors.ink, fontSize: 14, fontWeight: '700', fontVariant: ['tabular-nums'] },
+  accountLink: { color: colors.accent, fontSize: 12, fontWeight: '700', marginTop: 13 },
+  recentCard: { flex: 1 },
+  recentHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  viewAll: { color: colors.accent, fontSize: 11.5, fontWeight: '700' },
+  lectureRow: { minHeight: 55, flexDirection: 'row', alignItems: 'center', gap: 11, paddingVertical: 10 },
+  lectureDivider: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  lectureText: { flex: 1 },
+  lectureTitle: { color: colors.ink, fontSize: 13.5, fontWeight: '700' },
+  lectureMeta: { color: colors.textTertiary, fontSize: 11.5, marginTop: 2 },
+  duration: { color: colors.textSecondary, fontSize: 11.5, fontWeight: '700', fontVariant: ['tabular-nums'] },
+  emptyRecent: { color: colors.textTertiary, fontSize: 12.5, marginTop: 18 },
+  emptyGrid: { flexDirection: 'row', gap: 16, minHeight: 520 },
+  emptyHero: { flex: 1, justifyContent: 'center', overflow: 'hidden' },
+  emptyTitle: { marginTop: 14, color: colors.ink, fontSize: 22, fontWeight: '800' },
+  emptyBody: { marginTop: 8, maxWidth: 340, color: colors.textSecondary, fontSize: 13.5, lineHeight: 21 },
+  emptyActions: { flexDirection: 'row', gap: 10, marginTop: 22 },
+  stepsCard: { flex: 1, justifyContent: 'center', gap: 24 },
+  step: { flexDirection: 'row', gap: 14 },
+  stepNumber: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.iceTint },
+  stepNumberText: { color: colors.accent, fontSize: 12, fontWeight: '800' },
+  stepText: { flex: 1 },
+  stepTitle: { color: colors.ink, fontSize: 14, fontWeight: '700' },
+  stepBody: { color: colors.textSecondary, fontSize: 12.5, lineHeight: 18, marginTop: 3 },
+  pressed: { opacity: 0.76, transform: [{ scale: 0.99 }] },
 });

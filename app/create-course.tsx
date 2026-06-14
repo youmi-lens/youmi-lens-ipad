@@ -2,6 +2,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { ComponentProps, useState } from 'react';
 import {
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -11,231 +13,127 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { AppBackground } from '@/components/AppBackground';
+import { GlassCard } from '@/components/GlassCard';
 import { PrimaryButton } from '@/components/PrimaryButton';
-import { colors, fontSize, radius, spacing } from '@/constants/theme';
+import { colors } from '@/constants/theme';
 import { COURSE_PRESETS } from '@/lib/models';
 import { useData } from '@/lib/store';
 
-type IoniconName = ComponentProps<typeof Ionicons>['name'];
+type IconName = ComponentProps<typeof Ionicons>['name'];
 
 export default function CreateCourseScreen() {
   const router = useRouter();
   const { createCourse } = useData();
-
   const [name, setName] = useState('');
   const [presetIndex, setPresetIndex] = useState(0);
-
   const preset = COURSE_PRESETS[presetIndex];
   const canCreate = name.trim().length > 0;
 
   const handleCreate = () => {
     if (!canCreate) return;
-    createCourse({
-      name: name.trim(),
-      icon: preset.icon,
-      tint: preset.tint,
-      accent: preset.accent,
-    });
+    createCourse({ name: name.trim(), icon: preset.icon, tint: preset.tint, accent: preset.accent });
     router.back();
   };
 
   return (
     <SafeAreaView style={styles.root} edges={['top', 'bottom', 'left', 'right']}>
-      <View style={styles.header}>
-        <Text style={styles.headerTitle}>New Course</Text>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Close"
-          onPress={() => router.back()}
-          hitSlop={10}
-          style={({ pressed }) => [styles.closeBtn, pressed && styles.pressed]}
-        >
-          <Ionicons name="close" size={20} color={colors.deepNavy} />
-        </Pressable>
-      </View>
-
-      <ScrollView
-        contentContainerStyle={styles.scroll}
-        keyboardShouldPersistTaps="handled"
-        showsVerticalScrollIndicator={false}
+      <AppBackground />
+      <View style={styles.dim} />
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={styles.keyboard}
       >
-        <View style={styles.content}>
-          {/* Live preview */}
-          <View style={styles.preview}>
-            <View style={[styles.previewTile, { backgroundColor: preset.tint }]}>
-              <Ionicons name={preset.icon as IoniconName} size={32} color={preset.accent} />
-            </View>
-            <Text style={styles.previewName} numberOfLines={1}>
-              {name.trim() || 'Your course'}
-            </Text>
-            <Text style={styles.previewHint}>This is how your course will appear.</Text>
-          </View>
-
-          {/* Name */}
-          <Text style={styles.label}>COURSE NAME</Text>
-          <TextInput
-            style={styles.input}
-            value={name}
-            onChangeText={setName}
-            placeholder="e.g. Biology 200"
-            placeholderTextColor={colors.textTertiary}
-            autoFocus
-            returnKeyType="done"
-            onSubmitEditing={handleCreate}
-            maxLength={48}
-          />
-
-          {/* Colour & icon presets */}
-          <Text style={[styles.label, styles.labelSpaced]}>COLOUR &amp; ICON</Text>
-          <View style={styles.presetGrid}>
-            {COURSE_PRESETS.map((p, i) => {
-              const selected = i === presetIndex;
-              return (
-                <Pressable
-                  key={p.key}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected }}
-                  onPress={() => setPresetIndex(i)}
-                  style={[
-                    styles.presetTile,
-                    { backgroundColor: p.tint },
-                    selected && { borderColor: p.accent },
-                  ]}
-                >
-                  <Ionicons name={p.icon as IoniconName} size={24} color={p.accent} />
-                  {selected ? (
-                    <View style={[styles.presetCheck, { backgroundColor: p.accent }]}>
-                      <Ionicons name="checkmark" size={11} color={colors.pearlWhite} />
-                    </View>
-                  ) : null}
+        <ScrollView
+          contentContainerStyle={styles.scroll}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          <GlassCard elevated padding={0} style={styles.sheet}>
+            <View style={styles.sheetContent}>
+              <View style={styles.header}>
+                <Text style={styles.title}>New course</Text>
+                <Pressable onPress={() => router.back()} style={({ pressed }) => [styles.close, pressed && styles.pressed]}>
+                  <Ionicons name="close" size={18} color={colors.textSecondary} />
                 </Pressable>
-              );
-            })}
-          </View>
+              </View>
 
-          <PrimaryButton
-            label="Create Course"
-            icon="add"
-            onPress={handleCreate}
-            disabled={!canCreate}
-            style={styles.createBtn}
-          />
-        </View>
-      </ScrollView>
+              <View style={styles.preview}>
+                <View style={[styles.previewIcon, { backgroundColor: preset.tint }]}>
+                  <Ionicons name={preset.icon as IconName} size={20} color={preset.accent} />
+                </View>
+                <View>
+                  <Text style={styles.previewName}>{name.trim() || 'Your course'}</Text>
+                  <Text style={styles.previewHint}>Live preview</Text>
+                </View>
+              </View>
+
+              <Text style={styles.label}>COURSE NAME</Text>
+              <TextInput
+                autoFocus
+                value={name}
+                onChangeText={setName}
+                onSubmitEditing={handleCreate}
+                placeholder="e.g. Intro to Data Science"
+                placeholderTextColor={colors.textTertiary}
+                returnKeyType="done"
+                style={styles.input}
+                maxLength={48}
+              />
+
+              <Text style={[styles.label, styles.colorLabel]}>COLOUR & ICON</Text>
+              <View style={styles.swatches}>
+                {COURSE_PRESETS.map((option, index) => {
+                  const selected = index === presetIndex;
+                  return (
+                    <Pressable
+                      key={option.key}
+                      onPress={() => setPresetIndex(index)}
+                      style={[
+                        styles.swatch,
+                        { backgroundColor: option.tint },
+                        selected && styles.swatchSelected,
+                      ]}
+                    >
+                      <Ionicons name={option.icon as IconName} size={20} color={option.accent} />
+                      {selected ? (
+                        <View style={styles.check}><Ionicons name="checkmark" size={10} color={colors.pearlWhite} /></View>
+                      ) : null}
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              <PrimaryButton label="Create course" onPress={handleCreate} disabled={!canCreate} style={styles.createButton} />
+            </View>
+          </GlassCard>
+        </ScrollView>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: colors.background,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: spacing.xl,
-    paddingVertical: spacing.lg,
-  },
-  headerTitle: {
-    fontSize: fontSize.xl,
-    fontWeight: '800',
-    color: colors.textPrimary,
-  },
-  closeBtn: {
-    width: 38,
-    height: 38,
-    borderRadius: radius.pill,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  pressed: {
-    opacity: 0.85,
-    transform: [{ scale: 0.96 }],
-  },
-  scroll: {
-    paddingHorizontal: spacing.xl,
-    paddingBottom: spacing.xxxl,
-  },
-  content: {
-    width: '100%',
-    maxWidth: 520,
-    alignSelf: 'center',
-  },
-  preview: {
-    alignItems: 'center',
-    gap: spacing.sm,
-    paddingVertical: spacing.lg,
-    marginBottom: spacing.lg,
-  },
-  previewTile: {
-    width: 76,
-    height: 76,
-    borderRadius: radius.lg,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  previewName: {
-    fontSize: fontSize.xl,
-    fontWeight: '800',
-    color: colors.textPrimary,
-    marginTop: spacing.xs,
-  },
-  previewHint: {
-    fontSize: fontSize.sm,
-    color: colors.textTertiary,
-    fontWeight: '500',
-  },
-  label: {
-    fontSize: fontSize.xs,
-    fontWeight: '700',
-    letterSpacing: 1.2,
-    color: colors.textTertiary,
-    marginBottom: spacing.sm,
-  },
-  labelSpaced: {
-    marginTop: spacing.xl,
-  },
-  input: {
-    minHeight: 54,
-    fontSize: fontSize.lg,
-    fontWeight: '600',
-    color: colors.textPrimary,
-    backgroundColor: colors.surface,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.borderStrong,
-    paddingHorizontal: spacing.lg,
-  },
-  presetGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.md,
-  },
-  presetTile: {
-    width: 92,
-    height: 66,
-    borderRadius: radius.md,
-    borderWidth: 2,
-    borderColor: 'transparent',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  presetCheck: {
-    position: 'absolute',
-    top: 6,
-    right: 6,
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  createBtn: {
-    marginTop: spacing.xxl,
-  },
+  root: { flex: 1, backgroundColor: colors.background },
+  dim: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(15, 23, 42, 0.18)' },
+  keyboard: { flex: 1 },
+  scroll: { flexGrow: 1, justifyContent: 'center', paddingHorizontal: 24, paddingVertical: 28 },
+  sheet: { width: '100%', maxWidth: 540, borderColor: colors.glassHighlight },
+  sheetContent: { paddingHorizontal: 28, paddingTop: 24, paddingBottom: 26 },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  title: { color: colors.ink, fontSize: 19, fontWeight: '800' },
+  close: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border },
+  preview: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 12, borderRadius: 14, marginTop: 16, backgroundColor: colors.iceTint, borderWidth: 1, borderColor: colors.borderStrong },
+  previewIcon: { width: 42, height: 42, borderRadius: 11, alignItems: 'center', justifyContent: 'center' },
+  previewName: { color: colors.ink, fontSize: 15, fontWeight: '700' },
+  previewHint: { color: colors.textTertiary, fontSize: 11.5, marginTop: 2 },
+  label: { color: colors.textTertiary, fontSize: 11, fontWeight: '700', letterSpacing: 1, marginTop: 17, marginBottom: 7 },
+  input: { height: 46, borderRadius: 12, paddingHorizontal: 14, borderWidth: 1, borderColor: colors.border, backgroundColor: 'rgba(255,255,255,0.88)', color: colors.ink, fontSize: 14.5, fontWeight: '500' },
+  colorLabel: { marginTop: 17 },
+  swatches: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  swatch: { width: 50, height: 50, borderRadius: 12, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: 'transparent' },
+  swatchSelected: { borderColor: colors.accent, shadowColor: colors.accent, shadowOpacity: 0.16, shadowRadius: 8 },
+  check: { position: 'absolute', top: -6, right: -6, width: 17, height: 17, borderRadius: 9, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.accent },
+  createButton: { marginTop: 20 },
+  pressed: { opacity: 0.75, transform: [{ scale: 0.96 }] },
 });

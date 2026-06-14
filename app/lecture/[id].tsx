@@ -10,15 +10,18 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { GlassCard } from '@/components/GlassCard';
+import { AppBackground } from '@/components/AppBackground';
 import { HandwritingPreview, NotebookCanvas } from '@/components/NotebookCanvas';
 import { RenameModal } from '@/components/RenameModal';
 import { StatusPill, StatusVariant } from '@/components/StatusPill';
-import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
+import { WorkspaceSidebar } from '@/components/WorkspaceSidebar';
+import { colors, fontSize, radius, spacing } from '@/constants/theme';
 import { exportLectureNotesPdf, hasExportableLectureNotes } from '@/lib/exportLectureNotesPdf';
 import { formatClock, formatDate, formatDuration } from '@/lib/format';
 import {
@@ -32,7 +35,7 @@ import { useData } from '@/lib/store';
 
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
 
-const TABS = ['Transcript', 'Summary', 'Marked', 'Notes'] as const;
+const TABS = ['Summary', 'Transcript', 'Marked', 'Notes'] as const;
 type Tab = (typeof TABS)[number];
 
 const STATUS_INFO: Record<string, { label: string; variant: StatusVariant }> = {
@@ -44,7 +47,7 @@ function BlockHeader({ icon, label }: { icon: IoniconName; label: string }) {
   return (
     <View style={styles.blockHeader}>
       <View style={styles.blockIcon}>
-        <Ionicons name={icon} size={15} color={colors.deepNavy} />
+        <Ionicons name={icon} size={15} color={colors.textPrimary} />
       </View>
       <Text style={styles.blockLabel}>{label}</Text>
     </View>
@@ -59,12 +62,19 @@ export default function LectureDetailScreen() {
   const lecture = getLecture(params.id);
   const course = getCourse(lecture?.courseId);
 
-  const [tab, setTab] = useState<Tab>('Transcript');
+  const [tab, setTab] = useState<Tab>('Summary');
   const [notesDraft, setNotesDraft] = useState(lecture?.notes ?? '');
   const [strokesDraft, setStrokesDraft] = useState<NoteStroke[]>(lecture?.noteStrokes ?? []);
   const [notesOpen, setNotesOpen] = useState(false);
   const [renameVisible, setRenameVisible] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
+  const { width } = useWindowDimensions();
+  const compactLayout = width < 1180;
+  const audioAvailable = Boolean(lecture?.localAudioUri);
+  const player = useAudioPlayer(audioAvailable ? { uri: lecture?.localAudioUri ?? '' } : null, { updateInterval: 250 });
+  const audioStatus = useAudioPlayerStatus(player);
+  const playbackDuration = audioStatus.duration || (lecture?.durationMillis ?? 0) / 1000;
+  const playbackProgress = playbackDuration > 0 ? Math.min(audioStatus.currentTime / playbackDuration, 1) : 0;
 
   if (!lecture) {
     return (
@@ -135,12 +145,6 @@ export default function LectureDetailScreen() {
     }
   };
 
-  const audioAvailable = Boolean(lecture.localAudioUri);
-  const player = useAudioPlayer(audioAvailable ? { uri: lecture.localAudioUri! } : null, { updateInterval: 250 });
-  const audioStatus = useAudioPlayerStatus(player);
-  const playbackDuration = audioStatus.duration || lecture.durationMillis / 1000;
-  const playbackProgress = playbackDuration > 0 ? Math.min(audioStatus.currentTime / playbackDuration, 1) : 0;
-
   const seekToSeconds = async (seconds: number) => {
     if (!audioAvailable) return;
     await player.seekTo(Math.max(0, Math.min(seconds, playbackDuration || seconds)));
@@ -151,7 +155,10 @@ export default function LectureDetailScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.root} edges={['top', 'left', 'right', 'bottom']}>
+    <View style={styles.root}>
+      <AppBackground />
+      <WorkspaceSidebar active="record" />
+      <SafeAreaView style={styles.detail} edges={['top', 'right', 'bottom']}>
       {/* Header */}
       <View style={styles.header}>
         <Pressable
@@ -161,14 +168,14 @@ export default function LectureDetailScreen() {
           hitSlop={10}
           style={({ pressed }) => [styles.backBtn, pressed && styles.pressed]}
         >
-          <Ionicons name="chevron-back" size={24} color={colors.deepNavy} />
+          <Ionicons name="chevron-back" size={24} color={colors.textPrimary} />
         </Pressable>
         {course ? (
-          <View style={[styles.courseTile, { backgroundColor: course.tint }]}>
+          <View style={styles.courseTile}>
             <Ionicons
               name={course.icon as IoniconName}
               size={20}
-              color={course.accent}
+              color={colors.textSecondary}
             />
           </View>
         ) : null}
@@ -189,34 +196,23 @@ export default function LectureDetailScreen() {
           hitSlop={8}
           style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
         >
-          <Ionicons name="pencil-outline" size={20} color={colors.deepNavy} />
+          <Ionicons name="pencil-outline" size={20} color={colors.textPrimary} />
         </Pressable>
       </View>
 
       <View style={styles.playerWrap}>
-        <GlassCard>
-          <BlockHeader icon="play-circle-outline" label="LECTURE AUDIO" />
+        <GlassCard padding={16}>
           {audioAvailable ? (
-            <>
-              <View style={styles.playerTimes}>
-                <Text style={styles.playerTimeText}>{formatClock(Math.floor(audioStatus.currentTime))}</Text>
-                <Text style={styles.playerTimeText}>{formatClock(Math.floor(playbackDuration))}</Text>
-              </View>
+            <View style={[styles.compactPlayer, compactLayout && styles.compactPlayerNarrow]}>
+              <Pressable accessibilityRole="button" onPress={() => audioStatus.playing ? player.pause() : player.play()} style={styles.playPauseButton}>
+                <Ionicons name={audioStatus.playing ? 'pause' : 'play'} size={20} color={colors.textOnNavy} />
+              </Pressable>
+              <Pressable accessibilityRole="button" onPress={() => void skipBy(-10)} style={styles.skipButton}><Text style={styles.skipText}>↺ 10s</Text></Pressable>
+              <Text style={styles.playerTimeText}>{formatClock(Math.floor(audioStatus.currentTime))}</Text>
               <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${playbackProgress * 100}%` }]} /></View>
-              <View style={styles.playerControls}>
-                <Pressable accessibilityRole="button" onPress={() => void skipBy(-10)} style={styles.playerButton}>
-                  <Ionicons name="play-back" size={20} color={colors.deepNavy} />
-                  <Text style={styles.playerButtonText}>10s</Text>
-                </Pressable>
-                <Pressable accessibilityRole="button" onPress={() => audioStatus.playing ? player.pause() : player.play()} style={styles.playPauseButton}>
-                  <Ionicons name={audioStatus.playing ? 'pause' : 'play'} size={24} color={colors.textOnNavy} />
-                </Pressable>
-                <Pressable accessibilityRole="button" onPress={() => void skipBy(10)} style={styles.playerButton}>
-                  <Text style={styles.playerButtonText}>10s</Text>
-                  <Ionicons name="play-forward" size={20} color={colors.deepNavy} />
-                </Pressable>
-              </View>
-            </>
+              <Text style={styles.playerTimeText}>{formatClock(Math.floor(playbackDuration))}</Text>
+              <Pressable accessibilityRole="button" onPress={() => void skipBy(10)} style={styles.skipButton}><Text style={styles.skipText}>10s ↻</Text></Pressable>
+            </View>
           ) : (
             <Text style={styles.emptyInline}>
               {lecture.storagePath ? 'Audio playback from cloud storage is coming soon.' : 'Audio playback is not available for this lecture.'}
@@ -285,7 +281,7 @@ export default function LectureDetailScreen() {
           {tab === 'Summary' && (
             <>
               {summaryEn || summaryZh ? (
-                <>
+                <View style={[styles.summaryGrid, compactLayout && styles.summaryGridCompact]}>
                   <GlassCard>
                     <BlockHeader icon="language-outline" label={getSummarySectionLabel('en')} />
                     {summaryEn ? (
@@ -306,7 +302,7 @@ export default function LectureDetailScreen() {
                       </Text>
                     )}
                   </GlassCard>
-                </>
+                </View>
               ) : (
                 <GlassCard>
                   <Text style={styles.emptyInline}>Summary will appear after processing.</Text>
@@ -331,7 +327,7 @@ export default function LectureDetailScreen() {
                     >
                       <View style={styles.momentTime}><Text style={styles.momentTimeText}>{formatClock(Math.floor(ms / 1000))}</Text></View>
                       <Text style={styles.momentLabel}>Important moment</Text>
-                      <Ionicons name="star" size={15} color={colors.deepNavy} />
+                      <Ionicons name="star" size={15} color={colors.textPrimary} />
                     </Pressable>
                   ))}
                 </View>
@@ -349,7 +345,7 @@ export default function LectureDetailScreen() {
               <View style={styles.noteHeaderRow}>
                 <View style={styles.noteBlockHeader}>
                   <View style={styles.blockIcon}>
-                    <Ionicons name="create-outline" size={15} color={colors.deepNavy} />
+                    <Ionicons name="create-outline" size={15} color={colors.textPrimary} />
                   </View>
                   <Text style={styles.blockLabel}>LECTURE NOTES</Text>
                 </View>
@@ -365,9 +361,9 @@ export default function LectureDetailScreen() {
                   ]}
                 >
                   {exportingPdf ? (
-                    <ActivityIndicator size="small" color={colors.deepNavy} />
+                    <ActivityIndicator size="small" color={colors.accentBright} />
                   ) : (
-                    <Ionicons name="share-outline" size={16} color={colors.deepNavy} />
+                    <Ionicons name="share-outline" size={16} color={colors.textPrimary} />
                   )}
                   <Text style={styles.noteExportText}>{exportingPdf ? 'Exporting…' : 'Export PDF'}</Text>
                 </Pressable>
@@ -446,15 +442,18 @@ export default function LectureDetailScreen() {
         </SafeAreaView>
       </Modal>
 
-    </SafeAreaView>
+      </SafeAreaView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   root: {
     flex: 1,
+    flexDirection: 'row',
     backgroundColor: colors.background,
   },
+  detail: { flex: 1 },
 
   // ---- Not found ----
   notFound: {
@@ -487,8 +486,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.md,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
+    paddingHorizontal: 38,
+    paddingTop: 24,
+    paddingBottom: 12,
   },
   backBtn: {
     width: 44,
@@ -523,6 +523,7 @@ const styles = StyleSheet.create({
     borderRadius: radius.sm,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: colors.surfaceMuted,
   },
   headerText: {
     flex: 1,
@@ -540,31 +541,31 @@ const styles = StyleSheet.create({
   },
 
   playerWrap: {
-    paddingHorizontal: spacing.lg,
+    paddingHorizontal: 38,
     marginBottom: spacing.md,
-    maxWidth: layout.content,
+    maxWidth: 1040,
     width: '100%',
     alignSelf: 'center',
   },
-  playerTimes: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: spacing.sm },
+  compactPlayer: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  compactPlayerNarrow: { flexWrap: 'wrap' },
   playerTimeText: { color: colors.textSecondary, fontSize: fontSize.sm, fontWeight: '600' },
-  progressTrack: { height: 8, borderRadius: radius.pill, backgroundColor: colors.surfaceMuted, overflow: 'hidden' },
-  progressFill: { height: '100%', borderRadius: radius.pill, backgroundColor: colors.deepNavy },
-  playerControls: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xl, marginTop: spacing.lg },
-  playerButton: { minWidth: 72, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs },
-  playerButtonText: { color: colors.deepNavy, fontSize: fontSize.sm, fontWeight: '700' },
-  playPauseButton: { width: 52, height: 52, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.deepNavy },
+  progressTrack: { flex: 1, minWidth: 160, height: 5, borderRadius: radius.pill, backgroundColor: colors.surfaceMuted, overflow: 'hidden' },
+  progressFill: { height: '100%', borderRadius: radius.pill, backgroundColor: colors.accentBright },
+  playPauseButton: { width: 42, height: 42, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.accent },
+  skipButton: { minHeight: 32, paddingHorizontal: 10, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border },
+  skipText: { color: colors.textSecondary, fontSize: 11.5, fontWeight: '700' },
 
   // ---- Tabs ----
   tabBar: {
     flexDirection: 'row',
     gap: spacing.xs,
-    marginHorizontal: spacing.lg,
+    marginHorizontal: 38,
     marginBottom: spacing.md,
     padding: spacing.xs,
     backgroundColor: colors.surfaceMuted,
     borderRadius: radius.md,
-    maxWidth: layout.content,
+    maxWidth: 1040,
     alignSelf: 'center',
     width: '100%',
   },
@@ -576,8 +577,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   tabActive: {
-    backgroundColor: colors.surface,
-    shadowColor: '#0A2342',
+    backgroundColor: colors.accent,
+    shadowColor: colors.accent,
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.08,
     shadowRadius: 6,
@@ -589,21 +590,23 @@ const styles = StyleSheet.create({
     color: colors.textTertiary,
   },
   tabLabelActive: {
-    color: colors.deepNavy,
+    color: colors.pearlWhite,
     fontWeight: '700',
   },
 
   scroll: {
-    paddingHorizontal: spacing.xl,
+    paddingHorizontal: 38,
     paddingTop: spacing.sm,
     paddingBottom: spacing.xxxl,
   },
   content: {
     width: '100%',
-    maxWidth: layout.content,
+    maxWidth: 1040,
     alignSelf: 'center',
     gap: spacing.md,
   },
+  summaryGrid: { flexDirection: 'row', gap: 16, alignItems: 'stretch' },
+  summaryGridCompact: { flexDirection: 'column' },
 
   // ---- Mock notice ----
   mockNotice: {
@@ -699,7 +702,7 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '800',
     letterSpacing: 0.8,
-    color: colors.deepNavy,
+    color: colors.textPrimary,
   },
   speaker: {
     fontSize: fontSize.xs,
@@ -800,7 +803,7 @@ const styles = StyleSheet.create({
   momentTimeText: {
     fontSize: fontSize.xs,
     fontWeight: '700',
-    color: colors.deepNavy,
+    color: colors.textPrimary,
     fontVariant: ['tabular-nums'],
   },
   momentLabel: {
@@ -863,7 +866,7 @@ const styles = StyleSheet.create({
     opacity: 0.6,
   },
   noteExportText: {
-    color: colors.deepNavy,
+    color: colors.textPrimary,
     fontSize: fontSize.sm,
     fontWeight: '800',
   },
@@ -896,7 +899,7 @@ const styles = StyleSheet.create({
   },
   modalTitle: { color: colors.textPrimary, fontSize: fontSize.xl, fontWeight: '800' },
   modalAction: { minWidth: 64, minHeight: 44, justifyContent: 'center' },
-  modalActionText: { color: colors.deepNavy, fontSize: fontSize.md, fontWeight: '700' },
+  modalActionText: { color: colors.textPrimary, fontSize: fontSize.md, fontWeight: '700' },
   modalInput: { flex: 1, borderRadius: radius.xl, borderWidth: 1, borderColor: colors.borderStrong, backgroundColor: colors.paper, padding: spacing.xl, color: colors.textPrimary, fontSize: fontSize.lg, lineHeight: 26 },
   notesInput: {
     minHeight: 240,

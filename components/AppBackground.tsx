@@ -14,22 +14,22 @@ export function AppBackground() {
       <Svg width="100%" height="100%" preserveAspectRatio="xMidYMid slice">
         <Defs>
           <LinearGradient id="app-bg" x1="0" y1="0" x2="1" y2="1">
-            <Stop offset="0" stopColor="#EEF2FC" />
-            <Stop offset="0.4" stopColor="#F6F8FF" />
-            <Stop offset="0.7" stopColor="#E8F0FA" />
-            <Stop offset="1" stopColor="#F0EEF8" />
+            <Stop offset="0" stopColor="#F8FAFC" />
+            <Stop offset="0.42" stopColor="#F5F7FB" />
+            <Stop offset="0.74" stopColor="#FFFFFF" />
+            <Stop offset="1" stopColor="#F7F7F9" />
           </LinearGradient>
           <RadialGradient id="blue-glow">
-            <Stop offset="0" stopColor="#6488E6" stopOpacity={0.18} />
-            <Stop offset="1" stopColor="#6488E6" stopOpacity={0} />
+            <Stop offset="0" stopColor="#0B1F3A" stopOpacity={0.055} />
+            <Stop offset="1" stopColor="#0B1F3A" stopOpacity={0} />
           </RadialGradient>
           <RadialGradient id="violet-glow">
-            <Stop offset="0" stopColor="#8C64E6" stopOpacity={0.1} />
-            <Stop offset="1" stopColor="#8C64E6" stopOpacity={0} />
+            <Stop offset="0" stopColor="#64748B" stopOpacity={0.045} />
+            <Stop offset="1" stopColor="#64748B" stopOpacity={0} />
           </RadialGradient>
           <RadialGradient id="teal-glow">
-            <Stop offset="0" stopColor="#3CB4C8" stopOpacity={0.12} />
-            <Stop offset="1" stopColor="#3CB4C8" stopOpacity={0} />
+            <Stop offset="0" stopColor="#0F172A" stopOpacity={0.035} />
+            <Stop offset="1" stopColor="#0F172A" stopOpacity={0} />
           </RadialGradient>
         </Defs>
         <Rect width="100%" height="100%" fill="url(#app-bg)" />

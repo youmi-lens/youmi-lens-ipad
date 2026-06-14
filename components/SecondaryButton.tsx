@@ -2,7 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { ComponentProps } from 'react';
 import { Pressable, StyleSheet, Text, View, ViewStyle } from 'react-native';
 
-import { colors, fontSize, radius, spacing } from '@/constants/theme';
+import { colors, fontSize, spacing } from '@/constants/theme';
 
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
 
@@ -31,7 +31,7 @@ export function SecondaryButton({
   disabled = false,
   style,
 }: SecondaryButtonProps) {
-  const fg = danger ? colors.recordingRed : colors.deepNavy;
+  const fg = danger ? colors.recordingRed : colors.textPrimary;
 
   return (
     <Pressable
@@ -58,24 +58,24 @@ export function SecondaryButton({
 
 const styles = StyleSheet.create({
   base: {
-    minHeight: 52,
+    minHeight: 46,
     paddingHorizontal: spacing.xl,
-    borderRadius: radius.lg,
+    borderRadius: 12,
     borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
   },
   plain: {
-    backgroundColor: colors.pearlWhite,
-    borderColor: colors.borderStrong,
+    backgroundColor: 'rgba(255, 255, 255, 0.82)',
+    borderColor: colors.border,
   },
   ice: {
     backgroundColor: colors.iceTint,
     borderColor: colors.iceBlue,
   },
   danger: {
-    borderColor: '#F2C3C3',
-    backgroundColor: colors.recordingTint,
+    borderColor: 'rgba(194, 65, 75, 0.32)',
+    backgroundColor: colors.glassElevated,
   },
   content: {
     flexDirection: 'row',

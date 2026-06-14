@@ -20,7 +20,7 @@ import { GlassCard } from '@/components/GlassCard';
 import { PrimaryButton } from '@/components/PrimaryButton';
 import { SecondaryButton } from '@/components/SecondaryButton';
 import { StatusPill } from '@/components/StatusPill';
-import { colors, fontSize, layout, radius, shadows, spacing } from '@/constants/theme';
+import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
 import { formatClock } from '@/lib/format';
 import { GUEST_MAX_RECORDING_SECONDS, incrementGuestRecordingsUsed } from '@/lib/guest';
@@ -209,6 +209,8 @@ export default function RecordingScreen() {
       // Guests record locally only — no live caption WebSocket / backend calls.
       if (started && !isGuest) void startCaptionPipeline();
     });
+  // The recorder and caption starters intentionally run once after permission resolves.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [granted, isGuest]);
 
   // Keep this fresh for the mount-once AppState listener below.
@@ -320,7 +322,7 @@ export default function RecordingScreen() {
     // against the local guest cap and invite the user to sign in.
     if (isGuest) {
       await incrementGuestRecordingsUsed();
-      router.replace('/(tabs)');
+      router.replace('/');
       Alert.alert(
         'Recording saved on this device',
         'Sign in to generate transcripts and summaries.',
@@ -343,6 +345,8 @@ export default function RecordingScreen() {
       guestAutoStopped.current = true;
       void finish();
     }
+  // `finish` closes over the current recording state; adding it would retrigger this cap watcher.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isGuest, seconds, isRecording, isPaused, finishing]);
 
   const openMiniCaption = () => {
@@ -385,13 +389,26 @@ export default function RecordingScreen() {
           hitSlop={10}
           style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
         >
-          <Ionicons name="chevron-back" size={24} color={colors.deepNavy} />
+          <Ionicons name="chevron-back" size={24} color={colors.textPrimary} />
         </Pressable>
 
-        <Text style={styles.headerTitle} numberOfLines={1}>
-          {courseName}
-        </Text>
-
+        {granted ? <StatusPill label={isPaused ? 'PAUSED' : 'REC'} variant={isPaused ? 'paused' : 'recording'} /> : null}
+        <View style={styles.courseChip}>
+          <Ionicons name={(course?.icon ?? 'book-outline') as keyof typeof Ionicons.glyphMap} size={13} color={colors.accent} />
+          <Text style={styles.courseChipText} numberOfLines={1}>{courseName}</Text>
+        </View>
+        {granted ? <Text style={styles.headerTimer}>{formatClock(seconds)}</Text> : <View style={styles.headerGrow} />}
+        {granted && course ? (
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => setMaterialPickerVisible(true)}
+            disabled={!recordingSessionActive || finishing}
+            style={({ pressed }) => [styles.materialTopButton, pressed && styles.pressed]}
+          >
+            <Ionicons name="document-text-outline" size={14} color={colors.textSecondary} />
+            <Text style={styles.materialTopText}>Course material</Text>
+          </Pressable>
+        ) : null}
         {granted && !isGuest ? (
           <Pressable
             accessibilityRole="button"
@@ -404,7 +421,7 @@ export default function RecordingScreen() {
               pressed && styles.pressed,
             ]}
           >
-            <Ionicons name="contract-outline" size={19} color={colors.deepNavy} />
+            <Ionicons name="contract-outline" size={19} color={colors.textPrimary} />
             <Text style={styles.iconBtnLabel}>Mini</Text>
           </Pressable>
         ) : (
@@ -415,7 +432,7 @@ export default function RecordingScreen() {
       {/* While the permission state is still being read */}
       {!permissionChecked && (
         <View style={styles.centered}>
-          <ActivityIndicator color={colors.deepNavy} />
+          <ActivityIndicator color={colors.accentBright} />
         </View>
       )}
 
@@ -423,7 +440,7 @@ export default function RecordingScreen() {
       {permissionChecked && !granted && (
         <View style={styles.centered}>
           <View style={styles.permIcon}>
-            <Ionicons name="mic-outline" size={36} color={colors.deepNavy} />
+            <Ionicons name="mic-outline" size={36} color={colors.textPrimary} />
           </View>
           <Text style={styles.permTitle}>Microphone access needed</Text>
           <Text style={styles.permBody}>
@@ -462,35 +479,8 @@ export default function RecordingScreen() {
             showsVerticalScrollIndicator={false}
           >
             <View style={styles.content}>
-              {/* Timer — the visual centre of the screen */}
-              <View style={styles.timerBlock}>
-                <StatusPill
-                  label={isPaused ? 'PAUSED' : 'RECORDING'}
-                  variant={isPaused ? 'paused' : 'recording'}
-                />
-                <Text style={styles.timer}>{formatClock(seconds)}</Text>
-                <Text style={styles.timerHint}>
-                  {marks.length > 0
-                    ? `${marks.length} important moment${marks.length > 1 ? 's' : ''} marked`
-                    : 'Tap Mark Important to flag key moments'}
-                </Text>
-                {error ? <Text style={styles.errorText}>{error}</Text> : null}
-              </View>
-
-              {course ? (
-                <View style={styles.recordingToolRow}>
-                  <SecondaryButton
-                    label="Use Course Material"
-                    icon="document-text-outline"
-                    disabled={!recordingSessionActive || finishing}
-                    onPress={() => setMaterialPickerVisible(true)}
-                    style={styles.recordingToolButton}
-                  />
-                </View>
-              ) : null}
-
               {isGuest ? (
-                <GlassCard padding={spacing.xl}>
+                <GlassCard padding={spacing.xl} style={styles.guestCard}>
                   <View style={styles.stateHeader}>
                     <View style={[styles.stateIcon, isPaused && styles.stateIconPaused]}>
                       <Ionicons
@@ -516,33 +506,7 @@ export default function RecordingScreen() {
                   </Text>
                 </GlassCard>
               ) : (
-              <GlassCard padding={spacing.xl}>
-                <View style={styles.stateHeader}>
-                  <View style={[styles.stateIcon, isPaused && styles.stateIconPaused]}>
-                    <Ionicons
-                      name={liveCaptionStatus === 'active' ? 'chatbubble-ellipses' : isPaused ? 'pause' : 'mic'}
-                      size={20}
-                      color={isPaused ? colors.mutedBlueGray : colors.deepNavy}
-                    />
-                  </View>
-                  <View style={styles.stateHeaderText}>
-                    <Text style={styles.stateTitle}>Live captions</Text>
-                    <Text style={styles.stateStatus}>
-                      {liveCaptionStatus === 'connecting'
-                        ? 'Connecting…'
-                        : liveCaptionStatus === 'active'
-                          ? 'Live captions active'
-                          : liveCaptionStatus === 'listening'
-                            ? 'Listening for speech…'
-                            : liveCaptionStatus === 'unavailable'
-                              ? 'Live captions unavailable'
-                              : liveCaptionStatus === 'error'
-                                ? 'Live captions unavailable'
-                                : 'Preparing live captions'}
-                    </Text>
-                  </View>
-                </View>
-
+              <View style={styles.captionStage}>
                 {micStreamError ? (
                   <View style={styles.captionFallback}>
                     <Text style={styles.stateBody}>{micStreamError}</Text>
@@ -555,24 +519,24 @@ export default function RecordingScreen() {
                   </View>
                 ) : liveCaptionStatus === 'active' || liveCaptionStatus === 'listening' || visibleEnglishCaption ? (
                   <View style={styles.captionBody}>
+                    <View style={styles.captionHistory}>
+                      {captionLines.slice(-3, -1).map((line, index) => (
+                        <Text key={`${line.text}-${index}`} style={styles.historyLine}>{line.text}</Text>
+                      ))}
+                    </View>
                     {/* English — primary live caption: large, bold */}
                     <View style={styles.captionSection}>
-                      <Text style={styles.captionLabel}>ENGLISH</Text>
-                      <Text style={styles.captionPrimary}>
-                        {visibleEnglishCaption || 'Listening for speech…'}
-                      </Text>
+                      <Text style={styles.captionPrimary}>{visibleEnglishCaption || 'Listening for speech…'}<Text style={styles.caret}>│</Text></Text>
                     </View>
                     {/* Chinese — translation support: smaller, lighter. Shown
                         when it has text, or briefly while a finalised English
                         line is still being translated. */}
                     {visibleChineseCaption ? (
                       <View style={styles.captionSection}>
-                        <Text style={styles.captionLabel}>中文</Text>
                         <Text style={styles.captionSecondary}>{visibleChineseCaption}</Text>
                       </View>
                     ) : latestFinalLine && !partialCaption ? (
                       <View style={styles.captionSection}>
-                        <Text style={styles.captionLabel}>中文</Text>
                         <Text style={styles.captionTranslating}>Translating…</Text>
                       </View>
                     ) : null}
@@ -592,7 +556,9 @@ export default function RecordingScreen() {
                     />
                   </View>
                 )}
-              </GlassCard>
+                {marks.length > 0 ? <Text style={styles.markHint}>{marks.length} important moment{marks.length > 1 ? 's' : ''} marked</Text> : null}
+                {error ? <Text style={styles.errorText}>{error}</Text> : null}
+              </View>
               )}
             </View>
           </ScrollView>
@@ -619,14 +585,15 @@ export default function RecordingScreen() {
               />
             </Pressable>
 
-            <SecondaryButton
-              label="Finish"
-              icon="checkmark-done"
-              danger
+            <Pressable
+              accessibilityRole="button"
               disabled={finishing}
               onPress={finish}
-              style={styles.sideAction}
-            />
+              style={({ pressed }) => [styles.finishButton, finishing && styles.disabled, pressed && styles.pressed]}
+            >
+              <Ionicons name="checkmark-done" size={18} color={colors.pearlWhite} />
+              <Text style={styles.finishText}>{finishing ? 'Finishing…' : 'Finish lecture'}</Text>
+            </Pressable>
           </View>
 
           <Modal
@@ -651,7 +618,7 @@ export default function RecordingScreen() {
                     onPress={() => setMaterialPickerVisible(false)}
                     style={({ pressed }) => [styles.materialModalClose, pressed && styles.pressed]}
                   >
-                    <Ionicons name="close" size={20} color={colors.deepNavy} />
+                    <Ionicons name="close" size={20} color={colors.textPrimary} />
                   </Pressable>
                 </View>
 
@@ -665,7 +632,7 @@ export default function RecordingScreen() {
                         style={({ pressed }) => [styles.materialPickerRow, pressed && styles.pressed]}
                       >
                         <View style={styles.materialPickerIcon}>
-                          <Ionicons name="document-text-outline" size={19} color={colors.deepNavy} />
+                          <Ionicons name="document-text-outline" size={19} color={colors.textPrimary} />
                         </View>
                         <View style={styles.materialPickerBody}>
                           <Text style={styles.materialPickerTitle} numberOfLines={1}>{material.title}</Text>
@@ -710,9 +677,12 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
+    gap: 10,
+    paddingHorizontal: 20,
+    paddingVertical: 13,
+    backgroundColor: 'rgba(255,255,255,0.78)',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.border,
   },
   iconBtn: {
     height: 44,
@@ -733,24 +703,22 @@ const styles = StyleSheet.create({
   iconBtnLabel: {
     fontSize: fontSize.sm,
     fontWeight: '700',
-    color: colors.deepNavy,
+    color: colors.textPrimary,
   },
   headerSpacer: {
     width: 44,
     height: 44,
   },
+  headerGrow: { flex: 1 },
   pressed: {
     opacity: 0.85,
     transform: [{ scale: 0.96 }],
   },
-  headerTitle: {
-    flex: 1,
-    textAlign: 'center',
-    fontSize: fontSize.lg,
-    fontWeight: '700',
-    color: colors.textPrimary,
-    marginHorizontal: spacing.md,
-  },
+  courseChip: { maxWidth: 220, minHeight: 30, flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, borderRadius: radius.pill, backgroundColor: 'rgba(255,255,255,0.86)', borderWidth: 1, borderColor: colors.border },
+  courseChipText: { color: colors.textSecondary, fontSize: 11.5, fontWeight: '700' },
+  headerTimer: { flex: 1, textAlign: 'right', color: colors.ink, fontSize: 24, fontWeight: '800', fontVariant: ['tabular-nums'], letterSpacing: 0.3 },
+  materialTopButton: { minHeight: 34, flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 12, borderRadius: radius.pill, backgroundColor: 'rgba(255,255,255,0.86)', borderWidth: 1, borderColor: colors.border },
+  materialTopText: { color: colors.textSecondary, fontSize: 11.5, fontWeight: '700' },
 
   // ---- Loading / permission ----
   centered: {
@@ -818,16 +786,16 @@ const styles = StyleSheet.create({
   },
   scroll: {
     flexGrow: 1,
-    paddingHorizontal: spacing.xl,
-    paddingTop: spacing.sm,
-    paddingBottom: spacing.xl,
-    justifyContent: 'center',
+    paddingHorizontal: 72,
+    paddingTop: 24,
+    paddingBottom: 20,
+    justifyContent: 'flex-end',
   },
   content: {
     width: '100%',
-    maxWidth: layout.content,
-    alignSelf: 'center',
-    gap: spacing.xl,
+    maxWidth: 960,
+    alignSelf: 'flex-start',
+    gap: spacing.lg,
   },
   timerBlock: {
     alignItems: 'center',
@@ -852,6 +820,7 @@ const styles = StyleSheet.create({
   recordingToolButton: {
     minWidth: 230,
   },
+  guestCard: { maxWidth: 700, alignSelf: 'center' },
 
   // ---- Recording-state card ----
   stateHeader: {
@@ -887,8 +856,11 @@ const styles = StyleSheet.create({
   },
   // ---- Live caption body: English primary, Chinese secondary ----
   captionBody: {
-    gap: spacing.lg,
+    gap: 10,
   },
+  captionStage: { minHeight: 360, justifyContent: 'flex-end', paddingBottom: 6 },
+  captionHistory: { gap: 8, marginBottom: 18, maxWidth: 880 },
+  historyLine: { color: 'rgba(71,85,105,0.40)', fontSize: 17, lineHeight: 26 },
   captionSection: {
     gap: spacing.xs,
   },
@@ -899,16 +871,18 @@ const styles = StyleSheet.create({
     color: colors.textTertiary,
   },
   captionPrimary: {
-    fontSize: fontSize.xxl,
-    lineHeight: fontSize.xxl * 1.34,
+    fontSize: 30,
+    lineHeight: 42,
     color: colors.textPrimary,
     fontWeight: '700',
+    letterSpacing: -0.3,
   },
+  caret: { color: colors.accent, fontWeight: '400' },
   captionSecondary: {
-    fontSize: fontSize.lg,
-    lineHeight: fontSize.lg * 1.55,
-    color: colors.textSecondary,
-    fontWeight: '500',
+    fontSize: 19,
+    lineHeight: 30,
+    color: colors.accent,
+    fontWeight: '600',
   },
   captionTranslating: {
     fontSize: fontSize.sm,
@@ -927,34 +901,39 @@ const styles = StyleSheet.create({
   retryCaptionsButton: {
     alignSelf: 'flex-start',
   },
+  markHint: { color: colors.textTertiary, fontSize: 11.5, marginTop: 12 },
 
   // ---- Actions ----
   actions: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.md,
-    paddingHorizontal: spacing.xl,
-    paddingTop: spacing.md,
-    paddingBottom: spacing.sm,
-    maxWidth: layout.content,
+    paddingHorizontal: 20,
+    paddingTop: 13,
+    paddingBottom: 18,
     width: '100%',
-    alignSelf: 'center',
+    backgroundColor: 'rgba(255,255,255,0.78)',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
   },
   sideAction: {
     flex: 1,
   },
   roundBtn: {
-    width: 76,
-    height: 76,
-    borderRadius: 38,
-    backgroundColor: colors.deepNavy,
+    width: 62,
+    height: 62,
+    borderRadius: 31,
+    backgroundColor: colors.accent,
     alignItems: 'center',
     justifyContent: 'center',
     ...shadows.button,
   },
+  finishButton: { flex: 1, minHeight: 50, borderRadius: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: colors.navy },
+  finishText: { color: colors.pearlWhite, fontSize: 14.5, fontWeight: '700' },
+  disabled: { opacity: 0.45 },
   materialModalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(6, 27, 52, 0.32)',
+    backgroundColor: 'rgba(15, 23, 42, 0.28)',
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: spacing.xl,
@@ -969,7 +948,7 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     padding: spacing.xl,
     gap: spacing.md,
-    shadowColor: '#0A2342',
+    shadowColor: '#000000',
     shadowOffset: { width: 0, height: 18 },
     shadowOpacity: 0.18,
     shadowRadius: 30,

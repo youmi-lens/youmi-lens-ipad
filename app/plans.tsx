@@ -1,20 +1,15 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import {
-  ActivityIndicator,
-  Alert,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
+import { useCallback, useEffect, useState } from 'react';
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { AppBackground } from '@/components/AppBackground';
 import { GlassCard } from '@/components/GlassCard';
+import { PrimaryButton } from '@/components/PrimaryButton';
 import { SecondaryButton } from '@/components/SecondaryButton';
-import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
+import { GlassIconButton, IconTile, PageHeading, Pill, ProgressBar, SectionLabel } from '@/components/WorkspaceUI';
+import { colors, layout, radius, spacing } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
 import { fetchPlanStatus, PlanStatus, safeAccessLabel } from '@/lib/planStatus';
 import {
@@ -28,11 +23,19 @@ import {
 
 type BusyAction = 'purchase' | 'restore' | null;
 
+const QUOTAS = [
+  ['Monthly minutes', '300 min', '600 min'],
+  ['Daily minutes', '120 min', '120 min'],
+  ['Recording length', '60 min', '90 min'],
+  ['Live session length', '60 min', '90 min'],
+  ['Recordings per day', '2', '6'],
+  ['Processing jobs per day', '2', '10'],
+] as const;
+
 export default function PlansScreen() {
   const router = useRouter();
   const { session, isGuest, exitGuest } = useAuth();
   const accessToken = session?.access_token ?? null;
-
   const [planStatus, setPlanStatus] = useState<PlanStatus | null>(null);
   const [product, setProduct] = useState<StudentPassProduct | null>(null);
   const [productLoading, setProductLoading] = useState(true);
@@ -51,13 +54,12 @@ export default function PlansScreen() {
     setError(null);
     try {
       setPlanStatus(await fetchPlanStatus(accessToken));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Account status is unavailable.');
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Account status is unavailable.');
     } finally {
       setStatusLoading(false);
     }
   }, [accessToken]);
-
   const loadProduct = useCallback(async () => {
     setProductLoading(true);
     try {
@@ -73,62 +75,29 @@ export default function PlansScreen() {
     void loadProduct();
     return () => purchaseService.cleanup();
   }, [loadProduct]);
-
-  useFocusEffect(
-    useCallback(() => {
-      void loadStatus();
-    }, [loadStatus]),
-  );
+  useFocusEffect(useCallback(() => { void loadStatus(); }, [loadStatus]));
 
   const activeEntitlement = planStatus?.entitlement?.active ? planStatus.entitlement : null;
   const purchaseVisible = shouldShowPurchaseEntry(planStatus);
-  const purchaseDisabled =
-    isGuest || !accessToken || !purchaseVisible || productLoading || !product || busy !== null;
-
+  const purchaseDisabled = isGuest || !accessToken || !purchaseVisible || productLoading || !product || busy !== null;
   const currentPlan = safeAccessLabel(planStatus?.planType, planStatus?.displayName);
-
-  const quotaLines = useMemo(
-    () => [
-      ['Monthly minutes', formatNumber(planStatus?.minutesLimit, 'min')],
-      ['Daily minutes', formatNumber(planStatus?.dailyMinutesLimit, 'min')],
-      ['Recording length', formatNumber(planStatus?.maxRecordingMinutes, 'min')],
-      ['Live session length', formatNumber(planStatus?.maxLiveSessionMinutes, 'min')],
-      ['Recordings per day', formatNumber(planStatus?.maxRecordingsPerDay, 'recordings')],
-      ['Processing jobs per day', formatNumber(planStatus?.maxProcessingJobsPerDay, 'jobs')],
-    ],
-    [planStatus],
-  );
-
-  const handleSignIn = async () => {
-    await exitGuest();
-    router.replace('/auth');
-  };
+  const recordingsRemaining = planStatus?.recordingsRemainingToday;
+  const limit = planStatus?.maxRecordingsPerDay ?? 0;
 
   const handlePurchase = async () => {
-    if (isGuest || !accessToken) {
-      Alert.alert('Sign in required', 'Sign in before purchasing Student Basic.');
-      return;
-    }
+    if (isGuest || !accessToken) return Alert.alert('Sign in required', 'Sign in before purchasing Student Basic.');
     setBusy('purchase');
     setRestoreResult(null);
     try {
       const result = await purchaseService.purchaseStudentPass(accessToken);
       await loadStatus();
-      if (result.ok) {
-        Alert.alert('Student Basic active', result.message);
-      } else {
-        Alert.alert('Purchase not completed', result.message);
-      }
+      Alert.alert(result.ok ? 'Student Basic active' : 'Purchase not completed', result.message);
     } finally {
       setBusy(null);
     }
   };
-
   const handleRestore = async () => {
-    if (isGuest || !accessToken) {
-      Alert.alert('Sign in required', 'Sign in to refresh your purchase status.');
-      return;
-    }
+    if (isGuest || !accessToken) return Alert.alert('Sign in required', 'Sign in to refresh your purchase status.');
     setBusy('restore');
     try {
       const result = await purchaseService.restoreStudentPass(accessToken);
@@ -139,393 +108,210 @@ export default function PlansScreen() {
       setBusy(null);
     }
   };
+  const handleSignIn = async () => { await exitGuest(); router.replace('/auth'); };
 
   return (
     <SafeAreaView style={styles.root} edges={['top', 'left', 'right', 'bottom']}>
-      <View style={styles.header}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Back"
-          onPress={() => router.back()}
-          hitSlop={10}
-          style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}
-        >
-          <Ionicons name="chevron-back" size={24} color={colors.deepNavy} />
-        </Pressable>
-        <Text style={styles.headerTitle}>Student Basic</Text>
-        <View style={styles.headerSpacer} />
-      </View>
-
+      <AppBackground />
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         <View style={styles.content}>
-          <View style={styles.heroBlock}>
-            <Text style={styles.heroTitle}>Youmi Lens Student Basic</Text>
-            <Text style={styles.heroSubtitle}>30 days of Student Basic access.</Text>
-            <Text style={styles.heroFinePrint}>One-time payment. Does not renew automatically.</Text>
+          <View style={styles.topBar}>
+            <GlassIconButton icon="chevron-back" onPress={() => router.back()} />
+            <Pill accent>30-DAY ACCESS</Pill>
+          </View>
+
+          <View style={styles.hero}>
+            <View style={styles.heroCopy}>
+              <PageHeading eyebrow="Student access" title="More room for serious lecture weeks" />
+              <Text style={styles.heroBody}>30 days of Student Basic access.</Text>
+              <Text style={styles.heroFine}>One-time payment. Does not renew automatically.</Text>
+              <View style={styles.heroBenefits}>
+                {['Longer lecture capture', 'More daily recordings', 'Higher processing capacity'].map((item) => (
+                  <View key={item} style={styles.heroBenefit}>
+                    <Ionicons name="checkmark-circle" size={17} color={colors.accentBright} />
+                    <Text style={styles.heroBenefitText}>{item}</Text>
+                  </View>
+                ))}
+              </View>
+            </View>
+            <GlassCard elevated style={styles.heroVisual}>
+              <View style={styles.heroIcon}><Ionicons name="sparkles" size={34} color={colors.accentBright} /></View>
+              <Text style={styles.heroProduct}>Student Basic – 30 Days</Text>
+              <Text style={styles.heroPrice}>{productLoading ? 'Loading price…' : product?.displayPrice ?? 'App Store unavailable'}</Text>
+              <Text style={styles.heroProductType}>Apple consumable · backend-verified access</Text>
+            </GlassCard>
           </View>
 
           {statusLoading && !planStatus ? (
-            <View style={styles.loading}>
-              <ActivityIndicator color={colors.deepNavy} />
-            </View>
-          ) : error ? (
-            <ErrorCard message={error} onRetry={() => void loadStatus()} />
+            <View style={styles.loading}><ActivityIndicator color={colors.accentBright} /></View>
           ) : (
-            <>
-              <GlassCard style={styles.card}>
-                <Text style={styles.cardTitle}>Current plan</Text>
-                <View style={styles.statusRow}>
-                  <Text style={styles.statusName}>{currentPlan}</Text>
-                  <View style={styles.activePill}>
-                    <Ionicons name="checkmark" size={12} color="#157A58" />
-                    <Text style={styles.activePillText}>ACTIVE</Text>
+            <View style={styles.mainGrid}>
+              <View style={styles.leftColumn}>
+                <GlassCard elevated>
+                  <View style={styles.statusHeader}>
+                    <View>
+                      <SectionLabel>Current access</SectionLabel>
+                      <Text style={styles.currentPlan}>{currentPlan}</Text>
+                    </View>
+                    <View style={[styles.statusBadge, activeEntitlement && styles.statusBadgeActive]}>
+                      <Text style={[styles.statusBadgeText, activeEntitlement && styles.statusBadgeTextActive]}>
+                        {activeEntitlement ? '● ACTIVE' : '● CURRENT'}
+                      </Text>
+                    </View>
                   </View>
-                </View>
-                <LimitLine
-                  label="Student Basic status"
-                  value={activeEntitlement ? 'Active' : 'Not active'}
-                />
-                <LimitLine
-                  label="Student Basic expiry"
-                  value={formatDate(activeEntitlement?.expiresAt)}
-                />
-              </GlassCard>
+                  {error ? (
+                    <Pressable onPress={() => void loadStatus()}><Text style={styles.errorText}>{error} Tap to retry.</Text></Pressable>
+                  ) : (
+                    <>
+                      <View style={styles.statusStats}>
+                        <View style={styles.statusStat}>
+                          <Text style={styles.statusLabel}>Student Basic</Text>
+                          <Text style={styles.statusValue}>{activeEntitlement ? 'Active' : 'Not active'}</Text>
+                        </View>
+                        <View style={styles.statusStat}>
+                          <Text style={styles.statusLabel}>Access ends</Text>
+                          <Text style={styles.statusValue}>{formatDate(activeEntitlement?.expiresAt)}</Text>
+                        </View>
+                      </View>
+                      <View style={styles.usageRow}>
+                        <Text style={styles.usageLabel}>Current Free plan usage remaining</Text>
+                        <Text style={styles.usageValue}>
+                          {recordingsRemaining == null ? '—' : `${recordingsRemaining} of ${limit || '—'}`}
+                        </Text>
+                      </View>
+                      <ProgressBar value={limit > 0 && recordingsRemaining != null ? recordingsRemaining / limit : 0} />
+                    </>
+                  )}
+                </GlassCard>
 
-              <GlassCard style={styles.card}>
-                <Text style={styles.cardTitle}>Current Free plan usage remaining</Text>
-                <UsageLine
-                  icon="calendar-outline"
-                  label="Monthly minutes"
-                  value={formatRemaining(planStatus?.minutesRemaining, 'min')}
-                />
-                <UsageLine
-                  icon="today-outline"
-                  label="Daily minutes"
-                  value={formatRemaining(planStatus?.dailyMinutesRemaining, 'min')}
-                />
-                <UsageLine
-                  icon="mic-outline"
-                  label="Recordings today"
-                  value={formatRemaining(planStatus?.recordingsRemainingToday, 'recordings')}
-                />
-              </GlassCard>
-
-              <GlassCard style={styles.card}>
-                <Text style={styles.cardTitle}>Student Basic benefits</Text>
-                <BenefitLine icon="school-outline" text="Premium lecture recording capacity for coursework." />
-                <BenefitLine icon="albums-outline" text="Higher daily and monthly usage budgets." />
-                <BenefitLine icon="sync-outline" text="Backend-verified access shared across signed-in devices." />
-              </GlassCard>
-
-              <GlassCard style={styles.card}>
-                <Text style={styles.cardTitle}>Server-provided quota limits</Text>
-                {quotaLines.map(([label, value]) => (
-                  <LimitLine key={label} label={label} value={value} />
-                ))}
-              </GlassCard>
-
-              <GlassCard style={styles.card}>
-                <View style={styles.purchaseHeader}>
-                  <View style={styles.purchaseText}>
-                    <Text style={styles.productName}>
-                      {product?.displayName ?? 'Student Basic - 30 Days'}
-                    </Text>
-                    <Text style={styles.productId}>{STUDENT_PASS_PRODUCT_ID}</Text>
+                <GlassCard>
+                  <View style={styles.comparisonHeader}>
+                    <View>
+                      <SectionLabel>Access comparison</SectionLabel>
+                      <Text style={styles.comparisonTitle}>Free and Student Basic</Text>
+                    </View>
+                    <Pill accent>Paid benefits emphasized</Pill>
                   </View>
-                  <Text style={styles.price}>
-                    {productLoading ? 'Loading…' : product?.displayPrice ?? 'Unavailable'}
+                  <Text style={styles.comparisonNote}>
+                    Server-provided quota limits determine current access. The values below are a plan reference comparison.
                   </Text>
-                </View>
+                  <View style={styles.tableHeader}>
+                    <Text style={[styles.tableCell, styles.tableFeature]}>Quota</Text>
+                    <Text style={styles.tableCell}>Free</Text>
+                    <Text style={[styles.tableCell, styles.tablePaid]}>Student Basic</Text>
+                  </View>
+                  {QUOTAS.map(([label, free, paid]) => (
+                    <View key={label} style={styles.tableRow}>
+                      <Text style={[styles.tableCell, styles.tableFeature]}>{label}</Text>
+                      <Text style={styles.tableCell}>{free}</Text>
+                      <View style={[styles.tableCell, styles.paidCell]}>
+                        <Ionicons name="checkmark" size={13} color={colors.accentBright} />
+                        <Text style={styles.paidValue}>{paid}</Text>
+                      </View>
+                    </View>
+                  ))}
+                </GlassCard>
+              </View>
 
+              <GlassCard elevated style={styles.purchaseCard}>
+                <IconTile icon="card-outline" size={48} />
+                <Text style={styles.purchaseTitle}>{product?.displayName ?? 'Student Basic – 30 Days'}</Text>
+                <Text style={styles.purchasePrice}>{productLoading ? 'Loading…' : product?.displayPrice ?? 'Unavailable'}</Text>
+                <Text style={styles.purchaseDescription}>A one-time purchase that adds 30 days of Student Basic access after backend verification.</Text>
+
+                {activeEntitlement ? (
+                  <View style={styles.noticeSuccess}>
+                    <Ionicons name="checkmark-circle" size={18} color={colors.success} />
+                    <Text style={styles.noticeSuccessText}>Your active access remains visible even when new purchases are closed.</Text>
+                  </View>
+                ) : null}
                 {isGuest || !accessToken ? (
-                  <View style={styles.notice}>
-                    <Ionicons name="lock-closed-outline" size={18} color={colors.deepNavy} />
-                    <Text style={styles.noticeText}>Sign in before purchasing Student Basic.</Text>
-                  </View>
+                  <View style={styles.notice}><Ionicons name="lock-closed-outline" size={18} color={colors.accentBright} /><Text style={styles.noticeText}>Sign in before purchasing Student Basic.</Text></View>
                 ) : null}
-
                 {!purchaseVisible ? (
-                  <View style={styles.notice}>
-                    <Ionicons name="pause-circle-outline" size={18} color={colors.deepNavy} />
-                    <Text style={styles.noticeText}>New Student Basic purchases are unavailable.</Text>
-                  </View>
+                  <View style={styles.notice}><Ionicons name="pause-circle-outline" size={18} color={colors.accentBright} /><Text style={styles.noticeText}>New Student Basic purchases are unavailable.</Text></View>
                 ) : null}
-
                 {!productLoading && !product ? (
-                  <View style={styles.notice}>
-                    <Ionicons name="alert-circle-outline" size={18} color={colors.deepNavy} />
-                    <Text style={styles.noticeText}>
-                      Student Basic could not be fetched from the App Store.
-                    </Text>
-                  </View>
+                  <View style={styles.notice}><Ionicons name="alert-circle-outline" size={18} color={colors.accentBright} /><Text style={styles.noticeText}>Student Basic could not be fetched from the App Store.</Text></View>
                 ) : null}
 
                 {purchaseVisible ? (
-                  <SecondaryButton
-                    label={busy === 'purchase' ? 'Purchasing…' : 'Purchase Student Basic'}
-                    icon="card-outline"
-                    onPress={handlePurchase}
-                    disabled={purchaseDisabled}
-                    style={styles.actionButton}
-                  />
+                  <PrimaryButton label={busy === 'purchase' ? 'Purchasing…' : `Purchase ${product?.displayPrice ?? ''}`.trim()} icon="card-outline" onPress={() => void handlePurchase()} disabled={purchaseDisabled} />
                 ) : null}
-                <SecondaryButton
-                  label={busy === 'restore' ? 'Refreshing…' : 'Refresh Access'}
-                  icon="refresh-outline"
-                  onPress={handleRestore}
-                  disabled={busy !== null || isGuest || !accessToken}
-                  style={styles.actionButton}
-                />
-                {isGuest ? (
-                  <SecondaryButton
-                    label="Sign In"
-                    icon="log-in-outline"
-                    onPress={handleSignIn}
-                    style={styles.actionButton}
-                  />
-                ) : null}
-                {restoreResult ? (
-                  <Text style={styles.restoreText}>
-                    {restoreResult.message ||
-                      restoreMessageForCode(restoreResult.code)}
-                  </Text>
-                ) : null}
+                <SecondaryButton label={busy === 'restore' ? 'Refreshing Access…' : 'Refresh Access'} icon="refresh-outline" onPress={() => void handleRestore()} disabled={busy !== null || isGuest || !accessToken} />
+                {isGuest ? <SecondaryButton label="Sign in" icon="log-in-outline" onPress={() => void handleSignIn()} /> : null}
+                {restoreResult ? <Text style={styles.restoreText}>{restoreResult.message || restoreMessageForCode(restoreResult.code)}</Text> : null}
+                <Text style={styles.productId}>{STUDENT_PASS_PRODUCT_ID}</Text>
               </GlassCard>
-            </>
+            </View>
           )}
 
-          <Text style={styles.footerNote}>
-            StoreKit transactions are verified by the Youmi Lens backend before access changes.
-          </Text>
+          <Text style={styles.footer}>StoreKit price is loaded dynamically. The Youmi Lens backend remains the source of truth for access and quotas.</Text>
         </View>
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-function UsageLine({
-  icon,
-  label,
-  value,
-}: {
-  icon: keyof typeof Ionicons.glyphMap;
-  label: string;
-  value: string;
-}) {
-  return (
-    <View style={styles.usageLine}>
-      <View style={styles.lineIcon}>
-        <Ionicons name={icon} size={18} color={colors.deepNavy} />
-      </View>
-      <Text style={styles.lineLabel}>{label}</Text>
-      <Text style={styles.lineValue}>{value}</Text>
-    </View>
-  );
-}
-
-function BenefitLine({ icon, text }: { icon: keyof typeof Ionicons.glyphMap; text: string }) {
-  return (
-    <View style={styles.benefitLine}>
-      <View style={styles.lineIcon}>
-        <Ionicons name={icon} size={18} color={colors.deepNavy} />
-      </View>
-      <Text style={styles.benefitText}>{text}</Text>
-    </View>
-  );
-}
-
-function LimitLine({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={styles.limitLine}>
-      <Text style={styles.limitLabel}>{label}</Text>
-      <Text style={styles.limitValue}>{value}</Text>
-    </View>
-  );
-}
-
-function ErrorCard({ message, onRetry }: { message: string; onRetry: () => void }) {
-  return (
-    <GlassCard style={styles.card}>
-      <Text style={styles.cardTitle}>Account status unavailable</Text>
-      <Text style={styles.cardBody}>{message}</Text>
-      <SecondaryButton
-        label="Retry"
-        icon="refresh-outline"
-        onPress={onRetry}
-        style={styles.actionButton}
-      />
-    </GlassCard>
-  );
-}
-
-function formatNumber(value: number | null | undefined, unit: string): string {
-  if (value == null || Number.isNaN(Number(value))) return '—';
-  return `${Math.round(Number(value))} ${unit}`;
-}
-
-function formatRemaining(value: number | null | undefined, unit: string): string {
-  if (value == null || Number.isNaN(Number(value))) return '—';
-  return `${Math.max(0, Math.round(Number(value)))} ${unit}`;
-}
-
-function formatDate(value: string | null | undefined): string {
+function formatDate(value: string | null | undefined) {
   if (!value) return '—';
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '—';
-  return date.toLocaleDateString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-  });
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.background },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-  },
-  backButton: {
-    width: 44,
-    height: 44,
-    borderRadius: radius.pill,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  headerTitle: { fontSize: fontSize.lg, fontWeight: '700', color: colors.textPrimary },
-  headerSpacer: { width: 44, height: 44 },
-  scroll: { paddingHorizontal: spacing.xl, paddingBottom: spacing.xxxl },
-  content: { width: '100%', maxWidth: layout.content, alignSelf: 'center', gap: spacing.xl },
-  heroBlock: { gap: spacing.sm },
-  heroTitle: {
-    fontSize: fontSize.xxl,
-    fontWeight: '800',
-    color: colors.textPrimary,
-  },
-  heroSubtitle: {
-    fontSize: fontSize.lg,
-    lineHeight: fontSize.lg * 1.35,
-    color: colors.textPrimary,
-    fontWeight: '700',
-  },
-  heroFinePrint: {
-    fontSize: fontSize.md,
-    lineHeight: fontSize.md * 1.45,
-    color: colors.textSecondary,
-    fontWeight: '600',
-  },
-  loading: { paddingVertical: spacing.xxxl, alignItems: 'center' },
-  card: { gap: spacing.md },
-  cardTitle: { fontSize: fontSize.lg, fontWeight: '800', color: colors.textPrimary },
-  cardBody: {
-    fontSize: fontSize.sm,
-    lineHeight: fontSize.sm * 1.5,
-    color: colors.textSecondary,
-    fontWeight: '500',
-  },
-  statusRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: spacing.md,
-  },
-  statusName: { flex: 1, fontSize: fontSize.xl, fontWeight: '800', color: colors.textPrimary },
-  activePill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 3,
-    borderRadius: radius.pill,
-    backgroundColor: colors.successTint,
-  },
-  activePillText: {
-    fontSize: 10,
-    fontWeight: '800',
-    letterSpacing: 0.5,
-    color: '#157A58',
-  },
-  usageLine: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-  },
-  benefitLine: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-  },
-  lineIcon: {
-    width: 36,
-    height: 36,
-    borderRadius: radius.sm,
-    backgroundColor: colors.iceTint,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  lineLabel: { flex: 1, fontSize: fontSize.sm, color: colors.textSecondary, fontWeight: '700' },
-  lineValue: { fontSize: fontSize.sm, color: colors.textPrimary, fontWeight: '800' },
-  benefitText: {
-    flex: 1,
-    fontSize: fontSize.sm,
-    lineHeight: fontSize.sm * 1.45,
-    color: colors.textSecondary,
-    fontWeight: '600',
-  },
-  limitLine: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: spacing.md,
-  },
-  limitLabel: { flex: 1, fontSize: fontSize.sm, color: colors.textSecondary, fontWeight: '600' },
-  limitValue: { fontSize: fontSize.sm, color: colors.textPrimary, fontWeight: '800' },
-  purchaseHeader: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-    gap: spacing.md,
-  },
-  purchaseText: { flex: 1, gap: 2 },
-  productName: { fontSize: fontSize.lg, color: colors.textPrimary, fontWeight: '800' },
-  productId: { fontSize: fontSize.xs, color: colors.textTertiary, fontWeight: '600' },
-  price: { fontSize: fontSize.xl, color: colors.textPrimary, fontWeight: '800' },
-  notice: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    padding: spacing.md,
-    borderRadius: radius.md,
-    backgroundColor: colors.iceTint,
-    borderWidth: 1,
-    borderColor: colors.iceBlue,
-  },
-  noticeText: {
-    flex: 1,
-    fontSize: fontSize.sm,
-    lineHeight: fontSize.sm * 1.35,
-    color: colors.textSecondary,
-    fontWeight: '600',
-  },
-  actionButton: { alignSelf: 'stretch' },
-  restoreText: {
-    fontSize: fontSize.sm,
-    lineHeight: fontSize.sm * 1.45,
-    color: colors.textSecondary,
-    fontWeight: '600',
-  },
-  footerNote: {
-    fontSize: fontSize.xs,
-    lineHeight: fontSize.xs * 1.5,
-    color: colors.textTertiary,
-    fontWeight: '500',
-    textAlign: 'center',
-  },
-  pressed: { opacity: 0.85, transform: [{ scale: 0.97 }] },
+  scroll: { paddingHorizontal: layout.workspacePadding, paddingVertical: 24 },
+  content: { width: '100%', maxWidth: 1120, alignSelf: 'center', gap: 20 },
+  topBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  hero: { flexDirection: 'row', gap: 18, alignItems: 'stretch' },
+  heroCopy: { flex: 1.3, paddingVertical: 16 },
+  heroBody: { color: colors.textPrimary, fontSize: 17, lineHeight: 24, fontWeight: '700', marginTop: 14 },
+  heroFine: { color: colors.textSecondary, fontSize: 12.5, lineHeight: 18, marginTop: 5 },
+  heroBenefits: { flexDirection: 'row', flexWrap: 'wrap', gap: 14, marginTop: 20 },
+  heroBenefit: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  heroBenefitText: { color: colors.textSecondary, fontSize: 12.5, fontWeight: '600' },
+  heroVisual: { flex: 0.7, alignItems: 'center', justifyContent: 'center' },
+  heroIcon: { width: 68, height: 68, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.iceTint, borderWidth: 1, borderColor: colors.border },
+  heroProduct: { color: colors.ink, fontSize: 17, fontWeight: '800', marginTop: 16, textAlign: 'center' },
+  heroPrice: { color: colors.textPrimary, fontSize: 28, fontWeight: '800', marginTop: 8 },
+  heroProductType: { color: colors.textTertiary, fontSize: 11.5, marginTop: 6, textAlign: 'center' },
+  loading: { minHeight: 320, alignItems: 'center', justifyContent: 'center' },
+  mainGrid: { flexDirection: 'row', gap: 18, alignItems: 'flex-start' },
+  leftColumn: { flex: 1.35, gap: 18 },
+  purchaseCard: { flex: 0.65, gap: 14 },
+  statusHeader: { flexDirection: 'row', justifyContent: 'space-between', gap: spacing.md },
+  currentPlan: { color: colors.ink, fontSize: 22, fontWeight: '800', marginTop: 8 },
+  statusBadge: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: radius.pill, backgroundColor: colors.surfaceMuted },
+  statusBadgeActive: { backgroundColor: colors.successTint },
+  statusBadgeText: { color: colors.textSecondary, fontSize: 10, fontWeight: '800' },
+  statusBadgeTextActive: { color: colors.success },
+  statusStats: { flexDirection: 'row', gap: 12, marginTop: 20 },
+  statusStat: { flex: 1, padding: 14, borderRadius: 13, backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border },
+  statusLabel: { color: colors.textTertiary, fontSize: 10.5, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.7 },
+  statusValue: { color: colors.ink, fontSize: 13.5, fontWeight: '700', marginTop: 5 },
+  usageRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 18, marginBottom: 7 },
+  usageLabel: { color: colors.textSecondary, fontSize: 12.5 },
+  usageValue: { color: colors.ink, fontSize: 12.5, fontWeight: '700' },
+  comparisonHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 },
+  comparisonTitle: { color: colors.ink, fontSize: 18, fontWeight: '800', marginTop: 6 },
+  comparisonNote: { color: colors.textTertiary, fontSize: 11.5, lineHeight: 16, marginTop: 10 },
+  tableHeader: { flexDirection: 'row', marginTop: 18, paddingBottom: 9, borderBottomWidth: 1, borderBottomColor: colors.border },
+  tableRow: { flexDirection: 'row', minHeight: 43, alignItems: 'center', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  tableCell: { flex: 1, color: colors.textSecondary, fontSize: 12.5, textAlign: 'center' },
+  tableFeature: { flex: 1.35, color: colors.textPrimary, textAlign: 'left', fontWeight: '600' },
+  tablePaid: { color: colors.accentBright, fontWeight: '800' },
+  paidCell: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5 },
+  paidValue: { color: colors.textPrimary, fontSize: 12.5, fontWeight: '800' },
+  purchaseTitle: { color: colors.ink, fontSize: 18, fontWeight: '800' },
+  purchasePrice: { color: colors.textPrimary, fontSize: 30, fontWeight: '800' },
+  purchaseDescription: { color: colors.textSecondary, fontSize: 12.5, lineHeight: 18 },
+  notice: { flexDirection: 'row', gap: 9, padding: 12, borderRadius: 12, backgroundColor: colors.iceTint, borderWidth: 1, borderColor: colors.border },
+  noticeText: { flex: 1, color: colors.textSecondary, fontSize: 11.5, lineHeight: 16 },
+  noticeSuccess: { flexDirection: 'row', gap: 9, padding: 12, borderRadius: 12, backgroundColor: colors.successTint },
+  noticeSuccessText: { flex: 1, color: colors.textSecondary, fontSize: 11.5, lineHeight: 16 },
+  restoreText: { color: colors.textSecondary, fontSize: 11.5, lineHeight: 16 },
+  productId: { color: colors.textTertiary, fontSize: 9.5, textAlign: 'center' },
+  errorText: { color: colors.recordingRed, fontSize: 12.5, marginTop: 16 },
+  footer: { color: colors.textTertiary, fontSize: 11, lineHeight: 16, textAlign: 'center' },
 });

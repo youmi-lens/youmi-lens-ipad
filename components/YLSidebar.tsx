@@ -1,9 +1,8 @@
 import { Ionicons } from '@expo/vector-icons';
 import { BottomTabBarProps } from '@react-navigation/bottom-tabs';
-import { BlurView } from 'expo-blur';
-import { useRouter } from 'expo-router';
+import { Href, useRouter } from 'expo-router';
 import { ComponentProps } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { LogoMark } from '@/components/BrandHeader';
@@ -18,7 +17,15 @@ const ICONS: Record<string, IconName> = {
   settings: 'settings-outline',
 };
 
-export function YLSidebar({ state, descriptors, navigation }: BottomTabBarProps) {
+type SidebarItem = {
+  key: string;
+  icon: IconName;
+  label: string;
+  selected: boolean;
+  onPress: () => void;
+};
+
+function SidebarFrame({ items }: { items: SidebarItem[] }) {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const { user, username, isGuest } = useAuth();
@@ -33,7 +40,6 @@ export function YLSidebar({ state, descriptors, navigation }: BottomTabBarProps)
 
   return (
     <View style={[styles.sidebar, { paddingTop: Math.max(insets.top, 24), paddingBottom: Math.max(insets.bottom, 18) }]}>
-      <BlurView intensity={42} tint="light" style={StyleSheet.absoluteFill} />
       <View pointerEvents="none" style={styles.tint} />
 
       <View style={styles.brand}>
@@ -44,41 +50,27 @@ export function YLSidebar({ state, descriptors, navigation }: BottomTabBarProps)
       </View>
 
       <View style={styles.navigation}>
-        {state.routes.map((route, index) => {
-          const focused = state.index === index;
-          const options = descriptors[route.key].options;
-          const label = typeof options.title === 'string' ? options.title : route.name;
-          const onPress = () => {
-            const event = navigation.emit({
-              type: 'tabPress',
-              target: route.key,
-              canPreventDefault: true,
-            });
-            if (!focused && !event.defaultPrevented) navigation.navigate(route.name);
-          };
-
-          return (
+        {items.map((item) => (
             <Pressable
-              key={route.key}
+              key={item.key}
               accessibilityRole="tab"
-              accessibilityState={focused ? { selected: true } : {}}
-              onPress={onPress}
+              accessibilityState={item.selected ? { selected: true } : {}}
+              onPress={item.onPress}
               style={({ pressed }) => [
                 styles.navRow,
-                focused && styles.navRowActive,
+                item.selected && styles.navRowActive,
                 pressed && styles.pressed,
               ]}
             >
-              {focused ? <View style={styles.activeBar} /> : null}
+              {item.selected ? <View style={styles.activeBar} /> : null}
               <Ionicons
-                name={ICONS[route.name] ?? 'ellipse-outline'}
+                name={item.icon}
                 size={18}
-                color={focused ? colors.accent : colors.textSecondary}
+                color={item.selected ? colors.accent : colors.textSecondary}
               />
-              <Text style={[styles.navLabel, focused && styles.navLabelActive]}>{label}</Text>
+              <Text style={[styles.navLabel, item.selected && styles.navLabelActive]}>{item.label}</Text>
             </Pressable>
-          );
-        })}
+        ))}
       </View>
 
       <View style={styles.spacer} />
@@ -101,6 +93,60 @@ export function YLSidebar({ state, descriptors, navigation }: BottomTabBarProps)
   );
 }
 
+export function YLSidebar({ state, descriptors, navigation }: BottomTabBarProps) {
+  const items = state.routes.map((route, index) => {
+    const selected = state.index === index;
+    const options = descriptors[route.key].options;
+    const label = typeof options.title === 'string' ? options.title : route.name;
+    return {
+      key: route.key,
+      icon: ICONS[route.name] ?? 'ellipse-outline',
+      label,
+      selected,
+      onPress: () => {
+        const event = navigation.emit({
+          type: 'tabPress',
+          target: route.key,
+          canPreventDefault: true,
+        });
+        if (!selected && !event.defaultPrevented) navigation.navigate(route.name);
+      },
+    };
+  });
+  return <SidebarFrame items={items} />;
+}
+
+export function WorkspaceSidebar({
+  active = 'record',
+}: {
+  active?: 'record' | 'courses' | 'settings';
+}) {
+  const router = useRouter();
+  const { width } = useWindowDimensions();
+  if (width < 900) return null;
+
+  const routes: {
+    key: 'record' | 'courses' | 'settings';
+    icon: IconName;
+    label: string;
+    href: Href;
+  }[] = [
+    { key: 'record', icon: 'mic-outline', label: 'Record', href: '/' },
+    { key: 'courses', icon: 'library-outline', label: 'Courses', href: '/courses' },
+    { key: 'settings', icon: 'settings-outline', label: 'Settings', href: '/settings' },
+  ];
+
+  return (
+    <SidebarFrame
+      items={routes.map((route) => ({
+        ...route,
+        selected: active === route.key,
+        onPress: () => router.replace(route.href),
+      }))}
+    />
+  );
+}
+
 const styles = StyleSheet.create({
   sidebar: {
     width: layout.sidebar,
@@ -111,7 +157,7 @@ const styles = StyleSheet.create({
   },
   tint: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(255, 255, 255, 0.55)',
+    backgroundColor: 'rgba(255, 255, 255, 0.66)',
   },
   brand: {
     flexDirection: 'row',
@@ -141,7 +187,7 @@ const styles = StyleSheet.create({
     borderRadius: 11,
   },
   navRowActive: {
-    backgroundColor: 'rgba(29, 62, 138, 0.10)',
+    backgroundColor: colors.iceTint,
   },
   activeBar: {
     position: 'absolute',
@@ -170,9 +216,9 @@ const styles = StyleSheet.create({
     gap: 9,
     padding: 8,
     borderRadius: radius.md,
-    backgroundColor: 'rgba(29, 62, 138, 0.08)',
+    backgroundColor: 'rgba(255, 255, 255, 0.72)',
     borderWidth: 1,
-    borderColor: 'rgba(29, 62, 138, 0.15)',
+    borderColor: colors.border,
   },
   avatar: {
     width: 30,
@@ -180,7 +226,7 @@ const styles = StyleSheet.create({
     borderRadius: radius.pill,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: colors.accent,
+    backgroundColor: colors.navy,
   },
   avatarText: {
     color: colors.pearlWhite,
