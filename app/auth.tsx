@@ -1,22 +1,27 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
+  AccessibilityInfo,
+  Animated,
+  Easing,
   KeyboardAvoidingView,
+  Image,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
+import Svg, { Defs, LinearGradient, Path, Rect, Stop } from 'react-native-svg';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { GlassCard } from '@/components/GlassCard';
 import { PrimaryButton } from '@/components/PrimaryButton';
 import { SecondaryButton } from '@/components/SecondaryButton';
-import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
+import { colors, fontSize, radius, spacing } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
 import { checkEmailExists } from '@/lib/checkEmail';
 
@@ -36,6 +41,7 @@ const EXISTING_ACCOUNT_MESSAGE =
 
 export default function AuthScreen() {
   const router = useRouter();
+  const { width, height } = useWindowDimensions();
   const {
     session,
     createProfileWithPassword,
@@ -47,8 +53,11 @@ export default function AuthScreen() {
     sendPasswordResetCode,
     verifyPasswordResetCode,
     updatePassword,
+    updateUsername,
     signOut,
     isResettingPassword,
+    needsUsernameSetup,
+    signInWithProvider,
     continueAsGuest,
   } = useAuth();
   const [entryMode, setEntryMode] = useState<EntryMode>('signIn');
@@ -56,7 +65,6 @@ export default function AuthScreen() {
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
   const [pendingEmail, setPendingEmail] = useState('');
   const [code, setCode] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -66,16 +74,46 @@ export default function AuthScreen() {
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [signInPasswordVisible, setSignInPasswordVisible] = useState(false);
   const [createPasswordVisible, setCreatePasswordVisible] = useState(false);
-  const [createConfirmPasswordVisible, setCreateConfirmPasswordVisible] = useState(false);
   const [resetPasswordVisible, setResetPasswordVisible] = useState(false);
   const [resetConfirmPasswordVisible, setResetConfirmPasswordVisible] = useState(false);
-  const [busyAction, setBusyAction] = useState<'send' | 'verify' | 'signin' | 'resend' | 'updatePassword' | null>(null);
+  const [busyAction, setBusyAction] = useState<'send' | 'verify' | 'signin' | 'resend' | 'updatePassword' | 'provider' | 'username' | null>(null);
+  const [reduceMotion, setReduceMotion] = useState(false);
+  const [focusedField, setFocusedField] = useState<string | null>(null);
+  const entryTransition = useRef(new Animated.Value(1)).current;
+  const showBrandPanel = width >= 900 && width > height;
 
   useEffect(() => {
-    if (session && !isResettingPassword && step !== 'resetNewPassword') {
-      router.replace('/(tabs)');
+    let mounted = true;
+    AccessibilityInfo.isReduceMotionEnabled().then((enabled) => {
+      if (mounted) setReduceMotion(enabled);
+    });
+    const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', setReduceMotion);
+    return () => {
+      mounted = false;
+      subscription.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    entryTransition.stopAnimation();
+    if (reduceMotion) {
+      entryTransition.setValue(1);
+      return;
     }
-  }, [isResettingPassword, router, session, step]);
+    entryTransition.setValue(0);
+    Animated.timing(entryTransition, {
+      toValue: 1,
+      duration: 250,
+      easing: Easing.inOut(Easing.ease),
+      useNativeDriver: true,
+    }).start();
+  }, [entryMode, entryTransition, reduceMotion]);
+
+  useEffect(() => {
+    if (session && !isResettingPassword && !needsUsernameSetup && step !== 'resetNewPassword') {
+      router.replace('/');
+    }
+  }, [isResettingPassword, needsUsernameSetup, router, session, step]);
 
   const validateEmail = (value: string) => {
     if (!value.trim()) return 'Please enter your email.';
@@ -96,19 +134,12 @@ export default function AuthScreen() {
 
   // ── Create Profile: step 1 — Supabase signUp, which emails the code ─────────
   const handleCreateProfile = async () => {
-    const trimmedUsername = username.trim();
     const trimmedEmail = email.trim();
 
-    if (!trimmedUsername) return setError('Please enter a username.');
-    if (trimmedUsername.length < 2 || trimmedUsername.length > 32) {
-      return setError('Username must be 2–32 characters.');
-    }
     const emailError = validateEmail(trimmedEmail);
     if (emailError) return setError(emailError);
     if (!password) return setError('Please enter a password.');
     if (password.length < 8) return setError('Password must be at least 8 characters.');
-    if (!confirmPassword) return setError('Please confirm your password.');
-    if (password !== confirmPassword) return setError('Passwords do not match.');
 
     setBusyAction('send');
     setError(null);
@@ -131,11 +162,7 @@ export default function AuthScreen() {
       return;
     }
 
-    const { error: createError, session: nextSession } = await createProfileWithPassword(
-      trimmedEmail,
-      password,
-      trimmedUsername,
-    );
+    const { error: createError, session: nextSession } = await createProfileWithPassword(trimmedEmail, password);
     setBusyAction(null);
 
     if (createError) {
@@ -151,7 +178,6 @@ export default function AuthScreen() {
 
     // Email confirmation disabled → signed in immediately.
     if (nextSession) {
-      router.replace('/(tabs)');
       return;
     }
 
@@ -169,18 +195,39 @@ export default function AuthScreen() {
 
     setBusyAction('verify');
     setError(null);
-    const { error: verifyError, session: nextSession } = await verifySignupCode(
-      email.trim(),
-      trimmedCode,
-      username.trim(),
-    );
+    const { error: verifyError } = await verifySignupCode(email.trim(), trimmedCode);
     setBusyAction(null);
 
     if (verifyError) {
       setError(verifyError);
       return;
     }
-    if (nextSession) router.replace('/(tabs)');
+  };
+
+  const handleProviderSignIn = async (provider: 'apple' | 'google') => {
+    if (busyAction) return;
+    setBusyAction('provider');
+    setError(null);
+    const result = await signInWithProvider(provider);
+    setBusyAction(null);
+    if (result.error) setError(result.error);
+  };
+
+  const handleUsernameSetup = async () => {
+    const trimmed = username.trim();
+    if (trimmed.length < 2 || trimmed.length > 64) {
+      setError('Username must be 2–64 characters.');
+      return;
+    }
+    setBusyAction('username');
+    setError(null);
+    const result = await updateUsername(trimmed);
+    setBusyAction(null);
+    if (result.error) {
+      setError(result.error);
+      return;
+    }
+    router.replace('/');
   };
 
   const handleResendSignupCode = async () => {
@@ -194,17 +241,6 @@ export default function AuthScreen() {
   const backToCreateProfile = () => {
     setStep('entry');
     setError(null);
-    setCode('');
-    setResetPassword('');
-    setResetConfirmPassword('');
-    setSuccessMessage(null);
-  };
-
-  // ── Fallback / recovery sign-in with an email verification code ─────────────
-  const openVerificationCodeSignIn = () => {
-    setStep('signInCodeEmail');
-    setError(null);
-    setPersistentError(null);
     setCode('');
     setResetPassword('');
     setResetConfirmPassword('');
@@ -245,7 +281,7 @@ export default function AuthScreen() {
       return;
     }
 
-    if (nextSession) router.replace('/(tabs)');
+    if (nextSession) router.replace('/');
   };
 
   const handleResendSignInCode = async () => {
@@ -271,7 +307,7 @@ export default function AuthScreen() {
       return;
     }
     setPersistentError(null);
-    router.replace('/(tabs)');
+    router.replace('/');
   };
 
   const changeEmail = () => {
@@ -362,7 +398,7 @@ export default function AuthScreen() {
 
   const handleContinueAsGuest = async () => {
     await continueAsGuest();
-    router.replace('/(tabs)');
+    router.replace('/');
   };
 
   const handleUpdatePassword = async () => {
@@ -392,30 +428,50 @@ export default function AuthScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.root}>
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.keyboardAvoider}>
+    <View style={styles.root}>
+      {showBrandPanel ? <BrandPanel /> : null}
+      <SafeAreaView style={styles.authArea} edges={['top', 'bottom', 'left', 'right']}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.keyboardAvoider}>
         <ScrollView
           contentContainerStyle={styles.scrollContent}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
         <View style={styles.content}>
-          <View style={styles.brandBlock}>
-            <View style={styles.logo}><Text style={styles.logoText}>Y</Text></View>
-            <Text style={styles.title}>Youmi Lens</Text>
-            <Text style={styles.subtitle}>
-              {step === 'signupCode'
-                ? 'Verify your email to finish creating your profile.'
-                : step === 'signInCodeEmail' || step === 'signInCodeVerify'
-                  ? 'Sign in with an email verification code.'
-                  : step === 'resetEmail' || step === 'resetVerify' || step === 'resetNewPassword'
-                    ? 'Reset your password with an email verification code.'
-                    : 'A calm lecture workspace for iPad.'}
-            </Text>
-          </View>
-
-          <GlassCard padding={spacing.xl} style={styles.card}>
-            {step === 'signupCode' ? (
+          <View style={styles.card}>
+            {session && needsUsernameSetup ? (
+              <View style={styles.codeWrap}>
+                <View style={styles.headerCopy}>
+                  <Text style={styles.cardTitle}>Choose your username</Text>
+                  <Text style={styles.cardSubtitle}>This is how your name will appear in your Youmi Lens workspace.</Text>
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.label}>Username</Text>
+                  <TextInput
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    placeholder="yourname"
+                    placeholderTextColor="#A8B3C2"
+                    onBlur={() => setFocusedField(null)}
+                    onFocus={() => setFocusedField('username')}
+                    style={[styles.input, focusedField === 'username' && styles.inputFocused]}
+                    value={username}
+                    onChangeText={(value) => {
+                      setUsername(value);
+                      setError(null);
+                    }}
+                  />
+                </View>
+                {error ? <Text style={styles.error}>{error}</Text> : null}
+                <PrimaryButton
+                  label="Continue"
+                  onPress={handleUsernameSetup}
+                  loading={busyAction === 'username'}
+                  disabled={busyAction !== null}
+                  style={styles.primaryAction}
+                />
+              </View>
+            ) : step === 'signupCode' ? (
               <View style={styles.codeWrap}>
                 <View style={styles.headerCopy}>
                   <Text style={styles.cardTitle}>Verify your email</Text>
@@ -564,51 +620,104 @@ export default function AuthScreen() {
                 </Pressable>
               </View>
             ) : (
-              <>
-                <View style={styles.modeSwitch}>
-                  <ModeButton label="Create Profile" active={entryMode === 'createProfile'} onPress={() => switchMode('createProfile')} />
-                  <ModeButton label="Sign In" active={entryMode === 'signIn'} onPress={() => switchMode('signIn')} />
-                </View>
+              <Animated.View
+                style={[
+                  styles.entryView,
+                  {
+                    opacity: entryTransition,
+                    transform: [{ translateY: entryTransition.interpolate({ inputRange: [0, 1], outputRange: [6, 0] }) }],
+                  },
+                ]}
+              >
                 <View style={styles.headerCopy}>
-                  <Text style={styles.cardTitle}>{entryMode === 'createProfile' ? 'Create your profile' : 'Welcome back'}</Text>
-                  <Text style={styles.cardSubtitle}>
-                    {entryMode === 'createProfile'
-                      ? 'We’ll send a code to verify your email before creating your account.'
-                      : 'Sign in with the email and password on your account.'}
+                  <Text style={styles.cardTitle}>{entryMode === 'createProfile' ? 'Create your account' : 'Welcome back'}</Text>
+                  <View style={styles.authSwitchRow}>
+                    <Text style={styles.cardSubtitle}>
+                      {entryMode === 'createProfile' ? 'Already have one? ' : 'New to Youmi Lens? '}
+                    </Text>
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={() => switchMode(entryMode === 'createProfile' ? 'signIn' : 'createProfile')}
+                    >
+                      <Text style={styles.authSwitchLink}>
+                        {entryMode === 'createProfile' ? 'Sign in' : 'Create an account'}
+                      </Text>
+                    </Pressable>
+                  </View>
+                </View>
+
+                <View style={styles.ssoStack}>
+                  <Pressable
+                    accessibilityRole="button"
+                    disabled={busyAction !== null}
+                    onPress={() => void handleProviderSignIn('apple')}
+                    style={({ pressed }) => [styles.ssoButton, styles.appleButton, pressed && styles.ssoPressed]}
+                  >
+                    <Ionicons name="logo-apple" size={20} color="#FFFFFF" />
+                    <Text style={styles.appleButtonText}>Continue with Apple</Text>
+                  </Pressable>
+                  <Pressable
+                    accessibilityRole="button"
+                    disabled={busyAction !== null}
+                    onPress={() => void handleProviderSignIn('google')}
+                    style={({ pressed }) => [styles.ssoButton, styles.googleButton, pressed && styles.ssoPressed]}
+                  >
+                    <GoogleMark />
+                    <Text style={styles.googleButtonText}>Continue with Google</Text>
+                  </Pressable>
+                </View>
+
+                <View style={styles.emailDivider}>
+                  <View style={styles.dividerLine} />
+                  <Text style={styles.dividerText}>
+                    {entryMode === 'createProfile' ? 'or sign up with email' : 'or sign in with email'}
                   </Text>
-                  {entryMode === 'signIn' ? (
-                    <Text style={styles.macHelper}>Already used Youmi Lens on Mac? Sign in with the same email.</Text>
-                  ) : null}
+                  <View style={styles.dividerLine} />
                 </View>
 
                 {entryMode === 'createProfile' ? (
                   <>
                     <View style={styles.fieldGroup}>
-                      <Text style={styles.label}>Username</Text>
-                      <TextInput autoCapitalize="none" placeholder="yourname" placeholderTextColor={colors.textTertiary} style={styles.input} value={username} onChangeText={(value) => { setUsername(value); setError(null); }} />
-                    </View>
-                    <View style={styles.fieldGroup}>
                       <Text style={styles.label}>Email</Text>
-                      <TextInput autoCapitalize="none" autoComplete="email" keyboardType="email-address" placeholder="student@example.com" placeholderTextColor={colors.textTertiary} style={styles.input} value={email} onChangeText={(value) => { setEmail(value); setError(null); setPersistentError(null); }} />
+                      <TextInput
+                        autoCapitalize="none"
+                        autoComplete="email"
+                        keyboardType="email-address"
+                        placeholder="student@example.com"
+                        placeholderTextColor="#A8B3C2"
+                        onBlur={() => setFocusedField(null)}
+                        onFocus={() => setFocusedField('create-email')}
+                        style={[styles.input, focusedField === 'create-email' && styles.inputFocused]}
+                        value={email}
+                        onChangeText={(value) => { setEmail(value); setError(null); setPersistentError(null); }}
+                      />
                     </View>
                     <View style={styles.fieldGroup}>
                       <Text style={styles.label}>Password</Text>
-                      <PasswordInput value={password} onChangeText={(value) => { setPassword(value); setError(null); }} placeholder="Password" visible={createPasswordVisible} onToggleVisible={() => setCreatePasswordVisible((current) => !current)} textContentType="newPassword" />
-                    </View>
-                    <View style={styles.fieldGroup}>
-                      <Text style={styles.label}>Confirm Password</Text>
-                      <PasswordInput value={confirmPassword} onChangeText={(value) => { setConfirmPassword(value); setError(null); }} placeholder="Confirm password" visible={createConfirmPasswordVisible} onToggleVisible={() => setCreateConfirmPasswordVisible((current) => !current)} confirm />
+                      <PasswordInput value={password} onChangeText={(value) => { setPassword(value); setError(null); }} placeholder="At least 8 characters" visible={createPasswordVisible} onToggleVisible={() => setCreatePasswordVisible((current) => !current)} textContentType="newPassword" />
+                      <Text style={styles.hint}>We’ll email you a 6-digit code to verify it’s you. You can pick a username after.</Text>
                     </View>
                   </>
                 ) : (
                   <>
                     <View style={styles.fieldGroup}>
                       <Text style={styles.label}>Email</Text>
-                      <TextInput autoCapitalize="none" autoComplete="email" keyboardType="email-address" placeholder="student@example.com" placeholderTextColor={colors.textTertiary} style={styles.input} value={email} onChangeText={(value) => { setEmail(value); setPersistentError(null); setError(null); }} />
+                      <TextInput
+                        autoCapitalize="none"
+                        autoComplete="email"
+                        keyboardType="email-address"
+                        placeholder="student@example.com"
+                        placeholderTextColor="#A8B3C2"
+                        onBlur={() => setFocusedField(null)}
+                        onFocus={() => setFocusedField('signin-email')}
+                        style={[styles.input, focusedField === 'signin-email' && styles.inputFocused]}
+                        value={email}
+                        onChangeText={(value) => { setEmail(value); setPersistentError(null); setError(null); }}
+                      />
                     </View>
                     <View style={styles.fieldGroup}>
                       <Text style={styles.label}>Password</Text>
-                      <PasswordInput value={password} onChangeText={(value) => { setPassword(value); setError(null); }} placeholder="Password" visible={signInPasswordVisible} onToggleVisible={() => setSignInPasswordVisible((current) => !current)} textContentType="password" />
+                      <PasswordInput value={password} onChangeText={(value) => { setPassword(value); setError(null); }} placeholder="Your password" visible={signInPasswordVisible} onToggleVisible={() => setSignInPasswordVisible((current) => !current)} textContentType="password" />
                     </View>
                   </>
                 )}
@@ -617,47 +726,229 @@ export default function AuthScreen() {
 
                 {entryMode === 'createProfile' ? (
                   <>
-                    <PrimaryButton label="Send verification code" onPress={handleCreateProfile} loading={busyAction === 'send'} disabled={busyAction !== null} />
-                    <Text style={styles.helper}>We’ll email you a verification code to confirm your email.</Text>
-                    <Pressable accessibilityRole="button" onPress={() => switchMode('signIn')} style={styles.textButton}>
-                      <Text style={styles.textButtonLabel}>Already have an account? Sign in</Text>
-                    </Pressable>
+                    <PrimaryButton label="Create account" onPress={handleCreateProfile} loading={busyAction === 'send'} disabled={busyAction !== null} style={styles.primaryAction} />
                   </>
                 ) : (
                   <>
-                    <PrimaryButton label="Sign in" onPress={handleSignIn} loading={busyAction === 'signin'} disabled={busyAction !== null} />
-                    <Pressable accessibilityRole="button" onPress={openPasswordReset} style={styles.textButton}>
+                    <Pressable accessibilityRole="button" onPress={openPasswordReset} style={styles.forgotButton}>
                       <Text style={styles.textButtonLabel}>Forgot password?</Text>
                     </Pressable>
-                    <Pressable accessibilityRole="button" onPress={() => switchMode('createProfile')} style={styles.textButton}>
-                      <Text style={styles.textButtonLabel}>New to Youmi Lens? Create profile</Text>
-                    </Pressable>
+                    <PrimaryButton label="Sign in" onPress={handleSignIn} loading={busyAction === 'signin'} disabled={busyAction !== null} style={styles.primaryAction} />
                   </>
                 )}
                 {successMessage ? <Text style={styles.success}>{successMessage}</Text> : null}
                 {persistentError ? <ErrorNotice message={persistentError} /> : null}
 
-                <View style={styles.guestDivider}>
-                  <View style={styles.guestDividerLine} />
-                  <Text style={styles.guestDividerText}>or</Text>
-                  <View style={styles.guestDividerLine} />
+                <View style={styles.guestFooter}>
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={handleContinueAsGuest}
+                    disabled={busyAction !== null}
+                    style={({ pressed }) => pressed && styles.pressed}
+                  >
+                    <Text style={styles.guestButtonLabel}>Continue without an account</Text>
+                  </Pressable>
+                  <Text style={styles.guestHelper}>Guest recordings stay on this device only.</Text>
                 </View>
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={handleContinueAsGuest}
-                  disabled={busyAction !== null}
-                  style={({ pressed }) => [styles.guestButton, pressed && styles.pressed]}
-                >
-                  <Text style={styles.guestButtonLabel}>Continue without account</Text>
-                </Pressable>
-                <Text style={styles.helper}>Guest recordings are stored only on this device.</Text>
-              </>
+              </Animated.View>
             )}
-          </GlassCard>
+          </View>
         </View>
         </ScrollView>
-      </KeyboardAvoidingView>
-    </SafeAreaView>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+    </View>
+  );
+}
+
+const CAPTION_PAIRS = [
+  {
+    en: "Today we'll look at how neural networks learn from data.",
+    zh: '今天我们来看看神经网络是如何从数据中学习的。',
+  },
+  {
+    en: 'Each layer extracts increasingly abstract features.',
+    zh: '每一层都会提取越来越抽象的特征。',
+  },
+  {
+    en: "Let's start with a simple example",
+    zh: '我们从一个简单的例子开始',
+  },
+] as const;
+
+function BrandPanel() {
+  const [reduceMotion, setReduceMotion] = useState(false);
+  const [panelSize, setPanelSize] = useState({ width: 0, height: 0 });
+  const captionAnimations = useRef(CAPTION_PAIRS.map(() => new Animated.Value(0))).current;
+  const pulse = useRef(new Animated.Value(1)).current;
+  const cursor = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    let mounted = true;
+    AccessibilityInfo.isReduceMotionEnabled().then((enabled) => {
+      if (mounted) setReduceMotion(enabled);
+    });
+    const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', setReduceMotion);
+    return () => {
+      mounted = false;
+      subscription.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    captionAnimations.forEach((value) => value.stopAnimation());
+    pulse.stopAnimation();
+    cursor.stopAnimation();
+
+    if (reduceMotion) {
+      captionAnimations.forEach((value) => value.setValue(1));
+      pulse.setValue(1);
+      cursor.setValue(1);
+      return;
+    }
+
+    captionAnimations.forEach((value) => value.setValue(0));
+    const captionDelays = [0, 500, 2400];
+    captionAnimations.forEach((value, index) => {
+      Animated.timing(value, {
+        toValue: 1,
+        duration: 900,
+        delay: captionDelays[index],
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }).start();
+    });
+
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, { toValue: 0.8, duration: 1100, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+        Animated.timing(pulse, { toValue: 1, duration: 1100, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+      ]),
+    ).start();
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(cursor, { toValue: 0, duration: 500, easing: Easing.linear, useNativeDriver: true }),
+        Animated.timing(cursor, { toValue: 1, duration: 500, easing: Easing.linear, useNativeDriver: true }),
+      ]),
+    ).start();
+  }, [captionAnimations, cursor, pulse, reduceMotion]);
+
+  return (
+    <View
+      style={styles.brandPanel}
+      onLayout={({ nativeEvent }) => {
+        const { width, height } = nativeEvent.layout;
+        setPanelSize((current) =>
+          current.width === width && current.height === height ? current : { width, height },
+        );
+      }}
+    >
+      {panelSize.width > 0 && panelSize.height > 0 ? (
+        <Svg
+          pointerEvents="none"
+          width={panelSize.width}
+          height={panelSize.height}
+          viewBox={`0 0 ${panelSize.width} ${panelSize.height}`}
+          style={StyleSheet.absoluteFill}
+        >
+          <Defs>
+            <LinearGradient
+              id="auth-bg"
+              gradientUnits="userSpaceOnUse"
+              x1={0}
+              y1={0}
+              x2={0}
+              y2={panelSize.height}
+            >
+              <Stop offset="0" stopColor="#1A2B47" />
+              <Stop offset="1" stopColor="#101B2D" />
+            </LinearGradient>
+            <LinearGradient
+              id="auth-glow"
+              gradientUnits="userSpaceOnUse"
+              x1={0}
+              y1={0}
+              x2={panelSize.width}
+              y2={panelSize.height}
+            >
+              <Stop offset="0" stopColor="#4A7DBF" stopOpacity={0.22} />
+              <Stop offset="0.58" stopColor="#4A7DBF" stopOpacity={0.06} />
+              <Stop offset="1" stopColor="#4A7DBF" stopOpacity={0} />
+            </LinearGradient>
+          </Defs>
+          <Rect width={panelSize.width} height={panelSize.height} fill="url(#auth-bg)" />
+          <Rect width={panelSize.width} height={panelSize.height} fill="url(#auth-glow)" />
+        </Svg>
+      ) : null}
+
+      <View style={styles.brandContent}>
+        <View style={styles.brandTop}>
+          <Image
+            accessibilityIgnoresInvertColors
+            accessibilityLabel="Youmi Lens"
+            resizeMode="contain"
+            source={require('../assets/images/youmi-mark-white.png')}
+            style={styles.brandMark}
+          />
+          <Text style={styles.brandName}>Youmi Lens</Text>
+        </View>
+
+        <View style={styles.captionStage}>
+          <View style={styles.liveLabel}>
+            <Animated.View
+              style={[
+                styles.recDot,
+                {
+                  opacity: pulse.interpolate({ inputRange: [0.8, 1], outputRange: [0.45, 1] }),
+                  transform: [{ scale: pulse }],
+                },
+              ]}
+            />
+            <Text style={styles.liveLabelText}>Live captions · 实时字幕</Text>
+          </View>
+          {CAPTION_PAIRS.map((pair, index) => {
+            const animation = captionAnimations[index];
+            return (
+              <Animated.View
+                key={pair.en}
+                style={[
+                  styles.captionPair,
+                  {
+                    opacity: animation,
+                    transform: [{ translateY: animation.interpolate({ inputRange: [0, 1], outputRange: [14, 0] }) }],
+                  },
+                ]}
+              >
+                <View style={styles.captionEnglishRow}>
+                  <Text style={styles.captionEnglish}>{pair.en}</Text>
+                  {index === CAPTION_PAIRS.length - 1 ? <Animated.View style={[styles.captionCursor, { opacity: cursor }]} /> : null}
+                </View>
+                <Text style={styles.captionChinese}>{pair.zh}</Text>
+              </Animated.View>
+            );
+          })}
+        </View>
+
+        <View>
+          <Text style={styles.brandTagline}>A calm lecture workspace.</Text>
+          <Text style={styles.brandDescription}>
+            Real-time bilingual captions, transcripts, and AI summaries — on iPad and Mac.
+          </Text>
+        </View>
+      </View>
+    </View>
+  );
+}
+
+function GoogleMark() {
+  return (
+    <Svg width={18} height={18} viewBox="0 0 18 18">
+      <Rect width={18} height={18} fill="transparent" />
+      <Path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z" />
+      <Path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.96v2.33A9 9 0 0 0 9 18z" />
+      <Path fill="#FBBC05" d="M3.97 10.72A5.4 5.4 0 0 1 3.69 9c0-.6.1-1.18.28-1.72V4.95H.96A9 9 0 0 0 0 9c0 1.45.35 2.83.96 4.05l3.01-2.33z" />
+      <Path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.59A9 9 0 0 0 .96 4.95l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58z" />
+    </Svg>
   );
 }
 
@@ -684,6 +975,7 @@ function PasswordInput({
   textContentType,
   onFocus,
 }: PasswordInputProps) {
+  const [focused, setFocused] = useState(false);
   const accessibilityLabel = visible
     ? confirm ? 'Hide confirm password' : 'Hide password'
     : confirm ? 'Show confirm password' : 'Show password';
@@ -693,9 +985,13 @@ function PasswordInput({
       <TextInput
         value={value}
         onChangeText={onChangeText}
-        onFocus={onFocus}
+        onBlur={() => setFocused(false)}
+        onFocus={() => {
+          setFocused(true);
+          onFocus?.();
+        }}
         placeholder={placeholder}
-        placeholderTextColor={colors.textTertiary}
+        placeholderTextColor="#A8B3C2"
         secureTextEntry={!visible}
         autoCapitalize="none"
         autoCorrect={false}
@@ -703,7 +999,7 @@ function PasswordInput({
         autoComplete={textContentType === 'password' ? 'current-password' : textContentType === 'newPassword' ? 'new-password' : 'off'}
         textContentType={textContentType ?? 'none'}
         editable={editable}
-        style={[styles.input, styles.passwordInput]}
+        style={[styles.input, styles.passwordInput, focused && styles.inputFocused]}
       />
       <Pressable
         accessibilityRole="button"
@@ -730,56 +1026,100 @@ function ErrorNotice({ message }: { message: string }) {
   );
 }
 
-function ModeButton({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
-  return (
-    <Pressable accessibilityRole="button" onPress={onPress} style={({ pressed }) => [styles.modeButton, active && styles.modeButtonActive, pressed && styles.pressed]}>
-      <Text style={[styles.modeButtonLabel, active && styles.modeButtonLabelActive]}>{label}</Text>
-    </Pressable>
-  );
-}
-
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: colors.background },
+  root: { flex: 1, flexDirection: 'row', backgroundColor: '#F5F7FA' },
+  brandPanel: {
+    width: '44%',
+    overflow: 'hidden',
+    backgroundColor: '#101B2D',
+  },
+  brandContent: {
+    flex: 1,
+    paddingHorizontal: 52,
+    paddingVertical: 56,
+    justifyContent: 'space-between',
+  },
+  brandTop: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  brandMark: {
+    width: 38,
+    height: 46,
+    shadowColor: '#000000',
+    shadowOpacity: 0.18,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 1 },
+  },
+  brandName: { color: '#FFFFFF', fontSize: 17, fontWeight: '600', letterSpacing: 0.2 },
+  captionStage: { maxWidth: 430 },
+  liveLabel: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 26 },
+  recDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#E0635C' },
+  liveLabelText: { color: 'rgba(255,255,255,0.55)', fontSize: 12, fontWeight: '600', letterSpacing: 1.68, textTransform: 'uppercase' },
+  captionPair: { marginBottom: 22 },
+  captionEnglishRow: { flexDirection: 'row', alignItems: 'baseline', flexWrap: 'wrap' },
+  captionEnglish: { color: '#F4F7FB', fontSize: 21, lineHeight: 30.5, fontWeight: '500' },
+  captionChinese: { color: '#8FA8C8', fontSize: 15, lineHeight: 24, fontWeight: '400', marginTop: 5 },
+  captionCursor: { width: 2, height: 21, backgroundColor: '#FFFFFF', marginLeft: 5 },
+  brandTagline: { color: 'rgba(255,255,255,0.85)', fontSize: 13.5, lineHeight: 21.6, fontWeight: '600' },
+  brandDescription: { color: 'rgba(255,255,255,0.50)', fontSize: 13.5, lineHeight: 21.6, marginTop: 1 },
+  authArea: { flex: 1, backgroundColor: '#F5F7FA' },
   keyboardAvoider: { flex: 1 },
-  // flexGrow keeps the card vertically centered when it fits, and lets the
-  // page scroll once the fields (or the keyboard) exceed the available height.
   scrollContent: {
     flexGrow: 1,
     justifyContent: 'center',
-    paddingHorizontal: spacing.xl,
-    paddingTop: spacing.xxl,
-    paddingBottom: spacing.xxxl,
+    paddingHorizontal: 40,
+    paddingVertical: 48,
   },
-  content: { width: '100%', maxWidth: layout.content, alignSelf: 'center', gap: spacing.xxl },
-  brandBlock: { alignItems: 'center', gap: spacing.sm },
-  logo: { width: 72, height: 72, borderRadius: radius.pill, backgroundColor: colors.deepNavy, alignItems: 'center', justifyContent: 'center', marginBottom: spacing.sm },
-  logoText: { color: colors.textOnNavy, fontSize: fontSize.display, fontWeight: '800' },
-  title: { color: colors.deepNavy, fontSize: fontSize.display, fontWeight: '800', letterSpacing: -0.5 },
-  subtitle: { color: colors.textSecondary, fontSize: fontSize.md, fontWeight: '500', textAlign: 'center' },
-  card: { width: '100%', gap: spacing.lg },
-  modeSwitch: { flexDirection: 'row', gap: spacing.sm, padding: spacing.xs, borderRadius: radius.lg, backgroundColor: colors.surfaceMuted },
-  modeButton: { flex: 1, minHeight: 46, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center' },
-  modeButtonActive: { backgroundColor: colors.pearlWhite },
-  modeButtonLabel: { color: colors.textSecondary, fontSize: fontSize.md, fontWeight: '700' },
-  modeButtonLabelActive: { color: colors.deepNavy },
-  headerCopy: { gap: spacing.xs },
-  cardTitle: { color: colors.textPrimary, fontSize: fontSize.xxl, fontWeight: '800', letterSpacing: -0.3 },
-  cardSubtitle: { color: colors.textSecondary, fontSize: fontSize.md, lineHeight: 21 },
-  macHelper: { color: colors.deepNavy, fontSize: fontSize.sm, fontWeight: '600', lineHeight: 20 },
-  fieldGroup: { gap: spacing.sm },
-  label: { color: colors.textPrimary, fontSize: fontSize.sm, fontWeight: '700' },
-  input: { minHeight: 56, borderWidth: 1, borderColor: colors.borderStrong, borderRadius: radius.lg, backgroundColor: colors.pearlWhite, paddingHorizontal: spacing.lg, fontSize: fontSize.lg, color: colors.textPrimary, letterSpacing: 0, textAlign: 'left' },
+  content: { width: '100%', maxWidth: 420, alignSelf: 'center' },
+  card: { width: '100%', gap: 16 },
+  entryView: { gap: 16 },
+  headerCopy: { marginBottom: 14 },
+  cardTitle: { color: '#16243A', fontSize: 28, lineHeight: 34, fontWeight: '700', letterSpacing: -0.4 },
+  authSwitchRow: { flexDirection: 'row', alignItems: 'center', marginTop: 6 },
+  cardSubtitle: { color: '#3D4D66', fontSize: 14.5, lineHeight: 21 },
+  authSwitchLink: { color: '#4A7DBF', fontSize: 14.5, lineHeight: 21, fontWeight: '600' },
+  ssoStack: { gap: 11, marginBottom: 8 },
+  ssoButton: { height: 50, borderRadius: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10 },
+  appleButton: { backgroundColor: '#000000', borderWidth: 1, borderColor: '#000000' },
+  appleButtonText: { color: '#FFFFFF', fontSize: 15.5, fontWeight: '600' },
+  googleButton: { backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#E3E8EF' },
+  googleButtonText: { color: '#16243A', fontSize: 15.5, fontWeight: '600' },
+  ssoPressed: { opacity: 0.92, transform: [{ scale: 0.99 }] },
+  emailDivider: { flexDirection: 'row', alignItems: 'center', gap: 14, marginBottom: 8 },
+  dividerLine: { flex: 1, height: 1, backgroundColor: '#E3E8EF' },
+  dividerText: { color: '#9AA7B8', fontSize: 12.5, fontWeight: '500' },
+  fieldGroup: { gap: 7 },
+  label: { color: '#3D4D66', fontSize: 13, fontWeight: '600' },
+  input: {
+    height: 50,
+    borderWidth: 1,
+    borderColor: '#E3E8EF',
+    borderRadius: 14,
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 16,
+    fontSize: 15.5,
+    color: '#16243A',
+    letterSpacing: 0,
+    textAlign: 'left',
+  },
+  inputFocused: {
+    borderColor: '#4A7DBF',
+    shadowColor: '#4A7DBF',
+    shadowOpacity: 0.12,
+    shadowRadius: 3,
+    shadowOffset: { width: 0, height: 0 },
+  },
   passwordWrap: { position: 'relative' },
   passwordInput: { letterSpacing: 0, textAlign: 'left', paddingRight: 54 },
-  passwordToggle: { position: 'absolute', right: spacing.md, top: 0, bottom: 0, width: 40, alignItems: 'center', justifyContent: 'center' },
-  codeWrap: { gap: spacing.lg },
+  passwordToggle: { position: 'absolute', right: 6, top: 6, width: 38, height: 38, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  codeWrap: { gap: 16 },
   codeInput: { letterSpacing: 8, textAlign: 'center' },
   error: { color: colors.recordingRed, fontSize: fontSize.sm, fontWeight: '600' },
-  success: { color: colors.deepNavy, fontSize: fontSize.sm, fontWeight: '700', lineHeight: 20 },
-  helper: { color: colors.textSecondary, fontSize: fontSize.sm, textAlign: 'center' },
+  success: { color: '#16243A', fontSize: 12.5, fontWeight: '600', lineHeight: 19 },
+  helper: { color: '#9AA7B8', fontSize: 12.5, lineHeight: 18.75, textAlign: 'center' },
+  hint: { color: '#9AA7B8', fontSize: 12.5, lineHeight: 18.75 },
+  primaryAction: { minHeight: 52, borderRadius: 14, backgroundColor: '#16243A' },
   errorNotice: {
     borderWidth: 1,
-    borderColor: '#F2C3C3',
+    borderColor: colors.borderStrong,
     borderRadius: radius.lg,
     backgroundColor: colors.recordingTint,
     paddingHorizontal: spacing.lg,
@@ -791,20 +1131,11 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     lineHeight: 20,
   },
-  textButton: { minHeight: 44, alignItems: 'center', justifyContent: 'center' },
-  textButtonLabel: { color: colors.deepNavy, fontSize: fontSize.md, fontWeight: '700' },
-  guestDivider: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginTop: spacing.xs },
-  guestDividerLine: { flex: 1, height: 1, backgroundColor: colors.border },
-  guestDividerText: { color: colors.textTertiary, fontSize: fontSize.sm, fontWeight: '600' },
-  guestButton: {
-    minHeight: 56,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: colors.borderStrong,
-    backgroundColor: colors.surface,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  guestButtonLabel: { color: colors.deepNavy, fontSize: fontSize.lg, fontWeight: '700' },
-  pressed: { opacity: 0.78 },
+  textButton: { minHeight: 38, alignItems: 'center', justifyContent: 'center' },
+  forgotButton: { alignSelf: 'flex-end', marginTop: -6, marginBottom: 4 },
+  textButtonLabel: { color: '#4A7DBF', fontSize: 13.5, fontWeight: '600' },
+  guestFooter: { marginTop: 10, paddingTop: 22, borderTopWidth: 1, borderTopColor: '#E3E8EF', alignItems: 'center' },
+  guestButtonLabel: { color: '#3D4D66', fontSize: 14.5, fontWeight: '600' },
+  guestHelper: { color: '#9AA7B8', fontSize: 12.5, marginTop: 6 },
+  pressed: { opacity: 0.78, transform: [{ scale: 0.995 }] },
 });

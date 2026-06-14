@@ -18,7 +18,8 @@
         "ITSAppUsesNonExemptEncryption": false
       },
       "bundleIdentifier": "com.aydenz.youmilensipad",
-      "buildNumber": "18"
+      "buildNumber": "18",
+      "usesAppleSignIn": true
     },
     "android": {
       "adaptiveIcon": {
@@ -69,7 +70,14 @@
       ],
       "expo-asset",
       "@config-plugins/react-native-pdf",
-      "expo-iap"
+      "expo-iap",
+      "expo-apple-authentication",
+      [
+        "@react-native-google-signin/google-signin",
+        {
+          "iosUrlScheme": "com.googleusercontent.apps.904238201234-f9cjmceoaj9n2vum9bp037aosb2unuts"
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

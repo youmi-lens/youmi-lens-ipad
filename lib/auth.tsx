@@ -1,5 +1,13 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import {
+  GoogleSignin,
+  isErrorWithCode,
+  isSuccessResponse,
+  statusCodes,
+} from '@react-native-google-signin/google-signin';
 import type { EmailOtpType, Session, User } from '@supabase/supabase-js';
+import * as AppleAuthentication from 'expo-apple-authentication';
+import * as Crypto from 'expo-crypto';
 import * as Linking from 'expo-linking';
 import {
   createContext,
@@ -10,6 +18,7 @@ import {
   useMemo,
   useState,
 } from 'react';
+import { Platform } from 'react-native';
 
 import { GUEST_MODE_KEY } from './guest';
 import { supabase, supabaseConfigError } from './supabase';
@@ -46,8 +55,10 @@ type AuthContextValue = {
   exitGuest: () => Promise<void>;
   /** True while the active session is a recovery session (set new password flow). */
   isResettingPassword: boolean;
-  createProfileWithPassword: (email: string, password: string, username: string) => Promise<VerifySignupResult>;
-  verifySignupCode: (email: string, code: string, username: string) => Promise<VerifySignupResult>;
+  needsUsernameSetup: boolean;
+  createProfileWithPassword: (email: string, password: string) => Promise<VerifySignupResult>;
+  verifySignupCode: (email: string, code: string) => Promise<VerifySignupResult>;
+  signInWithProvider: (provider: 'apple' | 'google') => Promise<AuthResult>;
   resendSignupCode: (email: string) => Promise<AuthResult>;
   sendSignInCode: (email: string) => Promise<AuthResult>;
   verifySignInCode: (email: string, code: string) => Promise<VerifySignupResult>;
@@ -123,6 +134,52 @@ export async function applySessionFromCallbackUrl(url: string): Promise<Session 
   return null;
 }
 
+// ── Native social sign-in helpers ───────────────────────────────────────────
+// Client IDs are not secrets and are supplied through public env config. The
+// Google *web* client secret lives only in Supabase, never in the app.
+const GOOGLE_WEB_CLIENT_ID = process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID;
+const GOOGLE_IOS_CLIENT_ID = process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID;
+
+let googleConfigured = false;
+function ensureGoogleConfigured(): boolean {
+  if (!GOOGLE_WEB_CLIENT_ID || !GOOGLE_IOS_CLIENT_ID) return false;
+  if (!googleConfigured) {
+    GoogleSignin.configure({
+      // webClientId is the audience Supabase validates the Google idToken against.
+      webClientId: GOOGLE_WEB_CLIENT_ID,
+      iosClientId: GOOGLE_IOS_CLIENT_ID,
+    });
+    googleConfigured = true;
+  }
+  return true;
+}
+
+// A fresh, high-entropy nonce per Apple sign-in. The SHA-256 hash is sent to
+// Apple; the raw value is handed to Supabase, which re-hashes and compares.
+function generateRawNonce(): string {
+  const bytes = Crypto.getRandomBytes(32);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Collapse raw provider/Supabase errors into concise, non-sensitive copy.
+// Never surface tokens, identifiers, or full provider payloads to the UI.
+function mapProviderError(provider: 'apple' | 'google', message?: string): string {
+  const normalized = (message ?? '').toLowerCase();
+  if (
+    normalized.includes('already registered') ||
+    normalized.includes('already been registered') ||
+    normalized.includes('already exists') ||
+    normalized.includes('identity is already linked') ||
+    normalized.includes('email address is already') ||
+    normalized.includes('email already')
+  ) {
+    return 'This email is already linked to a Youmi Lens account created with a different sign-in method. Please sign in with that method (for example, your email and password).';
+  }
+  return provider === 'apple'
+    ? 'Apple sign-in could not be completed. Please try again.'
+    : 'Google sign-in could not be completed. Please try again.';
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [user, setUser] = useState<User | null>(null);
@@ -134,10 +191,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // True between PASSWORD_RECOVERY and the next SIGNED_OUT. Lets the AuthGate
   // keep the user on /auth long enough to enter a new password.
   const [isResettingPassword, setIsResettingPassword] = useState(false);
+  const [needsUsernameSetup, setNeedsUsernameSetup] = useState(false);
 
   const loadUsername = useCallback(async (nextUser: User | null) => {
     if (!nextUser) {
       setUsername(null);
+      setNeedsUsernameSetup(false);
       return;
     }
 
@@ -153,17 +212,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (error) {
       console.warn('[auth] unable to load profile username', error.message);
       setUsername(metadataUsername);
+      setNeedsUsernameSetup(!metadataUsername);
       return;
     }
 
-    setUsername(data?.username ?? metadataUsername);
+    const nextUsername = data?.username ?? metadataUsername;
+    setUsername(nextUsername);
+    setNeedsUsernameSetup(!nextUsername);
   }, []);
 
   const applySessionState = useCallback(
     async (nextSession: Session | null) => {
-      setSession(nextSession);
       setUser(nextSession?.user ?? null);
       await loadUsername(nextSession?.user ?? null);
+      setSession(nextSession);
     },
     [loadUsername],
   );
@@ -223,30 +285,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [applySessionState]);
 
-  const upsertProfileUsername = useCallback(async (nextUser: User, nextUsername: string) => {
-    const { error } = await supabase.from('profiles').upsert({
-      id: nextUser.id,
-      username: nextUsername,
-      updated_at: new Date().toISOString(),
-    });
-    if (error) {
-      console.warn('[auth] unable to save profile username', error.message);
-      return;
-    }
-    setUsername(nextUsername);
-  }, []);
-
   // Create Profile, step 1: Supabase signUp. With email confirmation enabled,
   // Supabase emails a verification code (Confirm sign up template → {{ .Token }})
   // and returns no session — the code is verified in step 2.
   const createProfileWithPassword = useCallback(
-    async (email: string, password: string, nextUsername: string): Promise<VerifySignupResult> => {
+    async (email: string, password: string): Promise<VerifySignupResult> => {
       if (supabaseConfigError) return { error: supabaseConfigError, session: null };
 
       const { data, error } = await supabase.auth.signUp({
         email,
         password,
-        options: { data: { username: nextUsername } },
       });
 
       if (error) {
@@ -264,17 +312,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       // If email confirmation is disabled, signUp returns a session immediately.
       if (data.session) {
-        await upsertProfileUsername(data.user, nextUsername);
         await applySessionState(data.session);
       }
       return { error: null, session: data.session };
     },
-    [applySessionState, upsertProfileUsername],
+    [applySessionState],
   );
 
   // Create Profile, step 2: verify the Supabase signup confirmation code.
   const verifySignupCode = useCallback(
-    async (email: string, code: string, nextUsername: string): Promise<VerifySignupResult> => {
+    async (email: string, code: string): Promise<VerifySignupResult> => {
       if (supabaseConfigError) return { error: supabaseConfigError, session: null };
 
       const { data, error } = await supabase.auth.verifyOtp({
@@ -298,11 +345,105 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return { error: 'Verification succeeded, but no session was created. Please try again.', session: null };
       }
 
-      await upsertProfileUsername(data.user, nextUsername);
       await applySessionState(data.session);
       return { error: null, session: data.session };
     },
-    [applySessionState, upsertProfileUsername],
+    [applySessionState],
+  );
+
+  // ── Sign in with Apple (native) ─────────────────────────────────────────────
+  // Uses the system Sign in with Apple sheet, then exchanges the verified Apple
+  // identity token with Supabase via signInWithIdToken. The same Supabase user.id
+  // continues to own courses, recordings, quota, entitlements, and IAP.
+  const signInWithApple = useCallback(async (): Promise<AuthResult> => {
+    const rawNonce = generateRawNonce();
+    const hashedNonce = await Crypto.digestStringAsync(
+      Crypto.CryptoDigestAlgorithm.SHA256,
+      rawNonce,
+    );
+
+    let credential: AppleAuthentication.AppleAuthenticationCredential;
+    try {
+      credential = await AppleAuthentication.signInAsync({
+        requestedScopes: [
+          AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
+          AppleAuthentication.AppleAuthenticationScope.EMAIL,
+        ],
+        nonce: hashedNonce,
+      });
+    } catch (e) {
+      // User dismissed the Apple sheet — stay on the auth screen, no error.
+      if ((e as { code?: string })?.code === 'ERR_REQUEST_CANCELED') return { error: null };
+      return { error: mapProviderError('apple') };
+    }
+
+    const identityToken = credential.identityToken;
+    if (!identityToken) {
+      return { error: 'Apple did not return an identity token. Please try again.' };
+    }
+
+    const { data, error } = await supabase.auth.signInWithIdToken({
+      provider: 'apple',
+      token: identityToken,
+      nonce: rawNonce,
+    });
+    if (error) return { error: mapProviderError('apple', error.message) };
+    if (!data.session) return { error: 'Sign-in completed without a valid session.' };
+
+    // Apple returns the full name only on the *first* authorization. Persist it
+    // to auth metadata (best-effort) so the existing username/profile flow can
+    // offer it; never block sign-in on this, and never overwrite a chosen name.
+    const display = [credential.fullName?.givenName, credential.fullName?.familyName]
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+    if (display) {
+      await supabase.auth.updateUser({ data: { full_name: display } }).catch(() => {});
+    }
+
+    await applySessionState(data.session);
+    return { error: null };
+  }, [applySessionState]);
+
+  // ── Sign in with Google (native) ────────────────────────────────────────────
+  const signInWithGoogle = useCallback(async (): Promise<AuthResult> => {
+    if (!ensureGoogleConfigured()) {
+      return { error: 'Google sign-in is not configured yet. Please try another method.' };
+    }
+    try {
+      if (Platform.OS === 'android') await GoogleSignin.hasPlayServices();
+      const response = await GoogleSignin.signIn();
+      // New-API cancellation: a non-success response means the user backed out.
+      if (!isSuccessResponse(response)) return { error: null };
+
+      const idToken = response.data.idToken;
+      if (!idToken) {
+        return { error: 'Google did not return an ID token. Please try again.' };
+      }
+
+      const { data, error } = await supabase.auth.signInWithIdToken({
+        provider: 'google',
+        token: idToken,
+      });
+      if (error) return { error: mapProviderError('google', error.message) };
+      if (!data.session) return { error: 'Sign-in completed without a valid session.' };
+      await applySessionState(data.session);
+      return { error: null };
+    } catch (e) {
+      if (isErrorWithCode(e) && e.code === statusCodes.SIGN_IN_CANCELLED) return { error: null };
+      if (isErrorWithCode(e) && e.code === statusCodes.IN_PROGRESS) {
+        return { error: 'A sign-in is already in progress.' };
+      }
+      return { error: mapProviderError('google') };
+    }
+  }, [applySessionState]);
+
+  const signInWithProvider = useCallback(
+    async (provider: 'apple' | 'google'): Promise<AuthResult> => {
+      if (supabaseConfigError) return { error: supabaseConfigError };
+      return provider === 'apple' ? signInWithApple() : signInWithGoogle();
+    },
+    [signInWithApple, signInWithGoogle],
   );
 
   /** Re-send the Supabase signup confirmation email (carries a fresh code). */
@@ -444,18 +585,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return { error: 'Username must be 2–64 characters.' };
       }
 
-      const updateWithTimestamp = await supabase
+      const upsertWithTimestamp = await supabase
         .from('profiles')
-        .update({ username: trimmed, updated_at: new Date().toISOString() })
-        .eq('id', user.id);
+        .upsert({ id: user.id, username: trimmed, updated_at: new Date().toISOString() });
 
-      let error = updateWithTimestamp.error;
+      let error = upsertWithTimestamp.error;
       if (error && /updated_at/i.test(error.message)) {
-        const updateWithoutTimestamp = await supabase
+        const upsertWithoutTimestamp = await supabase
           .from('profiles')
-          .update({ username: trimmed })
-          .eq('id', user.id);
-        error = updateWithoutTimestamp.error;
+          .upsert({ id: user.id, username: trimmed });
+        error = upsertWithoutTimestamp.error;
       }
 
       if (error) {
@@ -467,6 +606,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return { error: error.message };
       }
       setUsername(trimmed);
+      setNeedsUsernameSetup(false);
       return { error: null };
     },
     [user],
@@ -509,8 +649,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       continueAsGuest,
       exitGuest,
       isResettingPassword,
+      needsUsernameSetup,
       createProfileWithPassword,
       verifySignupCode,
+      signInWithProvider,
       resendSignupCode,
       sendSignInCode,
       verifySignInCode,
@@ -532,8 +674,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       continueAsGuest,
       exitGuest,
       isResettingPassword,
+      needsUsernameSetup,
       createProfileWithPassword,
       verifySignupCode,
+      signInWithProvider,
       resendSignupCode,
       sendSignInCode,
       verifySignInCode,

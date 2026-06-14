@@ -26,7 +26,7 @@ export default function AuthCallbackScreen() {
       if (!active) return;
 
       if (session) {
-        router.replace('/(tabs)');
+        router.replace('/');
         return;
       }
 

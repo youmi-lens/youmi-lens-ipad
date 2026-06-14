@@ -1,5 +1,5 @@
 import 'expo-dev-client';
-import { Redirect, Stack, useSegments } from 'expo-router';
+import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { ActivityIndicator, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -30,28 +30,7 @@ export default function RootLayout() {
           <LiveCaptionsProvider>
             <DataProvider>
               <RecordingNotesProvider>
-                <AuthGate>
-                  <Stack
-                    screenOptions={{
-                      headerShown: false,
-                      contentStyle: { backgroundColor: colors.background },
-                    }}
-                  >
-                    <Stack.Screen name="auth" />
-                    <Stack.Screen name="auth/callback" />
-                    <Stack.Screen name="(tabs)" />
-                    <Stack.Screen name="create-course" options={{ presentation: 'modal' }} />
-                    <Stack.Screen name="recording" />
-                    <Stack.Screen name="mini-caption" options={{ animation: 'fade' }} />
-                    <Stack.Screen name="processing" />
-                    <Stack.Screen name="lecture/[id]" />
-                    <Stack.Screen name="course/[id]" />
-                    <Stack.Screen name="recently-deleted" />
-                    <Stack.Screen name="plans" />
-                    <Stack.Screen name="material/[id]" />
-                    <Stack.Screen name="lecture-material/[lectureId]/[materialId]" />
-                  </Stack>
-                </AuthGate>
+                <AuthGate />
               </RecordingNotesProvider>
               <StatusBar style="dark" />
             </DataProvider>
@@ -62,10 +41,23 @@ export default function RootLayout() {
   );
 }
 
-function AuthGate({ children }: { children: React.ReactNode }) {
-  const { session, loading, isResettingPassword, isGuest } = useAuth();
-  const segments = useSegments();
-  const inAuthRoute = segments[0] === 'auth';
+/**
+ * Auth gating is expressed with `Stack.Protected` guards rather than by swapping
+ * the whole navigator for a `<Redirect>`. The `<Stack>` stays mounted at all
+ * times, so the route that a guard redirects to (e.g. `auth`) always exists in a
+ * live navigator. Returning a `<Redirect>` in place of the `<Stack>` used to
+ * unmount the navigator mid-redirect, which produced the runtime warning
+ * "The action 'REPLACE' with payload {name:'auth'} was not handled by any
+ * navigator." during sign-out / password-reset / guest→sign-in transitions.
+ *
+ * Access rules preserved exactly:
+ *  - Unauthenticated, non-guest users can only reach the `auth` routes.
+ *  - Guests and signed-in users can reach the app; guests may still open `auth`.
+ *  - A signed-in user mid password-reset or username setup stays on `auth`.
+ *  - A fully signed-in user is bounced off `auth` to `/` (the `(tabs)` anchor).
+ */
+function AuthGate() {
+  const { session, loading, isResettingPassword, needsUsernameSetup, isGuest } = useAuth();
 
   if (loading) {
     return (
@@ -75,15 +67,35 @@ function AuthGate({ children }: { children: React.ReactNode }) {
     );
   }
 
-  // Unauthenticated users are sent to /auth unless they chose guest mode.
-  // Guests can still reach /auth to sign in at any time.
-  if (!session && !isGuest && !inAuthRoute) {
-    return <Redirect href="/auth" />;
-  }
+  // A fully signed-in user (not mid-reset, not setting a username) belongs in the
+  // app. While either of those flows is active, the auth screen stays reachable.
+  const isFullyAuthenticated = !!session && !isResettingPassword && !needsUsernameSetup;
+  const canUseApp = !!session || isGuest;
 
-  if (session && inAuthRoute && !isResettingPassword) {
-    return <Redirect href="/(tabs)" />;
-  }
-
-  return children;
+  return (
+    <Stack
+      screenOptions={{
+        headerShown: false,
+        contentStyle: { backgroundColor: colors.background },
+      }}
+    >
+      <Stack.Protected guard={!isFullyAuthenticated}>
+        <Stack.Screen name="auth" />
+        <Stack.Screen name="auth/callback" />
+      </Stack.Protected>
+      <Stack.Protected guard={canUseApp}>
+        <Stack.Screen name="(tabs)" />
+        <Stack.Screen name="create-course" options={{ presentation: 'modal' }} />
+        <Stack.Screen name="recording" />
+        <Stack.Screen name="mini-caption" options={{ animation: 'fade' }} />
+        <Stack.Screen name="processing" />
+        <Stack.Screen name="lecture/[id]" />
+        <Stack.Screen name="course/[id]" />
+        <Stack.Screen name="recently-deleted" />
+        <Stack.Screen name="plans" />
+        <Stack.Screen name="material/[id]" />
+        <Stack.Screen name="lecture-material/[lectureId]/[materialId]" />
+      </Stack.Protected>
+    </Stack>
+  );
 }
