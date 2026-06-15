@@ -64,9 +64,12 @@ export type PurchaseResultCode =
   | 'success'
   | 'cancelled'
   | 'pending'
+  | 'purchase_in_progress'
   | 'product_unavailable'
   | 'sign_in_required'
+  | 'session_expired'
   | 'backend_verification_failed'
+  | 'transaction_already_processed'
   | 'already_linked'
   | 'deleted_account_binding'
   | 'expired'
@@ -174,32 +177,34 @@ function shouldFinishAfterBackend(payload: VerifyResponse): boolean {
   if (payload.ok && payload.granted) return true;
   if (payload.ok && (payload.reason === 'expired' || payload.reason === 'revoked')) return true;
   if (payload.reason === 'sales_closed') return true;
+  if (payload.reason === 'transaction_already_processed' || payload.error === 'iap_transaction_already_processed') {
+    return true;
+  }
   if (payload.error === 'iap_already_linked' || payload.error === 'iap_deleted_account_binding') return true;
   return false;
 }
 
 function mapBackendError(payload: VerifyResponse, status: number): PurchaseResult {
-  const code =
-    payload.error === 'iap_already_linked'
-      ? 'already_linked'
-      : payload.error === 'iap_deleted_account_binding'
-        ? 'deleted_account_binding'
-        : payload.reason === 'sales_closed' || status === 403
-          ? 'sales_closed'
-          : payload.reason === 'expired'
-            ? 'expired'
-            : 'backend_verification_failed';
+  const backendCode = `${payload.error ?? ''} ${payload.reason ?? ''}`.toLowerCase();
+  let code: PurchaseResultCode = 'backend_verification_failed';
+  if (status === 401) code = 'session_expired';
+  else if (backendCode.includes('already_processed') || backendCode.includes('already processed')) {
+    code = 'transaction_already_processed';
+  } else if (payload.error === 'iap_already_linked') code = 'already_linked';
+  else if (payload.error === 'iap_deleted_account_binding') code = 'deleted_account_binding';
+  else if (payload.reason === 'sales_closed' || status === 403) code = 'sales_closed';
+  else if (payload.reason === 'expired') code = 'expired';
 
   return {
     ok: false,
     code,
-    message: purchaseMessageForCode(code, payload.message ?? undefined),
+    message: purchaseMessageForCode(code),
     entitlement: payload.entitlement ?? null,
     quotaStatus: payload.quotaStatus ?? null,
   };
 }
 
-function purchaseMessageForCode(code: PurchaseResultCode, backendMessage?: string): string {
+function purchaseMessageForCode(code: PurchaseResultCode): string {
   switch (code) {
     case 'success':
       return 'Student Basic access is active.';
@@ -207,10 +212,16 @@ function purchaseMessageForCode(code: PurchaseResultCode, backendMessage?: strin
       return 'Purchase cancelled.';
     case 'pending':
       return 'Purchase is pending. Open Youmi Lens again after Apple finishes processing it.';
+    case 'purchase_in_progress':
+      return 'A Student Basic purchase is already in progress.';
     case 'product_unavailable':
       return 'Student Basic is not available from the App Store right now.';
     case 'sign_in_required':
       return 'Sign in before purchasing Student Basic.';
+    case 'session_expired':
+      return 'Your session has expired. Sign in again before purchasing.';
+    case 'transaction_already_processed':
+      return 'This transaction was already processed. Refresh Access to load the latest account status.';
     case 'already_linked':
     case 'apple_account_already_purchased':
       return APPLE_ACCOUNT_MISMATCH_MESSAGE;
@@ -219,14 +230,14 @@ function purchaseMessageForCode(code: PurchaseResultCode, backendMessage?: strin
     case 'expired':
       return 'This Student Basic purchase has expired.';
     case 'sales_closed':
-      return 'Student Basic purchases are no longer available.';
+      return 'New Student Basic purchases are currently unavailable.';
     case 'offline':
-      return 'Could not reach the backend. Check your connection and try again.';
+      return 'Network unavailable. Check your connection and try again.';
     case 'storekit_error':
-      return backendMessage ?? 'The App Store purchase could not be completed.';
+      return 'The Apple purchase could not be completed. Please try again.';
     case 'backend_verification_failed':
     default:
-      return backendMessage ?? 'The backend could not verify this purchase.';
+      return 'The purchase could not be verified. Refresh Access before trying another purchase.';
   }
 }
 
@@ -315,7 +326,7 @@ function hasConnectionPrereqs(accessToken: string | null | undefined): PurchaseR
     return { ok: false, code: 'sign_in_required', message: purchaseMessageForCode('sign_in_required') };
   }
   if (!API_BASE_URL) {
-    return { ok: false, code: 'offline', message: 'Missing API base URL.' };
+    return { ok: false, code: 'offline', message: 'The purchase service is unavailable. Please try again later.' };
   }
   return null;
 }
@@ -323,6 +334,7 @@ function hasConnectionPrereqs(accessToken: string | null | undefined): PurchaseR
 class RealPurchaseService implements PurchaseService {
   private connected = false;
   private productCache: StudentPassProduct | null = null;
+  private purchaseInFlight = false;
   private purchaseSubscription: { remove: () => void } | null = null;
   private errorSubscription: { remove: () => void } | null = null;
   private pendingPurchase:
@@ -395,15 +407,23 @@ class RealPurchaseService implements PurchaseService {
     return {
       ok: false,
       entitlement: { active: false, productId: null, expiresAt: null },
-      error: payload?.error ?? 'entitlement_failed',
-      message: payload?.message ?? 'Entitlement status is unavailable.',
+      error: status === 401 ? 'auth_required' : payload?.error ?? 'entitlement_failed',
+      message: status === 401 ? 'Your session has expired.' : 'Entitlement status is unavailable.',
     };
   }
 
   async purchaseStudentPass(accessToken: string | null | undefined): Promise<PurchaseResult> {
     const prereq = hasConnectionPrereqs(accessToken);
     if (prereq) return prereq;
+    if (this.purchaseInFlight) {
+      return {
+        ok: false,
+        code: 'purchase_in_progress',
+        message: purchaseMessageForCode('purchase_in_progress'),
+      };
+    }
 
+    this.purchaseInFlight = true;
     try {
       await this.ensureConnection();
       const product = this.productCache ?? (await this.getStudentPassProduct());
@@ -436,8 +456,21 @@ class RealPurchaseService implements PurchaseService {
     } catch (error) {
       const name = error instanceof Error ? error.name.toLowerCase() : '';
       const message = error instanceof Error ? error.message : undefined;
-      if (name.includes('cancel') || message?.toLowerCase().includes('cancel')) {
+      if (
+        name === ErrorCode.UserCancelled ||
+        name.includes('cancel') ||
+        message?.toLowerCase().includes('cancel')
+      ) {
         return { ok: false, code: 'cancelled', message: purchaseMessageForCode('cancelled') };
+      }
+      if (
+        name === ErrorCode.NetworkError ||
+        name === ErrorCode.RemoteError ||
+        name === ErrorCode.ServiceError ||
+        name === ErrorCode.ServiceDisconnected ||
+        name === ErrorCode.ServiceTimeout
+      ) {
+        return { ok: false, code: 'offline', message: purchaseMessageForCode('offline') };
       }
       if (
         name === ErrorCode.AlreadyOwned ||
@@ -450,7 +483,9 @@ class RealPurchaseService implements PurchaseService {
           message: purchaseMessageForCode('apple_account_already_purchased'),
         };
       }
-      return { ok: false, code: 'storekit_error', message: purchaseMessageForCode('storekit_error', message) };
+      return { ok: false, code: 'storekit_error', message: purchaseMessageForCode('storekit_error') };
+    } finally {
+      this.purchaseInFlight = false;
     }
   }
 
@@ -459,10 +494,25 @@ class RealPurchaseService implements PurchaseService {
       return { ok: false, code: 'sign_in_required', message: restoreMessageForCode('sign_in_required') };
     }
     if (!API_BASE_URL) {
-      return { ok: false, code: 'failed', message: 'Missing API base URL.' };
+      return { ok: false, code: 'failed', message: 'The access service is unavailable. Please try again later.' };
     }
 
-    const initial = await this.getBackendEntitlement(accessToken);
+    let initial: EntitlementResponse;
+    try {
+      initial = await this.getBackendEntitlement(accessToken);
+    } catch {
+      return { ok: false, code: 'failed', message: 'Network unavailable. Check your connection and try again.' };
+    }
+    if (!initial.ok) {
+      return {
+        ok: false,
+        code: 'failed',
+        message:
+          initial.error === 'auth_required'
+            ? 'Your session has expired. Sign in again to refresh access.'
+            : 'Access status could not be refreshed. Check your connection and try again.',
+      };
+    }
     const initialResult = entitlementRestoreResult(initial.entitlement, initial.quotaStatus ?? null);
     if (initialResult) return initialResult;
 
@@ -497,24 +547,31 @@ class RealPurchaseService implements PurchaseService {
       return {
         ok: false,
         code: 'backend_verification_failed',
-        message: 'Apple did not provide signed transaction data for backend verification.',
+        message: purchaseMessageForCode('backend_verification_failed'),
       };
     }
 
-    const { status, payload } = await fetchJson<VerifyResponse>(
-      `${API_BASE_URL}/api/iap/apple/verify`,
-      accessToken,
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          platform: 'ios',
-          productId: STUDENT_PASS_PRODUCT_ID,
-          transactionId: transactionIdFor(purchase),
-          originalTransactionId: originalTransactionIdFor(purchase),
-          purchaseToken,
-        }),
-      },
-    );
+    let verification: { status: number; payload: VerifyResponse };
+    try {
+      verification = await fetchJson<VerifyResponse>(
+        `${API_BASE_URL}/api/iap/apple/verify`,
+        accessToken,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            platform: 'ios',
+            productId: STUDENT_PASS_PRODUCT_ID,
+            transactionId: transactionIdFor(purchase),
+            originalTransactionId: originalTransactionIdFor(purchase),
+            purchaseToken,
+          }),
+        },
+      );
+    } catch {
+      return { ok: false, code: 'offline', message: purchaseMessageForCode('offline') };
+    }
+    const status = verification.status;
+    const payload = verification.payload ?? {};
 
     if (shouldFinishAfterBackend(payload)) {
       await finishTransaction({ purchase, isConsumable: true });
@@ -641,7 +698,7 @@ export function planIdFromPlanType(planType?: string | null): PlanId {
 }
 
 export function shouldShowPurchaseEntry(status: PlanStatus | null | undefined): boolean {
-  return status?.studentPass?.isPurchasable !== false;
+  return status?.studentPass?.isPurchasable === true;
 }
 
 export const STUDENT_PASS_REQUIRED_COPY = [

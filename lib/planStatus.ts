@@ -145,20 +145,24 @@ export function safeAccessLabel(
  * user-safe message on any failure so the caller can show an error state.
  */
 export async function fetchPlanStatus(accessToken: string | null | undefined): Promise<PlanStatus> {
-  if (!API_BASE_URL) throw new Error('Missing API base URL.');
+  if (!API_BASE_URL) throw new Error('Account status is unavailable.');
   if (!accessToken) throw new Error('Sign in to view your account.');
 
-  const response = await fetch(`${API_BASE_URL}/api/quota/status`, {
-    method: 'GET',
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/api/quota/status`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+  } catch {
+    throw new Error('Network unavailable. Check your connection and try again.');
+  }
 
   const payload = (await response.json().catch(() => null)) as QuotaStatusResponse | null;
 
   if (!response.ok || !payload?.ok || !payload.plan) {
-    throw new Error(
-      payload?.message ?? payload?.error ?? `Account status request failed (HTTP ${response.status}).`,
-    );
+    if (response.status === 401) throw new Error('Your session has expired. Sign in again.');
+    throw new Error('Account status could not be refreshed. Please try again.');
   }
 
   return normalizePlanStatus(payload.plan);
