@@ -10,7 +10,7 @@ type SecondaryButtonProps = {
   label: string;
   onPress?: () => void;
   icon?: IoniconName;
-  /** `plain` = pearl white, `ice` = soft ice-blue fill. */
+  /** `plain` = translucent neutral, `ice` = softly tinted neutral fill. */
   tone?: 'plain' | 'ice';
   /** Tint the label/icon/border red — used for destructive-ish actions. */
   danger?: boolean;
@@ -66,15 +66,15 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   plain: {
-    backgroundColor: 'rgba(255, 255, 255, 0.82)',
+    backgroundColor: colors.glass,
     borderColor: colors.border,
   },
   ice: {
-    backgroundColor: colors.iceTint,
-    borderColor: colors.iceBlue,
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
   },
   danger: {
-    borderColor: 'rgba(194, 65, 75, 0.32)',
+    borderColor: 'rgba(232, 65, 74, 0.32)',
     backgroundColor: colors.glassElevated,
   },
   content: {

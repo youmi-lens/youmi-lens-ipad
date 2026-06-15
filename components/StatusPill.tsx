@@ -18,7 +18,7 @@ const VARIANTS: Record<StatusVariant, VariantStyle> = {
   recording: { dot: colors.recordingRed, bg: colors.recordingTint, fg: '#C0392B' },
   paused: { dot: colors.mutedBlueGray, bg: colors.surfaceMuted, fg: colors.textSecondary },
   live: { dot: colors.success, bg: colors.successTint, fg: '#157A58' },
-  processing: { dot: colors.accentBright, bg: colors.iceTint, fg: colors.textPrimary },
+  processing: { dot: colors.navy, bg: colors.surfaceMuted, fg: colors.textPrimary },
   done: { dot: colors.success, bg: colors.successTint, fg: '#157A58' },
   synced: { dot: colors.success, bg: colors.successTint, fg: '#157A58' },
   idle: { dot: colors.mutedBlueGray, bg: colors.surfaceMuted, fg: colors.textSecondary },

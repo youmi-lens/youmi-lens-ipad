@@ -25,7 +25,7 @@ export function CourseCard({
   onPress?: () => void;
 }) {
   return (
-    <GlassCard elevated padding={0} onPress={onPress} style={styles.card}>
+    <GlassCard padding={0} onPress={onPress} style={styles.card}>
       <View style={styles.body}>
         <View style={styles.top}>
           <IconTile icon={course.icon as IconName} color={colors.textSecondary} backgroundColor={colors.surfaceMuted} size={44} />
@@ -47,7 +47,7 @@ export function CourseCard({
 }
 
 const styles = StyleSheet.create({
-  card: { minHeight: 210 },
+  card: { minHeight: 196 },
   body: { flex: 1, padding: 20 },
   top: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   name: { marginTop: spacing.lg, color: colors.ink, fontSize: fontSize.lg, lineHeight: 21, fontWeight: '800' },
@@ -55,7 +55,7 @@ const styles = StyleSheet.create({
   divider: { height: StyleSheet.hairlineWidth, backgroundColor: colors.border, marginTop: 'auto', marginBottom: spacing.md },
   footer: { flexDirection: 'row', justifyContent: 'space-between', gap: spacing.sm },
   last: { flex: 1, color: colors.textTertiary, fontSize: 11.5 },
-  ready: { color: colors.accentBright, fontSize: 11.5, fontWeight: '700' },
+  ready: { color: colors.accent, fontSize: 11.5, fontWeight: '700' },
 });
 
 export default CourseCard;

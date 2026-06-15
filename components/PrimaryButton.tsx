@@ -104,7 +104,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   pressed: {
-    opacity: 0.9,
+    backgroundColor: colors.accentPressed,
     transform: [{ scale: 0.985 }],
   },
   inactive: {

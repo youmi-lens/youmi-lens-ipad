@@ -79,8 +79,8 @@ export default function CoursesScreen() {
           {!loaded ? (
             <View style={styles.loading}><ActivityIndicator color={colors.accent} /></View>
           ) : courses.length === 0 ? (
-            <GlassCard elevated style={styles.empty}>
-              <View style={styles.emptyIcon}><Ionicons name="library-outline" size={34} color={colors.accentBright} /></View>
+            <GlassCard padding={36} style={styles.empty}>
+              <View style={styles.emptyIcon}><Ionicons name="library-outline" size={30} color={colors.navy} /></View>
               <Text style={styles.emptyTitle}>Build your course library</Text>
               <Text style={styles.emptyBody}>Create a course to organize recordings, summaries, notes, and study material.</Text>
               <PrimaryButton label="Create course" icon="add" onPress={() => router.push('/create-course')} style={styles.emptyButton} />
@@ -113,7 +113,7 @@ export default function CoursesScreen() {
                 );
               })}
               <Pressable onPress={() => router.push('/create-course')} style={({ pressed }) => [styles.ghostCard, pressed && styles.pressed]}>
-                <View style={styles.plus}><Ionicons name="add" size={22} color={colors.accentBright} /></View>
+                <View style={styles.plus}><Ionicons name="add" size={22} color={colors.navy} /></View>
                 <Text style={styles.ghostLabel}>New course</Text>
               </Pressable>
             </View>
@@ -133,13 +133,13 @@ const styles = StyleSheet.create({
   loading: { minHeight: 380, alignItems: 'center', justifyContent: 'center' },
   grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 16 },
   gridItem: { width: '31.8%', minWidth: 250 },
-  ghostCard: { width: '31.8%', minWidth: 250, minHeight: 210, alignItems: 'center', justifyContent: 'center', gap: 10, borderWidth: 1.5, borderStyle: 'dashed', borderColor: colors.borderStrong, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.58)' },
-  plus: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.iceTint },
+  ghostCard: { width: '31.8%', minWidth: 250, minHeight: 196, alignItems: 'center', justifyContent: 'center', gap: 10, borderWidth: 1.5, borderStyle: 'dashed', borderColor: colors.borderStrong, borderRadius: 20, backgroundColor: colors.glass },
+  plus: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceMuted },
   ghostLabel: { color: colors.textSecondary, fontSize: 14, fontWeight: '700' },
-  empty: { alignItems: 'center', paddingVertical: 56 },
-  emptyIcon: { width: 72, height: 72, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.iceTint, borderWidth: 1, borderColor: colors.border },
-  emptyTitle: { color: colors.ink, fontSize: 22, fontWeight: '800', marginTop: 18 },
+  empty: { alignItems: 'center', alignSelf: 'center', width: '100%', minHeight: 300, justifyContent: 'center' },
+  emptyIcon: { width: 62, height: 62, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border },
+  emptyTitle: { color: colors.ink, fontSize: 22, fontWeight: '800', marginTop: 16 },
   emptyBody: { color: colors.textSecondary, fontSize: 13.5, lineHeight: 20, textAlign: 'center', maxWidth: 380, marginTop: 8 },
-  emptyButton: { marginTop: 22 },
+  emptyButton: { marginTop: 20, minWidth: 260 },
   pressed: { opacity: 0.78, transform: [{ scale: 0.985 }] },
 });

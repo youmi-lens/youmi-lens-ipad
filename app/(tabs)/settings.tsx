@@ -218,7 +218,7 @@ export default function SettingsScreen() {
                 <GlassCard padding={0}>
                   <Text style={styles.cardHeading}>Plan & usage</Text>
                   {planLoading && !planStatus ? (
-                    <View style={styles.planLoading}><ActivityIndicator color={colors.accentBright} /></View>
+                    <View style={styles.planLoading}><ActivityIndicator color={colors.navy} /></View>
                   ) : planStatus ? (
                     <View style={styles.usageBlock}>
                       <View style={styles.usageRow}>
@@ -301,7 +301,7 @@ const styles = StyleSheet.create({
   grid: { flexDirection: 'row', gap: 16, alignItems: 'flex-start' },
   column: { flex: 1, gap: 16 },
   profile: { flexDirection: 'row', alignItems: 'center', gap: 13, padding: 20, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
-  avatar: { width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.accent },
+  avatar: { width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.navy },
   avatarText: { color: colors.pearlWhite, fontSize: 16, fontWeight: '800' },
   profileText: { flex: 1 },
   profileName: { color: colors.ink, fontSize: 15, fontWeight: '800' },
@@ -311,7 +311,7 @@ const styles = StyleSheet.create({
   cardHeading: { color: colors.ink, fontSize: 15, fontWeight: '800', paddingHorizontal: 20, paddingTop: 18, paddingBottom: 10 },
   settingRow: { minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 11, paddingHorizontal: 20, paddingVertical: 10 },
   rowDivider: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
-  settingIcon: { width: 32, height: 32, borderRadius: 8, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.iceTint },
+  settingIcon: { width: 32, height: 32, borderRadius: 8, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceMuted },
   settingIconDanger: { backgroundColor: colors.recordingTint },
   settingText: { flex: 1 },
   settingLabel: { fontSize: 13.5, fontWeight: '700' },
@@ -323,7 +323,7 @@ const styles = StyleSheet.create({
   usageValue: { color: colors.ink, fontSize: 13, fontWeight: '700', fontVariant: ['tabular-nums'] },
   accessLine: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 14, paddingTop: 12, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
   accessName: { color: colors.ink, fontSize: 12.5, fontWeight: '700' },
-  accessStatus: { color: colors.accentBright, fontSize: 12, fontWeight: '700' },
+  accessStatus: { color: colors.accent, fontSize: 12, fontWeight: '700' },
   planLoading: { minHeight: 72, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 20 },
   dangerCard: { borderColor: colors.borderStrong },
   footer: { color: colors.textTertiary, fontSize: 11.5, textAlign: 'center', marginTop: 2 },

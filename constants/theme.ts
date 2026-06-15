@@ -7,38 +7,40 @@
 
 export const colors = {
   // ---- Brand palette ----
-  ink: '#0F172A',
+  ink: '#1A2642',
+  // Deep navy — the primary action/button fill (calm, premium, not bright blue).
   navy: '#0B1F3A',
-  accent: '#102A43',
+  accent: '#33415C',
   accentBright: '#0B1F3A',
   accentPressed: '#071629',
-  accentGlow: 'rgba(11, 31, 58, 0.16)',
-  deepNavy: '#071629',
-  secondaryNavy: '#102A43',
-  softIceWhite: '#F8FAFC',
+  accentGlow: 'rgba(11, 31, 58, 0.14)',
+  deepNavy: '#0B1F3A',
+  secondaryNavy: '#33415C',
+  softIceWhite: '#F7F8FC',
   pearlWhite: '#FFFFFF',
-  iceBlue: '#E5E7EB',
-  mutedBlueGray: '#64748B',
-  recordingRed: '#C2414B',
+  iceBlue: '#E4E6EB',
+  mutedBlueGray: '#7B8496',
+  recordingRed: '#E8414A',
 
   // ---- Semantic (light surfaces) ----
-  background: '#F8FAFC',
-  backgroundMid: '#F5F7FB',
-  backgroundCool: '#FFFFFF',
-  backgroundLavender: '#F7F7F9',
-  surface: '#FFFFFF',
-  surfaceMuted: 'rgba(15, 23, 42, 0.045)',
-  glass: 'rgba(255, 255, 255, 0.82)',
-  glassElevated: 'rgba(255, 255, 255, 0.92)',
-  glassEdge: 'rgba(15, 23, 42, 0.08)',
-  glassHighlight: 'rgba(255, 255, 255, 0.96)',
+  // Calm, near-white off-white base — bright and academic, never SaaS blue.
+  background: '#F7F8FC',
+  backgroundMid: '#FAFAFC',
+  backgroundCool: '#F3F4F8',
+  backgroundLavender: '#F6F5F8',
+  surface: 'rgba(255, 255, 255, 0.76)',
+  surfaceMuted: 'rgba(11, 31, 58, 0.035)',
+  glass: 'rgba(255, 255, 255, 0.66)',
+  glassElevated: 'rgba(255, 255, 255, 0.76)',
+  glassEdge: 'rgba(15, 31, 58, 0.08)',
+  glassHighlight: 'rgba(255, 255, 255, 0.82)',
 
-  textPrimary: '#0F172A',
-  textSecondary: '#475569',
-  textTertiary: '#64748B',
+  textPrimary: '#1A2642',
+  textSecondary: '#4A5878',
+  textTertiary: '#8E9BBE',
 
-  border: 'rgba(15, 23, 42, 0.08)',
-  borderStrong: 'rgba(15, 23, 42, 0.14)',
+  border: 'rgba(15, 31, 58, 0.075)',
+  borderStrong: 'rgba(15, 31, 58, 0.12)',
 
   // ---- Semantic (navy surfaces) ----
   navySurface: '#0B1F3A',
@@ -48,12 +50,12 @@ export const colors = {
   textOnNavyMuted: '#CBD5E1',
 
   // ---- States ----
-  success: '#047857',
-  successTint: 'rgba(4, 120, 87, 0.16)',
+  success: '#1EA86A',
+  successTint: 'rgba(30, 168, 106, 0.14)',
   warning: '#B7791F',
   warningTint: 'rgba(183, 121, 31, 0.16)',
-  recordingTint: 'rgba(15, 23, 42, 0.055)',
-  iceTint: 'rgba(15, 23, 42, 0.055)',
+  recordingTint: 'rgba(232, 65, 74, 0.10)',
+  iceTint: 'rgba(11, 31, 58, 0.055)',
   /** Faint navy used for the Y watermark on the hero card. */
   watermark: 'rgba(11, 31, 58, 0.04)',
   /** Paper colour + ruling for the mini-caption note background. */
@@ -95,29 +97,29 @@ export const fontSize = {
 } as const;
 
 export const shadows = {
-  /** Standard card lift */
+  /** Standard card lift — soft and airy on the off-white base. */
   card: {
-    shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.08,
-    shadowRadius: 16,
-    elevation: 4,
+    shadowColor: '#0F1F3A',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.055,
+    shadowRadius: 28,
+    elevation: 2,
   },
   /** Subtle lift for rows / small surfaces */
   soft: {
     shadowColor: '#000000',
     shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.05,
-    shadowRadius: 10,
-    elevation: 2,
+    shadowOpacity: 0.035,
+    shadowRadius: 14,
+    elevation: 1,
   },
   /** Primary button lift */
   button: {
-    shadowColor: '#1E3A8A',
+    shadowColor: '#0B1F3A',
     shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.24,
-    shadowRadius: 16,
-    elevation: 6,
+    shadowOpacity: 0.14,
+    shadowRadius: 18,
+    elevation: 4,
   },
   /** Floating mini-caption panel */
   float: {

@@ -41,7 +41,7 @@ export function ProgressBar({ value, style }: { value: number; style?: ViewStyle
 export function IconTile({
   icon,
   color = colors.accent,
-  backgroundColor = colors.iceTint,
+  backgroundColor = colors.surfaceMuted,
   size = 36,
 }: {
   icon: IconName;
@@ -141,13 +141,13 @@ const styles = StyleSheet.create({
   progressTrack: {
     height: 4,
     borderRadius: 3,
-    backgroundColor: 'rgba(15, 23, 42, 0.07)',
+    backgroundColor: 'rgba(11, 31, 58, 0.08)',
     overflow: 'hidden',
   },
   progressFill: {
     height: '100%',
     borderRadius: 3,
-    backgroundColor: colors.accentBright,
+    backgroundColor: colors.navy,
   },
   iconTile: {
     alignItems: 'center',
@@ -159,7 +159,7 @@ const styles = StyleSheet.create({
     borderRadius: radius.pill,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.82)',
+    backgroundColor: colors.glassElevated,
     borderWidth: 1,
     borderColor: colors.border,
   },
@@ -186,12 +186,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: radius.pill,
-    backgroundColor: 'rgba(255, 255, 255, 0.76)',
+    backgroundColor: colors.glass,
     borderWidth: 1,
     borderColor: colors.border,
   },
   pillAccent: {
-    backgroundColor: 'rgba(11, 31, 58, 0.10)',
+    backgroundColor: colors.surfaceMuted,
     borderColor: colors.border,
   },
   pillText: {

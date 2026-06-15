@@ -6,7 +6,7 @@ import { Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-na
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { LogoMark } from '@/components/BrandHeader';
-import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
+import { colors, fontSize, layout, radius, shadows, spacing } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
 
 type IconName = ComponentProps<typeof Ionicons>['name'];
@@ -152,12 +152,12 @@ const styles = StyleSheet.create({
     width: layout.sidebar,
     paddingHorizontal: 11,
     borderRightWidth: StyleSheet.hairlineWidth,
-    borderRightColor: colors.border,
+    borderRightColor: colors.glassEdge,
     overflow: 'hidden',
   },
   tint: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(255, 255, 255, 0.66)',
+    backgroundColor: 'rgba(255, 255, 255, 0.58)',
   },
   brand: {
     flexDirection: 'row',
@@ -187,7 +187,7 @@ const styles = StyleSheet.create({
     borderRadius: 11,
   },
   navRowActive: {
-    backgroundColor: colors.iceTint,
+    backgroundColor: colors.surfaceMuted,
   },
   activeBar: {
     position: 'absolute',
@@ -197,7 +197,7 @@ const styles = StyleSheet.create({
     width: 3,
     borderTopRightRadius: 3,
     borderBottomRightRadius: 3,
-    backgroundColor: colors.accentBright,
+    backgroundColor: colors.navy,
   },
   navLabel: {
     color: colors.textSecondary,
@@ -216,9 +216,10 @@ const styles = StyleSheet.create({
     gap: 9,
     padding: 8,
     borderRadius: radius.md,
-    backgroundColor: 'rgba(255, 255, 255, 0.72)',
+    backgroundColor: colors.glass,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.glassEdge,
+    ...shadows.soft,
   },
   avatar: {
     width: 30,

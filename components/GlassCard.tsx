@@ -18,7 +18,7 @@ type GlassCardProps = {
 
 /**
  * Frosted-glass card built from portable React Native surfaces so it works in
- * Expo Go and simulator builds without a native blur view implementation.
+ * development clients without requiring a native blur view implementation.
  */
 export function GlassCard({
   children,

@@ -19,6 +19,8 @@ import {
 import Svg, { Defs, LinearGradient, Path, Rect, Stop } from 'react-native-svg';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { AppBackground } from '@/components/AppBackground';
+import { GlassCard } from '@/components/GlassCard';
 import { PrimaryButton } from '@/components/PrimaryButton';
 import { SecondaryButton } from '@/components/SecondaryButton';
 import { colors, fontSize, radius, spacing } from '@/constants/theme';
@@ -429,6 +431,7 @@ export default function AuthScreen() {
 
   return (
     <View style={styles.root}>
+      <AppBackground />
       {showBrandPanel ? <BrandPanel /> : null}
       <SafeAreaView style={styles.authArea} edges={['top', 'bottom', 'left', 'right']}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.keyboardAvoider}>
@@ -438,6 +441,7 @@ export default function AuthScreen() {
           showsVerticalScrollIndicator={false}
         >
         <View style={styles.content}>
+          <GlassCard padding={28} style={styles.loginCard}>
           <View style={styles.card}>
             {session && needsUsernameSetup ? (
               <View style={styles.codeWrap}>
@@ -753,6 +757,7 @@ export default function AuthScreen() {
               </Animated.View>
             )}
           </View>
+          </GlassCard>
         </View>
         </ScrollView>
         </KeyboardAvoidingView>
@@ -1027,7 +1032,7 @@ function ErrorNotice({ message }: { message: string }) {
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, flexDirection: 'row', backgroundColor: '#F5F7FA' },
+  root: { flex: 1, flexDirection: 'row', backgroundColor: 'transparent' },
   brandPanel: {
     width: '44%',
     overflow: 'hidden',
@@ -1060,7 +1065,7 @@ const styles = StyleSheet.create({
   captionCursor: { width: 2, height: 21, backgroundColor: '#FFFFFF', marginLeft: 5 },
   brandTagline: { color: 'rgba(255,255,255,0.85)', fontSize: 13.5, lineHeight: 21.6, fontWeight: '600' },
   brandDescription: { color: 'rgba(255,255,255,0.50)', fontSize: 13.5, lineHeight: 21.6, marginTop: 1 },
-  authArea: { flex: 1, backgroundColor: '#F5F7FA' },
+  authArea: { flex: 1, backgroundColor: 'transparent' },
   keyboardAvoider: { flex: 1 },
   scrollContent: {
     flexGrow: 1,
@@ -1069,13 +1074,14 @@ const styles = StyleSheet.create({
     paddingVertical: 48,
   },
   content: { width: '100%', maxWidth: 420, alignSelf: 'center' },
+  loginCard: { width: '100%' },
   card: { width: '100%', gap: 16 },
   entryView: { gap: 16 },
   headerCopy: { marginBottom: 14 },
   cardTitle: { color: '#16243A', fontSize: 28, lineHeight: 34, fontWeight: '700', letterSpacing: -0.4 },
   authSwitchRow: { flexDirection: 'row', alignItems: 'center', marginTop: 6 },
   cardSubtitle: { color: '#3D4D66', fontSize: 14.5, lineHeight: 21 },
-  authSwitchLink: { color: '#4A7DBF', fontSize: 14.5, lineHeight: 21, fontWeight: '600' },
+  authSwitchLink: { color: '#334B68', fontSize: 14.5, lineHeight: 21, fontWeight: '600' },
   ssoStack: { gap: 11, marginBottom: 8 },
   ssoButton: { height: 50, borderRadius: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10 },
   appleButton: { backgroundColor: '#000000', borderWidth: 1, borderColor: '#000000' },
@@ -1101,9 +1107,9 @@ const styles = StyleSheet.create({
     textAlign: 'left',
   },
   inputFocused: {
-    borderColor: '#4A7DBF',
-    shadowColor: '#4A7DBF',
-    shadowOpacity: 0.12,
+    borderColor: '#334B68',
+    shadowColor: '#334B68',
+    shadowOpacity: 0.08,
     shadowRadius: 3,
     shadowOffset: { width: 0, height: 0 },
   },
@@ -1116,7 +1122,7 @@ const styles = StyleSheet.create({
   success: { color: '#16243A', fontSize: 12.5, fontWeight: '600', lineHeight: 19 },
   helper: { color: '#9AA7B8', fontSize: 12.5, lineHeight: 18.75, textAlign: 'center' },
   hint: { color: '#9AA7B8', fontSize: 12.5, lineHeight: 18.75 },
-  primaryAction: { minHeight: 52, borderRadius: 14, backgroundColor: '#16243A' },
+  primaryAction: { minHeight: 52, borderRadius: 14, backgroundColor: colors.navy },
   errorNotice: {
     borderWidth: 1,
     borderColor: colors.borderStrong,
@@ -1133,7 +1139,7 @@ const styles = StyleSheet.create({
   },
   textButton: { minHeight: 38, alignItems: 'center', justifyContent: 'center' },
   forgotButton: { alignSelf: 'flex-end', marginTop: -6, marginBottom: 4 },
-  textButtonLabel: { color: '#4A7DBF', fontSize: 13.5, fontWeight: '600' },
+  textButtonLabel: { color: '#334B68', fontSize: 13.5, fontWeight: '600' },
   guestFooter: { marginTop: 10, paddingTop: 22, borderTopWidth: 1, borderTopColor: '#E3E8EF', alignItems: 'center' },
   guestButtonLabel: { color: '#3D4D66', fontSize: 14.5, fontWeight: '600' },
   guestHelper: { color: '#9AA7B8', fontSize: 12.5, marginTop: 6 },
