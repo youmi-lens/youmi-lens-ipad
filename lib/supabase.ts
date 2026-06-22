@@ -5,10 +5,18 @@ import { Platform } from 'react-native';
 const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
 const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
 
-export const supabaseConfigError =
-  !supabaseUrl || !supabaseAnonKey
+/** True when both Supabase env vars are present and the client can authenticate. */
+export const isSupabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey);
+
+// User-facing string when Supabase env is missing. In development we surface the
+// exact missing-variable instructions to speed debugging; in a production /
+// TestFlight build we must never show developer `.env` instructions, so we fall
+// back to a calm, user-safe message.
+export const supabaseConfigError = isSupabaseConfigured
+  ? null
+  : __DEV__
     ? 'Missing Supabase environment variables. Set EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY in .env.'
-    : null;
+    : 'Sign-in is temporarily unavailable. Please try again later.';
 
 const isServerSideWebRender = Platform.OS === 'web' && typeof window === 'undefined';
 

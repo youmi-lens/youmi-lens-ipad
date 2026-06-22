@@ -210,9 +210,17 @@ export default function AuthScreen() {
     if (busyAction) return;
     setBusyAction('provider');
     setError(null);
-    const result = await signInWithProvider(provider);
-    setBusyAction(null);
-    if (result.error) setError(result.error);
+    // try/catch/finally guarantees the loading state always clears — even if a
+    // provider/native call throws unexpectedly — so the login card never gets
+    // stuck on a spinner or left blank with disabled buttons.
+    try {
+      const result = await signInWithProvider(provider);
+      if (result.error) setError(result.error);
+    } catch {
+      setError('Sign-in is temporarily unavailable. Please try again later.');
+    } finally {
+      setBusyAction(null);
+    }
   };
 
   const handleUsernameSetup = async () => {
