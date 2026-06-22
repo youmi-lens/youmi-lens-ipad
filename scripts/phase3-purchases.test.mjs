@@ -37,9 +37,10 @@ assert.equal(storekit.products[0].productID, productId);
 assert.equal(storekit.products[0].type, 'Consumable');
 
 // 2. StoreKit's localized display price wins; the screen does not hard-code USD.
+// The simplified upgrade screen shows a single price line driven by the
+// StoreKit-localized value, never a literal price string.
 assert.match(purchases, /displayPrice: product\.displayPrice/);
 assert.match(plans, /product\?\.displayPrice \?\? 'App Store unavailable'/);
-assert.match(plans, /product\?\.displayPrice \?\? 'Unavailable'/);
 assert.doesNotMatch(plans, /\$4\.99|US\$4\.99/);
 
 // 3. Closed sales require an explicit backend true and do not hide active access.
@@ -49,18 +50,19 @@ assert.match(plans, /New Student Basic purchases are currently unavailable\./);
 assert.match(plans, /const activeEntitlement = currentStatus\?\.entitlement\?\.active/);
 assert.match(plans, /Your active access remains visible even when new purchases are closed\./);
 
-// 4-5. Active access shows expiry and backend-paid limits; inactive access keeps backend/free limits.
+// 4-5. Active access shows expiry; the verified-grant guard still pins every
+// protected paid quota (600/120/90/90/6/10), and the simplified screen surfaces
+// the paid limits as plain-language benefits instead of a comparison table.
 assert.match(plans, /formatDate\(activeEntitlement\?\.expiresAt\)/);
-assert.match(plans, /Current backend limits/);
 assert.match(plans, /\(status\.monthlyMinutesLimit \?\? status\.minutesLimit\) === 600/);
 assert.match(plans, /status\.dailyMinutesLimit === 120/);
 assert.match(plans, /status\.maxRecordingMinutes === 90/);
 assert.match(plans, /status\.maxLiveSessionMinutes === 90/);
 assert.match(plans, /status\.maxRecordingsPerDay === 6/);
 assert.match(plans, /status\.maxProcessingJobsPerDay === 10/);
-assert.match(plans, /\['Monthly minutes', '300 min', '600 min'\]/);
-assert.match(plans, /\['Daily minutes', '120 min', '120 min'\]/);
-assert.match(plans, /formatMinutes\(currentStatus\?\.monthlyMinutesLimit \?\? currentStatus\?\.minutesLimit\)/);
+assert.match(plans, /600 study minutes each month/);
+assert.match(plans, /6 recordings every day/);
+assert.match(plans, /10 study tasks every day/);
 
 // 6. Both the handler and service prevent concurrent purchase requests.
 assert.match(plans, /purchaseLockRef\.current \|\| busy !== null/);
