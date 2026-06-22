@@ -196,20 +196,22 @@ export default function CourseDetailScreen() {
         onScrollBeginDrag={() => setOpenLectureId(null)}
       >
         <View style={styles.content}>
-          <GlassCard style={styles.heroCard}>
-            <View style={[styles.courseTile, { backgroundColor: course.tint }]}> 
-              <Ionicons name={course.icon as IoniconName} size={28} color={course.accent} />
-            </View>
-            <View style={styles.heroText}>
-              <Text style={styles.courseName}>{course.name}</Text>
-              <View style={styles.metaRow}>
-                <Text style={styles.metaText}>
-                  {lectures.length} {lectures.length === 1 ? 'lecture' : 'lectures'}
-                </Text>
-                <View style={styles.metaDot} />
-                <Text style={styles.metaText}>
-                  {latestLecture ? `Last recorded ${formatShortDate(latestLecture.date)}` : 'No recordings yet'}
-                </Text>
+          <GlassCard>
+            <View style={styles.heroHeader}>
+              <View style={[styles.courseTile, { backgroundColor: course.tint }]}>
+                <Ionicons name={course.icon as IoniconName} size={28} color={course.accent} />
+              </View>
+              <View style={styles.heroText}>
+                <Text style={styles.courseName}>{course.name}</Text>
+                <View style={styles.metaRow}>
+                  <Text style={styles.metaText}>
+                    {lectures.length} {lectures.length === 1 ? 'lecture' : 'lectures'}
+                  </Text>
+                  <View style={styles.metaDot} />
+                  <Text style={styles.metaText}>
+                    {latestLecture ? `Last recorded ${formatShortDate(latestLecture.date)}` : 'No recordings yet'}
+                  </Text>
+                </View>
               </View>
             </View>
             <PrimaryButton label="Start new lecture" icon="mic" onPress={startLecture} style={styles.startButton} />
@@ -478,7 +480,7 @@ const styles = StyleSheet.create({
   },
   scroll: { paddingHorizontal: spacing.xl, paddingBottom: spacing.xxxl },
   content: { width: '100%', maxWidth: layout.content, alignSelf: 'center', gap: spacing.xl },
-  heroCard: { flexDirection: 'row', alignItems: 'center', gap: spacing.lg },
+  heroHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.lg },
   courseTile: {
     width: 68,
     height: 68,
@@ -486,12 +488,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  heroText: { flex: 1, gap: spacing.sm },
+  heroText: { flex: 1, justifyContent: 'center', gap: spacing.sm },
   courseName: { fontSize: fontSize.xxl, fontWeight: '800', color: colors.textPrimary },
   metaRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: spacing.sm },
   metaText: { fontSize: fontSize.sm, color: colors.textSecondary, fontWeight: '600' },
   metaDot: { width: 4, height: 4, borderRadius: 2, backgroundColor: colors.textTertiary },
-  startButton: { minWidth: 210 },
+  startButton: { minWidth: 210, marginTop: spacing.lg },
   sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline' },
   sectionTitle: { fontSize: fontSize.xl, fontWeight: '800', color: colors.textPrimary },
   sectionMeta: { fontSize: fontSize.sm, color: colors.textTertiary, fontWeight: '600' },

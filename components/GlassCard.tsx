@@ -1,7 +1,8 @@
 import { ReactNode } from 'react';
-import { Pressable, StyleSheet, View, ViewStyle } from 'react-native';
+import { StyleSheet, View, ViewStyle } from 'react-native';
 
 import { colors, radius, shadows, spacing } from '@/constants/theme';
+import { PressableScale } from '@/components/PressableScale';
 
 type GlassCardProps = {
   children: ReactNode;
@@ -40,17 +41,14 @@ export function GlassCard({
 
   if (onPress) {
     return (
-      <Pressable
+      <PressableScale
         onPress={onPress}
-        style={({ pressed }) => [
-          styles.card,
-          cardStyle,
-          pressed && styles.pressed,
-          style,
-        ]}
+        scaleTo={0.985}
+        opacityTo={0.96}
+        style={[styles.card, cardStyle, style]}
       >
         {content}
-      </Pressable>
+      </PressableScale>
     );
   }
 

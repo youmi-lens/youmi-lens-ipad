@@ -28,7 +28,12 @@ export function CourseCard({
     <GlassCard padding={0} onPress={onPress} style={styles.card}>
       <View style={styles.body}>
         <View style={styles.top}>
-          <IconTile icon={course.icon as IconName} color={colors.textSecondary} backgroundColor={colors.surfaceMuted} size={44} />
+          <IconTile
+            icon={course.icon as IconName}
+            color={course.accent}
+            backgroundColor={course.tint}
+            size={44}
+          />
           <Ionicons name="chevron-forward" size={19} color={colors.textTertiary} />
         </View>
         <Text numberOfLines={2} style={styles.name}>{course.name}</Text>

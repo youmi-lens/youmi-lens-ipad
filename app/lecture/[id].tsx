@@ -65,6 +65,7 @@ export default function LectureDetailScreen() {
   const [tab, setTab] = useState<Tab>('Summary');
   const [notesDraft, setNotesDraft] = useState(lecture?.notes ?? '');
   const [strokesDraft, setStrokesDraft] = useState<NoteStroke[]>(lecture?.noteStrokes ?? []);
+  const [imagesDraft, setImagesDraft] = useState(lecture?.noteImages ?? []);
   const [notesOpen, setNotesOpen] = useState(false);
   const [renameVisible, setRenameVisible] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
@@ -114,6 +115,7 @@ export default function LectureDetailScreen() {
   const openNotesEditor = () => {
     setNotesDraft(lecture.notes);
     setStrokesDraft(lecture.noteStrokes ?? []);
+    setImagesDraft(lecture.noteImages ?? []);
     setNotesOpen(true);
   };
 
@@ -121,6 +123,7 @@ export default function LectureDetailScreen() {
     updateLecture(lecture.id, {
       notes: notesDraft,
       noteStrokes: strokesDraft,
+      noteImages: imagesDraft,
       noteUpdatedAt: new Date().toISOString(),
     });
     setNotesOpen(false);
@@ -436,8 +439,10 @@ export default function LectureDetailScreen() {
             style={styles.modalCanvas}
             strokes={strokesDraft}
             text={notesDraft}
+            images={imagesDraft}
             onStrokesChange={setStrokesDraft}
             onTextChange={setNotesDraft}
+            onImagesChange={setImagesDraft}
           />
         </SafeAreaView>
       </Modal>

@@ -9,7 +9,7 @@
  */
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
   PanResponder,
@@ -22,7 +22,10 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { NotebookCanvas } from '@/components/NotebookCanvas';
+import {
+  NotebookCanvas,
+  type NotebookOverlayRect,
+} from '@/components/NotebookCanvas';
 import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
 import { formatClock } from '@/lib/format';
 import { useLiveCaptions } from '@/lib/liveCaptions';
@@ -36,6 +39,7 @@ const EDGE_MARGIN = 10;
 const MINI_NAV_HEIGHT = 50;
 const LISTENING_PILL_WIDTH = 176;
 const LISTENING_PILL_HEIGHT = 42;
+const CAPTION_DEFAULT_LOCAL_TOP = 96;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
@@ -58,8 +62,10 @@ export default function MiniCaptionScreen() {
   const {
     draftNotes,
     draftStrokes,
+    draftImages,
     setDraftNotes,
     setDraftStrokes,
+    setDraftImages,
     currentDurationMillis,
     addMarkMillis,
   } = useRecordingNotes();
@@ -92,7 +98,7 @@ export default function MiniCaptionScreen() {
   // ---- Draggable floating panel ----
   const initial = useRef({
     x: Math.max(EDGE_MARGIN, width - DEFAULT_PANEL_WIDTH - 16),
-    y: insets.top + 76,
+    y: insets.top + MINI_NAV_HEIGHT + CAPTION_DEFAULT_LOCAL_TOP,
   });
   const pan = useRef(new Animated.ValueXY(initial.current)).current;
   const posRef = useRef({ ...initial.current });
@@ -111,6 +117,22 @@ export default function MiniCaptionScreen() {
   const listeningPillPosRef = useRef({ ...initialListeningPill.current });
   const listeningPillDragStart = useRef({ x: 0, y: 0 });
   const listeningPillWasDraggedRef = useRef(false);
+  const [captionOverlayRect, setCaptionOverlayRect] = useState<NotebookOverlayRect>({
+    x: initial.current.x,
+    y: initial.current.y,
+    width: DEFAULT_PANEL_WIDTH,
+    height: DEFAULT_PANEL_HEIGHT,
+  });
+
+  const updateCaptionOverlayRect = useCallback(
+    (
+      position: { x: number; y: number },
+      size: { width: number; height: number },
+    ) => {
+      setCaptionOverlayRect({ ...position, ...size });
+    },
+    [],
+  );
 
   const dragResponder = useMemo(() => {
     const settle = (dx: number, dy: number) => {
@@ -121,6 +143,7 @@ export default function MiniCaptionScreen() {
         y: Math.min(Math.max(dragStart.current.y + dy, EDGE_MARGIN), maxY),
       };
       posRef.current = next;
+      updateCaptionOverlayRect(next, panelSizeRef.current);
       Animated.spring(pan, {
         toValue: next,
         useNativeDriver: true,
@@ -137,7 +160,9 @@ export default function MiniCaptionScreen() {
         dragStart.current = { ...posRef.current };
       },
       onPanResponderMove: (_e, g) => {
-        pan.setValue({ x: dragStart.current.x + g.dx, y: dragStart.current.y + g.dy });
+        const next = { x: dragStart.current.x + g.dx, y: dragStart.current.y + g.dy };
+        pan.setValue(next);
+        updateCaptionOverlayRect(next, panelSizeRef.current);
       },
       onPanResponderRelease: (_e, g) => {
         settle(g.dx, g.dy);
@@ -152,7 +177,7 @@ export default function MiniCaptionScreen() {
         }, 120);
       },
     });
-  }, [width, height, pan]);
+  }, [width, height, pan, updateCaptionOverlayRect]);
 
   const listeningPillResponder = useMemo(() => {
     const settle = (dx: number, dy: number) => {
@@ -163,6 +188,10 @@ export default function MiniCaptionScreen() {
         y: Math.min(Math.max(listeningPillDragStart.current.y + dy, EDGE_MARGIN), maxY),
       };
       listeningPillPosRef.current = next;
+      updateCaptionOverlayRect(next, {
+        width: LISTENING_PILL_WIDTH,
+        height: LISTENING_PILL_HEIGHT,
+      });
       Animated.spring(listeningPillPan, {
         toValue: next,
         useNativeDriver: true,
@@ -178,9 +207,14 @@ export default function MiniCaptionScreen() {
         listeningPillDragStart.current = { ...listeningPillPosRef.current };
       },
       onPanResponderMove: (_e, g) => {
-        listeningPillPan.setValue({
+        const next = {
           x: listeningPillDragStart.current.x + g.dx,
           y: listeningPillDragStart.current.y + g.dy,
+        };
+        listeningPillPan.setValue(next);
+        updateCaptionOverlayRect(next, {
+          width: LISTENING_PILL_WIDTH,
+          height: LISTENING_PILL_HEIGHT,
         });
       },
       onPanResponderRelease: (_e, g) => {
@@ -196,7 +230,7 @@ export default function MiniCaptionScreen() {
         }, 120);
       },
     });
-  }, [height, listeningPillPan, width]);
+  }, [height, listeningPillPan, updateCaptionOverlayRect, width]);
 
   const resizeResponder = useMemo(() => {
     const maxWidth = Math.max(MIN_PANEL_WIDTH, width * 0.96);
@@ -214,6 +248,7 @@ export default function MiniCaptionScreen() {
           height: Math.min(Math.max(resizeStartSizeRef.current.height + g.dy, MIN_PANEL_HEIGHT), maxHeight),
         };
         setPanelSize(next);
+        updateCaptionOverlayRect(posRef.current, next);
       },
       onPanResponderRelease: () => {
         isResizingRef.current = false;
@@ -235,7 +270,30 @@ export default function MiniCaptionScreen() {
         isResizingRef.current = false;
       },
     });
-  }, [height, pan, width]);
+  }, [height, pan, updateCaptionOverlayRect, width]);
+
+  useEffect(() => {
+    if (panelVisible) {
+      updateCaptionOverlayRect(posRef.current, panelSize);
+      return;
+    }
+    updateCaptionOverlayRect(listeningPillPosRef.current, {
+      width: LISTENING_PILL_WIDTH,
+      height: LISTENING_PILL_HEIGHT,
+    });
+  }, [panelSize, panelVisible, updateCaptionOverlayRect]);
+
+  const notebookAvoidRects = useMemo(
+    () => [
+      {
+        x: captionOverlayRect.x - insets.left,
+        y: captionOverlayRect.y - insets.top - MINI_NAV_HEIGHT,
+        width: captionOverlayRect.width,
+        height: captionOverlayRect.height,
+      },
+    ],
+    [captionOverlayRect, insets.left, insets.top],
+  );
 
   const captionsLive = status === 'active' || status === 'listening';
   const latestFinalEnglish = latestFinalLine?.text ?? captionLines[captionLines.length - 1]?.text ?? '';
@@ -262,8 +320,6 @@ export default function MiniCaptionScreen() {
   );
   const panelCompact = panelScale < 0.9;
   const panelMedium = panelScale >= 0.9 && panelScale < 1.15;
-  const panelLarge = panelScale >= 1.15 && panelScale < 1.4;
-  const panelExpanded = panelScale >= 1.4;
   const scaled = {
     panelPaddingX: Math.round(12 * panelScale),
     panelPaddingTop: Math.round(8 * panelScale),
@@ -374,8 +430,11 @@ export default function MiniCaptionScreen() {
             style={styles.canvas}
             strokes={draftStrokes}
             text={draftNotes}
+            images={draftImages}
             onStrokesChange={setDraftStrokes}
             onTextChange={setDraftNotes}
+            onImagesChange={setDraftImages}
+            avoidRects={notebookAvoidRects}
           />
         </View>
       </SafeAreaView>

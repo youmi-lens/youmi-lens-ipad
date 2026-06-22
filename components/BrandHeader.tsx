@@ -1,5 +1,6 @@
 import { ReactNode } from 'react';
-import { Image, StyleSheet, Text, View, ViewStyle } from 'react-native';
+import { Image as ExpoImage } from 'expo-image';
+import { StyleSheet, Text, View, ViewStyle } from 'react-native';
 
 import { colors, fontSize, spacing } from '@/constants/theme';
 
@@ -12,9 +13,10 @@ type LogoMarkProps = {
 /** Official Youmi Lens mark, rendered without recoloring or cropping. */
 export function LogoMark({ size = 44 }: LogoMarkProps) {
   return (
-    <Image
+    <ExpoImage
       accessibilityIgnoresInvertColors
       accessibilityLabel="Youmi Lens"
+      contentFit="contain"
       resizeMode="contain"
       source={require('../assets/images/youmi-lens-mark-navy.png')}
       style={{ width: size * 0.8, height: size }}

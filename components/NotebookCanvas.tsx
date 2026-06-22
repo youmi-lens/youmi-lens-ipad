@@ -20,12 +20,20 @@
  * Intentionally NOT a full Notability clone: no layers, lasso, shape tools,
  * OCR or PDF. The eraser removes whole touched strokes (V1).
  */
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Haptics from 'expo-haptics';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import * as ImagePicker from 'expo-image-picker';
+import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   Alert,
+  Animated,
+  Easing,
+  Image as RNImage,
+  LayoutChangeEvent,
+  PanResponder,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -38,22 +46,46 @@ import {
   PointerType,
   ScrollView as GestureScrollView,
 } from 'react-native-gesture-handler';
-import Svg, { Circle, Path } from 'react-native-svg';
+import Svg, {
+  Circle,
+  Defs,
+  Ellipse,
+  G,
+  LinearGradient,
+  Path,
+  Rect,
+  Stop,
+} from 'react-native-svg';
 
 import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
-import type { NotePoint, NoteStroke } from '@/lib/models';
+import type { NoteImage, NotePoint, NoteStroke } from '@/lib/models';
 import {
   addPencilDoubleTapListener,
   isPencilDoubleTapAvailable,
 } from '@/lib/pencilInteraction';
 
 const PEN_COLORS: { key: string; value: string }[] = [
-  { key: 'Navy', value: '#061B34' },
-  { key: 'Blue', value: '#2D6CDF' },
-  { key: 'Red', value: '#D7263D' },
-  { key: 'Purple', value: '#6C4FB3' },
-  { key: 'Black', value: '#1A1A1A' },
+  { key: 'Charcoal', value: '#222630' },
+  { key: 'Blue', value: '#2D6BD4' },
+  { key: 'Red', value: '#E23B47' },
+  { key: 'Orange', value: '#F08A1E' },
+  { key: 'Purple', value: '#9B30C9' },
+  { key: 'White', value: '#FFFFFF' },
+  { key: 'Teal', value: '#1FB58E' },
 ];
+
+// ---- Unified navy toolbar tokens — match the Live Caption overlay ----
+// Toolbar surface gradient (design: linear-gradient(180deg, #1E2E50, #16233F)).
+const TOOLBAR_NAVY_TOP = '#1E2E50';
+const TOOLBAR_NAVY_BOTTOM = '#16233F';
+const TOOLBAR_BORDER_COLOR = 'rgba(255,255,255,0.07)';
+const TOOLBAR_SELECTED = '#5F86E8';
+const TOOLBAR_ICON_IDLE = 'rgba(255,255,255,0.62)';
+const TOOLBAR_ICON_DISABLED = 'rgba(255,255,255,0.26)';
+const TOOLBAR_DIVIDER_COLOR = 'rgba(255,255,255,0.11)';
+const TOOLBAR_SHELL_RADIUS = 22;
+const TOOLBAR_MINIMIZED_RADIUS = 16;
+const TOOLBAR_CHIP_RADIUS = 11;
 
 const PEN_WIDTHS: { key: string; value: number; dot: number }[] = [
   { key: 'Thin', value: 2, dot: 7 },
@@ -62,10 +94,10 @@ const PEN_WIDTHS: { key: string; value: number; dot: number }[] = [
 ];
 
 const HIGHLIGHTER_COLORS: { key: string; value: string }[] = [
-  { key: 'Yellow', value: '#FFE066' },
-  { key: 'Blue', value: '#78D6FF' },
-  { key: 'Pink', value: '#FF9CCB' },
-  { key: 'Green', value: '#9BE7A6' },
+  { key: 'Yellow', value: 'rgba(245,210,70,0.9)' },
+  { key: 'Green', value: 'rgba(120,215,140,0.85)' },
+  { key: 'Pink', value: 'rgba(245,150,190,0.85)' },
+  { key: 'Blue', value: 'rgba(120,180,245,0.85)' },
 ];
 
 const HIGHLIGHTER_WIDTHS: { key: string; value: number; dot: number }[] = [
@@ -75,6 +107,7 @@ const HIGHLIGHTER_WIDTHS: { key: string; value: number; dot: number }[] = [
 ];
 
 type EraserSizeKey = 'small' | 'medium' | 'large';
+type SelectionShape = 'rect' | 'lasso';
 
 const ERASER_SIZES: { key: EraserSizeKey; label: string; radius: number }[] = [
   { key: 'small', label: 'Small', radius: 12 },
@@ -89,17 +122,127 @@ const MIN_POINT_DISTANCE = 1.8;
 const PAGE_HEIGHT = 3200;
 /** How long the Pen / Eraser badge stays on screen after a double-tap. */
 const TOOL_TOAST_MS = 1100;
+const TOOLBAR_STORAGE_KEY = 'youmi.notebookToolbar.v1';
+const TOOLBAR_EDGE_MARGIN = 12;
+const TOOLBAR_COLLISION_GAP = 14;
+const NARROW_TOOLBAR_WIDTH = 720;
+// Minimized tag — design `.tbmin`: grip + 46pt current-tool + 38pt expand chevron.
+const TOOLBAR_COLLAPSED_WIDTH = 126;
+const TOOLBAR_COLLAPSED_HEIGHT = 60;
+const TOOLBAR_PRIMARY_HEIGHT = 52;
+const TOOLBAR_CONTEXT_HEIGHT = 44;
+const TOOLBAR_ANIMATION_MS = 190;
+const TOOLBAR_EASING = Easing.bezier(0.4, 0, 0.2, 1);
+const TOOLBAR_WIDTHS = {
+  drawing: 536,
+  erase: 536,
+  compact: 536,
+} as const;
+const TOOLBAR_ICON_HIT_SLOP = { top: 5, right: 5, bottom: 5, left: 5 };
+const TOOLBAR_DRAG_THRESHOLD = 8;
+// Edge-intent activation zones for drag-release snapping. A release whose finger
+// lands within the left/right band of the usable width is treated as explicit
+// intent to dock to that side edge (vertical layout), winning over top/bottom
+// corner anchors. Generous so the user never has to hit a tiny target.
+const TOOLBAR_SIDE_EDGE_ZONE_RATIO = 0.2; // rightmost / leftmost 20% of width
+const TOOLBAR_SIDE_EDGE_ZONE_MIN = 220; // ...but at least 220pt
+const TOOLBAR_VERT_EDGE_ZONE_RATIO = 0.2; // top / bottom 20% of height
+const TOOLBAR_VERT_EDGE_ZONE_MIN = 150; // ...but at least 150pt
+const TOOLBAR_VERTICAL_RAIL_WIDTH = 60;
+const TOOLBAR_VERTICAL_CONTEXT_WIDTH = 360;
+const TOOLBAR_VERTICAL_ACTION_WIDTH = 60;
+const TOOLBAR_VERTICAL_BUTTON_GAP = 2;
+/** History pill (3 × 44pt + 2 × 2pt gaps + 16pt padding) plus contextual selection pill when visible. */
+const TOOLBAR_HISTORY_PILL_WIDTH = 156;
+const TOOLBAR_SELECTION_PILL_WIDTH = 60;
+const TOOLBAR_RIGHT_PILL_GAP = 12;
 
-export type CanvasMode = 'write' | 'highlight' | 'type' | 'erase' | 'scroll';
+// ---- Side-docked vertical toolbar (Concept C: stable rail + detached inward cards) ----
+// A purpose-built side layout — NOT a rotated/transposed horizontal toolbar. The primary
+// rail never resizes; the context card, history mini-rail and selection cluster are their
+// own detached navy surfaces. These values feed both the render and the snap footprint.
+// One unified rounded capsule = [primary tool column | divider | narrow context column].
+// History and selection actions live in their own separate small capsules nearby.
+const TOOLBAR_VERTICAL_TOOL_COL_WIDTH = 52;
+const TOOLBAR_VERTICAL_CONTEXT_NARROW = 56; // Pen / Highlight / Eraser (swatch + nib columns)
+const TOOLBAR_VERTICAL_CONTEXT_WIDE = 76; // Text / Select / Insert (compact labelled controls)
+const TOOLBAR_VERTICAL_COL_DIVIDER = 1;
+const TOOLBAR_VERTICAL_CAPSULE_HEIGHT = 400;
+const TOOLBAR_VERTICAL_GROUP_GAP = 12;
+const TOOLBAR_VERTICAL_ACTION_HEIGHT = 152; // history capsule: 3 stacked icon buttons
+const TOOLBAR_VERTICAL_SELECTION_HEIGHT = 60; // selection capsule: Duplicate only
+const TOOLBAR_MINI_CAPSULE_WIDTH = 56;
+const TOOLBAR_MINI_CAPSULE_HEIGHT = 132;
+const IMAGE_MIN_EDGE = 56;
+const IMAGE_MAX_EDGE = 1200;
+const IMAGE_VISIBLE_EDGE = 36;
+/** Small movement threshold so a selected image starts dragging quickly (not the larger toolbar threshold). */
+const IMAGE_DRAG_MIN_DISTANCE = 3;
+/** Tap tolerance for selecting an image without it being read as a drag. */
+const IMAGE_TAP_MAX_DISTANCE = 12;
+/** Forgiving touch padding around the image frame so taps/drags need not be pixel-perfect. */
+const IMAGE_HIT_SLOP = 6;
+/** Half-extent of a corner handle's touch target (so the hit area is ~36pt though the dot is ~8pt). */
+const IMAGE_CORNER_HANDLE_HALF = 18;
+
+/** One reversible snapshot of all editable notebook content for undo/redo. */
+type NotebookSnapshot = { strokes: NoteStroke[]; images: NoteImage[]; text: string };
+/** Max in-memory history depth (per session) to bound memory. */
+const HISTORY_MAX = 60;
+const TEXT_HISTORY_DEBOUNCE_MS = 900;
+
+export type CanvasMode = 'write' | 'highlight' | 'type' | 'erase' | 'scroll' | 'select' | 'insert';
+
+const NOOP_IMAGES_CHANGE = (_imgs: NoteImage[]) => {};
 type DrawingMode = 'write' | 'highlight';
+export type NotebookToolbarDock =
+  | 'topLeft'
+  | 'topCenter'
+  | 'topRight'
+  | 'leftCenter'
+  | 'rightCenter'
+  | 'bottomLeft'
+  | 'bottomCenter'
+  | 'bottomRight';
+export type NotebookOverlayRect = { x: number; y: number; width: number; height: number };
 
-/** Primary tools shown in the toolbar segment. Scroll is a fallback action. */
-const DRAW_MODES: { key: CanvasMode; label: string }[] = [
+type ToolbarPreferences = {
+  collapsed: boolean;
+  /** Snapped edge region. The toolbar always rests in one of these after a drag. */
+  dock: NotebookToolbarDock;
+  mode: CanvasMode;
+  eraserSize: EraserSizeKey;
+};
+
+const DEFAULT_TOOLBAR_PREFERENCES: ToolbarPreferences = {
+  collapsed: false,
+  dock: 'topCenter',
+  mode: 'write',
+  eraserSize: 'medium',
+};
+
+const TOOLBAR_DOCKS: NotebookToolbarDock[] = [
+  'topLeft',
+  'topCenter',
+  'topRight',
+  'leftCenter',
+  'rightCenter',
+  'bottomLeft',
+  'bottomCenter',
+  'bottomRight',
+];
+
+/** Primary row tools, left to right. Hand (scroll) and Minimize are rendered separately after the divider. */
+const PRIMARY_TOOLS: { key: CanvasMode; label: string }[] = [
   { key: 'write', label: 'Write' },
   { key: 'highlight', label: 'Highlight' },
-  { key: 'type', label: 'Type' },
+  { key: 'type', label: 'Text' },
+  { key: 'select', label: 'Select' },
+  { key: 'insert', label: 'Insert' },
   { key: 'erase', label: 'Erase' },
 ];
+/** All valid saved-preference modes. */
+const DRAW_MODES = PRIMARY_TOOLS;
 
 type PointerLabel = 'STYLUS' | 'TOUCH' | 'MOUSE' | 'KEY' | 'OTHER';
 
@@ -120,6 +263,152 @@ function pointerLabel(pointerType: PointerType): PointerLabel {
 
 function makeStrokeId(): string {
   return `stroke_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function makeImageId(): string {
+  return `img_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
+
+function cloneStroke(stroke: NoteStroke): NoteStroke {
+  return {
+    ...stroke,
+    points: stroke.points.map((point) => ({ ...point })),
+  };
+}
+
+function cloneImage(image: NoteImage): NoteImage {
+  return { ...image };
+}
+
+function cloneSnapshot(snapshot: NotebookSnapshot): NotebookSnapshot {
+  return {
+    strokes: snapshot.strokes.map(cloneStroke),
+    images: snapshot.images.map(cloneImage),
+    text: snapshot.text,
+  };
+}
+
+/** Ray-casting point-in-polygon test for the lasso selection. */
+function pointInPolygon(point: NotePoint, polygon: NotePoint[]): boolean {
+  const { x, y } = point;
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x, yi = polygon[i].y;
+    const xj = polygon[j].x, yj = polygon[j].y;
+    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function rectFromPoints(a: NotePoint, b: NotePoint): NotebookOverlayRect {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  return {
+    x,
+    y,
+    width: Math.abs(a.x - b.x),
+    height: Math.abs(a.y - b.y),
+  };
+}
+
+function pointInRect(point: NotePoint, rect: NotebookOverlayRect): boolean {
+  return (
+    point.x >= rect.x &&
+    point.x <= rect.x + rect.width &&
+    point.y >= rect.y &&
+    point.y <= rect.y + rect.height
+  );
+}
+
+function imageRect(image: NoteImage): NotebookOverlayRect {
+  return { x: image.x, y: image.y, width: image.width, height: image.height };
+}
+
+function clampImageGeometry(image: NoteImage, canvasWidth: number): NoteImage {
+  const safeCanvasWidth = Math.max(canvasWidth, IMAGE_VISIBLE_EDGE * 2);
+  const minX = -image.width + IMAGE_VISIBLE_EDGE;
+  const maxX = safeCanvasWidth - IMAGE_VISIBLE_EDGE;
+  const minY = -image.height + IMAGE_VISIBLE_EDGE;
+  const maxY = PAGE_HEIGHT - IMAGE_VISIBLE_EDGE;
+  return {
+    ...image,
+    x: clamp(image.x, minX, maxX),
+    y: clamp(image.y, minY, maxY),
+  };
+}
+
+function resizeImageAroundCenter(image: NoteImage, scale: number, canvasWidth: number): NoteImage {
+  const aspect = image.height / Math.max(image.width, 1);
+  const maxEdge = Math.max(
+    IMAGE_MIN_EDGE,
+    Math.min(IMAGE_MAX_EDGE, Math.max(canvasWidth * 1.5, IMAGE_MIN_EDGE * 2)),
+  );
+  const minScale = IMAGE_MIN_EDGE / Math.max(Math.min(image.width, image.height), 1);
+  const maxScale = maxEdge / Math.max(image.width, image.height, 1);
+  const nextScale = clamp(scale, minScale, maxScale);
+  const nextWidth = image.width * nextScale;
+  const nextHeight = nextWidth * aspect;
+  const centerX = image.x + image.width / 2;
+  const centerY = image.y + image.height / 2;
+  return clampImageGeometry(
+    {
+      ...image,
+      x: centerX - nextWidth / 2,
+      y: centerY - nextHeight / 2,
+      width: nextWidth,
+      height: nextHeight,
+    },
+    canvasWidth,
+  );
+}
+
+type ImageCorner = 'topLeft' | 'topRight' | 'bottomLeft' | 'bottomRight';
+
+/**
+ * Resize an image by dragging one corner, keeping the OPPOSITE corner pinned and
+ * preserving aspect ratio. `dx`/`dy` are the cumulative drag of the grabbed corner
+ * from the gesture start. The drag is projected onto the image's diagonal so the
+ * grabbed corner follows the finger as closely as possible while aspect locks, and
+ * the same min/max edge limits as the pinch path apply.
+ */
+function resizeImageFromCorner(
+  image: NoteImage,
+  corner: ImageCorner,
+  dx: number,
+  dy: number,
+  canvasWidth: number,
+): NoteImage {
+  const w = Math.max(image.width, 1);
+  const h = Math.max(image.height, 1);
+  // Outward direction of the grabbed corner from the image centre.
+  const sx = corner === 'topRight' || corner === 'bottomRight' ? 1 : -1;
+  const sy = corner === 'bottomLeft' || corner === 'bottomRight' ? 1 : -1;
+  const diagLen = Math.hypot(w, h);
+  // Unit vector along the anchor -> grabbed-corner diagonal; project the drag onto it.
+  const ux = (sx * w) / diagLen;
+  const uy = (sy * h) / diagLen;
+  const projected = dx * ux + dy * uy; // positive = grow, negative = shrink
+
+  const maxEdge = Math.max(
+    IMAGE_MIN_EDGE,
+    Math.min(IMAGE_MAX_EDGE, Math.max(canvasWidth * 1.5, IMAGE_MIN_EDGE * 2)),
+  );
+  const minScale = IMAGE_MIN_EDGE / Math.max(Math.min(w, h), 1);
+  const maxScale = maxEdge / Math.max(w, h, 1);
+  const scale = clamp((diagLen + projected) / diagLen, minScale, maxScale);
+  const nextWidth = w * scale;
+  const nextHeight = h * scale;
+
+  // Pin the opposite corner: edges that are NOT being dragged keep their position.
+  const nextX = sx > 0 ? image.x : image.x + w - nextWidth;
+  const nextY = sy > 0 ? image.y : image.y + h - nextHeight;
+
+  return clampImageGeometry(
+    { ...image, x: nextX, y: nextY, width: nextWidth, height: nextHeight },
+    canvasWidth,
+  );
 }
 
 function distancePointToSegment(point: NotePoint, a: NotePoint, b: NotePoint): number {
@@ -166,6 +455,66 @@ export function strokeToPath(points: NotePoint[]): string {
   return d;
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function toolbarDockPoint(
+  dock: NotebookToolbarDock,
+  container: { width: number; height: number },
+  toolbar: { width: number; height: number },
+) {
+  const left = TOOLBAR_EDGE_MARGIN;
+  const right = Math.max(left, container.width - toolbar.width - TOOLBAR_EDGE_MARGIN);
+  const top = TOOLBAR_EDGE_MARGIN;
+  const bottom = Math.max(top, container.height - toolbar.height - TOOLBAR_EDGE_MARGIN);
+  const centerX = clamp((container.width - toolbar.width) / 2, left, right);
+  const centerY = clamp(
+    (container.height - toolbar.height) / 2,
+    top,
+    bottom,
+  );
+
+  switch (dock) {
+    case 'topLeft':
+      return { x: left, y: top };
+    case 'topRight':
+      return { x: right, y: top };
+    case 'leftCenter':
+      return { x: left, y: centerY };
+    case 'rightCenter':
+      return { x: right, y: centerY };
+    case 'bottomLeft':
+      return { x: left, y: bottom };
+    case 'bottomCenter':
+      return { x: centerX, y: bottom };
+    case 'bottomRight':
+      return { x: right, y: bottom };
+    default:
+      return { x: centerX, y: top };
+  }
+}
+
+function toolbarDockIsVertical(dock: NotebookToolbarDock): boolean {
+  return dock === 'leftCenter' || dock === 'rightCenter';
+}
+
+function rectsOverlap(a: NotebookOverlayRect, b: NotebookOverlayRect, gap = 0): boolean {
+  return (
+    a.x < b.x + b.width + gap &&
+    a.x + a.width + gap > b.x &&
+    a.y < b.y + b.height + gap &&
+    a.y + a.height + gap > b.y
+  );
+}
+
+function toolbarRect(
+  point: { x: number; y: number },
+  size: { width: number; height: number },
+): NotebookOverlayRect {
+  return { ...point, ...size };
+}
+
 /**
  * One rendered stroke. A single-point stroke (a tap) is drawn as a small dot,
  * a multi-point stroke as a smooth path. Each stroke is its own SVG node with
@@ -197,22 +546,493 @@ function StrokeShape({
   );
 }
 
-function ModeIcon({ mode, active }: { mode: CanvasMode; active: boolean }) {
-  const color = active ? colors.pearlWhite : colors.deepNavy;
-  if (mode === 'write') return <Ionicons name="pencil" size={15} color={color} />;
-  if (mode === 'highlight') return <Ionicons name="color-wand-outline" size={15} color={color} />;
-  if (mode === 'type') return <Ionicons name="text" size={15} color={color} />;
-  if (mode === 'erase') return <MaterialCommunityIcons name="eraser" size={16} color={color} />;
-  return <Ionicons name="hand-left-outline" size={15} color={color} />;
+type ToolbarGlyphName =
+  | 'pen'
+  | 'highlighter'
+  | 'eraser'
+  | 'type'
+  | 'undo'
+  | 'redo'
+  | 'more'
+  | 'hand'
+  | 'chevronRight'
+  | 'chevronLeft'
+  | 'chevronUp'
+  | 'chevronDown'
+  | 'select'
+  | 'insert'
+  | 'duplicate';
+
+/**
+ * Toolbar icon glyphs. SVG paths are ported verbatim from the approved design
+ * (`youmi-notebook-combined.html`, viewBox 0 0 28 28) so the shapes match the
+ * Chrome reference exactly. `size` follows the design: 25 for primary tools,
+ * 23 for the icon buttons (Hand/Minimize/right pill), 24 for the minimized tag.
+ */
+function ToolbarGlyphBase({
+  name,
+  color = colors.textOnNavyMuted,
+  size = 23,
+}: {
+  name: ToolbarGlyphName;
+  color?: string;
+  size?: number;
+}) {
+  const outline = {
+    stroke: color,
+    strokeWidth: 1.9,
+    strokeLinecap: 'round' as const,
+    strokeLinejoin: 'round' as const,
+    fill: 'none',
+  };
+
+  return (
+    <Svg width={size} height={size} viewBox="0 0 28 28" accessibilityElementsHidden>
+      {name === 'pen' ? (
+        <>
+          <Path d="M5 23l1.4-4.6L19 5.8a2.3 2.3 0 0 1 3.3 3.3L9.6 21.6 5 23Z" {...outline} />
+          <Path d="M16.6 8.2l3.2 3.2" stroke={color} strokeWidth={1.9} fill="none" />
+          <Path d="M5 23l1.4-4.6 3.2 3.2L5 23Z" fill={color} />
+        </>
+      ) : null}
+      {name === 'highlighter' ? (
+        <>
+          <Path d="M6 20l-1.2 3.4 3.4-1.2L20 9.4l-2.2-2.2L6 20Z" {...outline} />
+          <Path d="M17.8 7.2l2.2 2.2 2.2-2.2a1.55 1.55 0 0 0 0-2.2a1.55 1.55 0 0 0-2.2 0L17.8 7.2Z" fill={color} />
+          <Path d="M5 24h6.5" stroke={color} strokeWidth={2} strokeLinecap="round" fill="none" />
+        </>
+      ) : null}
+      {name === 'eraser' ? (
+        <>
+          <Path d="M9 22h12" stroke={color} strokeWidth={1.9} strokeLinecap="round" fill="none" />
+          <Path d="M6.2 18.4l-1.6-1.6a2.2 2.2 0 0 1 0-3.1l7.6-7.6a2.2 2.2 0 0 1 3.1 0l4.4 4.4a2.2 2.2 0 0 1 0 3.1L15 20.4H8.6L6.2 18.4Z" {...outline} />
+          <Path d="M10 9.6l5.6 5.6" stroke={color} strokeWidth={1.9} fill="none" />
+        </>
+      ) : null}
+      {name === 'type' ? (
+        <>
+          <Path d="M6 8h11M6 8V6.5M17 8V6.5M11.5 8v14M9 22h5" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" fill="none" />
+          <Path d="M17 12h6M20 12v10M18.5 22h3" stroke={color} strokeWidth={1.7} strokeLinecap="round" fill="none" />
+        </>
+      ) : null}
+      {name === 'undo' ? (
+        <>
+          <Path d="M10 8L6 12l4 4" stroke={color} strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round" fill="none" />
+          <Path d="M6 12h10.5a5.5 5.5 0 0 1 5.5 5.5v1" stroke={color} strokeWidth={1.9} strokeLinecap="round" fill="none" />
+        </>
+      ) : null}
+      {name === 'redo' ? (
+        <>
+          <Path d="M18 8l4 4-4 4" stroke={color} strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round" fill="none" />
+          <Path d="M22 12H11.5A5.5 5.5 0 0 0 6 17.5v1" stroke={color} strokeWidth={1.9} strokeLinecap="round" fill="none" />
+        </>
+      ) : null}
+      {name === 'more' ? (
+        <Path
+          d="M7 9h14M11 9V7.5a1.2 1.2 0 0 1 1.2-1.2h3.6a1.2 1.2 0 0 1 1.2 1.2V9M9 9v12.5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9"
+          {...outline}
+        />
+      ) : null}
+      {name === 'hand' ? (
+        <Path
+          d="M11 13V7.5a1.7 1.7 0 0 1 3.4 0V13m0-1.5a1.7 1.7 0 0 1 3.4 0V14m0-1a1.7 1.7 0 0 1 3.3 0v4.5c0 3.3-2.4 5.8-6 5.8-2.4 0-4-1-5.4-2.8l-3-4a1.7 1.7 0 0 1 2.5-2.2L11 17V13Z"
+          stroke={color}
+          strokeWidth={1.7}
+          strokeLinejoin="round"
+          fill="none"
+        />
+      ) : null}
+      {name === 'chevronRight' ? (
+        <Path d="M11 7l6 7-6 7" stroke={color} strokeWidth={2.1} strokeLinecap="round" strokeLinejoin="round" fill="none" />
+      ) : null}
+      {name === 'chevronLeft' ? (
+        <Path d="M17 7l-6 7 6 7" stroke={color} strokeWidth={2.1} strokeLinecap="round" strokeLinejoin="round" fill="none" />
+      ) : null}
+      {name === 'chevronUp' ? (
+        <Path d="M7 17.5l7-7 7 7" stroke={color} strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" fill="none" />
+      ) : null}
+      {name === 'chevronDown' ? (
+        <Path d="M7 10.5l7 7 7-7" stroke={color} strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" fill="none" />
+      ) : null}
+      {name === 'select' ? (
+        <Ellipse cx="14" cy="14" rx="9" ry="8" stroke={color} strokeWidth={1.9} strokeDasharray="3.2 3.4" fill="none" />
+      ) : null}
+      {name === 'insert' ? (
+        <>
+          <Circle cx="14" cy="14" r="9.5" stroke={color} strokeWidth={1.9} fill="none" />
+          <Path d="M14 9.5v9M9.5 14h9" stroke={color} strokeWidth={1.9} strokeLinecap="round" fill="none" />
+        </>
+      ) : null}
+      {name === 'duplicate' ? (
+        <>
+          <Rect x="9" y="9" width="13" height="13" rx="2.4" stroke={color} strokeWidth={1.8} fill="none" />
+          <Path d="M6 17V7.5A1.5 1.5 0 0 1 7.5 6H17" stroke={color} strokeWidth={1.8} strokeLinecap="round" fill="none" />
+        </>
+      ) : null}
+    </Svg>
+  );
 }
+
+/**
+ * Vertical navy gradient fill (#1E2E50 → #16233F) that matches the design's
+ * `linear-gradient(180deg, …)` toolbar surface. Rendered as an absolute-fill
+ * layer inside an `overflow: hidden`, rounded container so it clips correctly.
+ * Uses react-native-svg (already a dependency) — no native gradient module.
+ */
+function NavySurfaceBase({ width, height }: { width?: number; height?: number }) {
+  const gradientId = useId().replace(/:/g, '_');
+  const surfaceWidth = width ?? '100%';
+  const surfaceHeight = height ?? '100%';
+  return (
+    <View style={styles.navySurfaceLayer} pointerEvents="none">
+      <Svg width={surfaceWidth} height={surfaceHeight} style={StyleSheet.absoluteFillObject}>
+        <Defs>
+          <LinearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+            <Stop offset="0" stopColor={TOOLBAR_NAVY_TOP} />
+            <Stop offset="1" stopColor={TOOLBAR_NAVY_BOTTOM} />
+          </LinearGradient>
+        </Defs>
+        <Rect x="0" y="0" width={surfaceWidth} height={surfaceHeight} fill={`url(#${gradientId})`} />
+      </Svg>
+    </View>
+  );
+}
+
+/** Drag-handle grip — design `.grip`: two columns of three 3pt dots. */
+function GripDotsBase() {
+  return (
+    <View style={styles.gripDots}>
+      <View style={styles.gripCol}>
+        <View style={styles.gripDot} />
+        <View style={styles.gripDot} />
+        <View style={styles.gripDot} />
+      </View>
+      <View style={styles.gripCol}>
+        <View style={styles.gripDot} />
+        <View style={styles.gripDot} />
+        <View style={styles.gripDot} />
+      </View>
+    </View>
+  );
+}
+
+function SelectionShapeIconBase({
+  shape,
+  color = TOOLBAR_ICON_IDLE,
+}: {
+  shape: SelectionShape;
+  color?: string;
+}) {
+  if (shape === 'rect') {
+    return (
+      <Svg width={25} height={25} viewBox="0 0 28 28">
+        <Rect
+          x="6"
+          y="7"
+          width="16"
+          height="14"
+          rx="2.5"
+          stroke={color}
+          strokeWidth={1.9}
+          strokeDasharray="3 3"
+          fill="none"
+        />
+        <Path d="M9 7H6v3M19 7h3v3M6 18v3h3M22 18v3h-3" stroke={color} strokeWidth={1.9} strokeLinecap="round" fill="none" />
+      </Svg>
+    );
+  }
+
+  return (
+    <Svg width={25} height={25} viewBox="0 0 28 28">
+      <Path
+        d="M7.6 14.8c-2.1-4.2 2.3-8 7.1-7.3 5.7.8 8.1 5.2 5.8 9.3-2.1 3.8-7.7 5.3-11.5 2.8-1.7-1.1-2.5-2.6-1.4-4.8Z"
+        stroke={color}
+        strokeWidth={1.9}
+        strokeDasharray="3.2 3.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        fill="none"
+      />
+      <Path d="M8.7 19.3l-2.1 3.2" stroke={color} strokeWidth={1.7} strokeLinecap="round" fill="none" />
+    </Svg>
+  );
+}
+
+type NotebookImageObjectProps = {
+  image: NoteImage;
+  selected: boolean;
+  moveOffset: NotePoint;
+  onSelect: (id: string) => void;
+  /** Cumulative pan translation + cumulative pinch scale for this interaction, relative to its start. */
+  onTransform: (id: string, translationX: number, translationY: number, scale: number) => void;
+  /** Cumulative drag of a grabbed corner handle from this interaction's start. */
+  onCornerResize: (id: string, corner: ImageCorner, translationX: number, translationY: number) => void;
+  onGestureStart: (id: string) => void;
+  onGestureEnd: () => void;
+};
+
+const IMAGE_CORNERS: ImageCorner[] = ['topLeft', 'topRight', 'bottomLeft', 'bottomRight'];
+
+/**
+ * Direct image manipulation. Built on react-native-gesture-handler (not
+ * PanResponder, which could not reliably recognise a two-finger pinch in the
+ * Simulator):
+ *   - Tap         -> select
+ *   - Pan on body -> one-finger move (small 3pt threshold; centroid pan ignored while pinching)
+ *   - Pan on a selected-image corner handle -> resize from that corner (opposite corner pinned)
+ *   - Pinch       -> resize around centre, aspect preserved, min/max clamped
+ * A single Pan distinguishes corner-resize vs body-move by where it started, so it
+ * never fights the body drag and needs no extra gesture/arbitration. Pan + Pinch are
+ * Simultaneous; their cumulative values are pushed together to the parent, which
+ * composes them from a single baseline. Exactly one undo snapshot per interaction.
+ */
+function NotebookImageObjectBase({
+  image,
+  selected,
+  moveOffset,
+  onSelect,
+  onTransform,
+  onCornerResize,
+  onGestureStart,
+  onGestureEnd,
+}: NotebookImageObjectProps) {
+  const activeRef = useRef(0);
+  const panTranslationRef = useRef({ x: 0, y: 0 });
+  const pinchScaleRef = useRef(1);
+  const panStartedRef = useRef(false);
+  const pinchStartedRef = useRef(false);
+  // Live values read by the gestures. The gesture objects are built ONCE (empty deps)
+  // and read everything through refs, so a re-render mid-drag (the image geometry or
+  // scroll-lock state changing) never rebuilds them.
+  const imageIdRef = useRef(image.id);
+  imageIdRef.current = image.id;
+  const handlersRef = useRef({ onSelect, onTransform, onCornerResize, onGestureStart, onGestureEnd });
+  handlersRef.current = { onSelect, onTransform, onCornerResize, onGestureStart, onGestureEnd };
+
+  // body gesture (tap = select, pan = move, pinch = resize) + one Pan per corner handle.
+  // The corner handles are separate fixed-size views (below), so resizing the image never
+  // changes the view a corner gesture is attached to — the drag is never cancelled and so
+  // never restarts as a stray move. Each corner is hardcoded, so there is no misclassification.
+  const { bodyGesture, cornerGestures } = useMemo(() => {
+    const reset = () => {
+      panTranslationRef.current = { x: 0, y: 0 };
+      pinchScaleRef.current = 1;
+    };
+    // First sub-gesture to activate opens the interaction (one baseline / undo);
+    // the last to finalize closes it.
+    const begin = () => {
+      if (activeRef.current === 0) {
+        reset();
+        handlersRef.current.onGestureStart(imageIdRef.current);
+      }
+      activeRef.current += 1;
+    };
+    const settle = () => {
+      activeRef.current = Math.max(0, activeRef.current - 1);
+      if (activeRef.current === 0) {
+        handlersRef.current.onGestureEnd();
+        reset();
+      }
+    };
+    const pushTransform = () =>
+      handlersRef.current.onTransform(
+        imageIdRef.current,
+        panTranslationRef.current.x,
+        panTranslationRef.current.y,
+        pinchScaleRef.current,
+      );
+
+    const tap = Gesture.Tap()
+      .runOnJS(true)
+      .maxDuration(260)
+      .maxDistance(IMAGE_TAP_MAX_DISTANCE)
+      .hitSlop(IMAGE_HIT_SLOP)
+      .onEnd(() => handlersRef.current.onSelect(imageIdRef.current));
+
+    // A corner drag is a single, self-contained gesture (one finger, one handle),
+    // so it opens/commits the interaction DIRECTLY rather than through the shared
+    // active-count used by the simultaneous body-pan + pinch. This guarantees one
+    // onGestureStart and one onGestureEnd — i.e. exactly one undo entry per drag.
+    const makeCornerGesture = (corner: ImageCorner) => {
+      let started = false;
+      return Gesture.Pan()
+        .runOnJS(true)
+        .minDistance(IMAGE_DRAG_MIN_DISTANCE)
+        .onStart(() => {
+          started = true;
+          handlersRef.current.onGestureStart(imageIdRef.current);
+        })
+        .onUpdate((event) => {
+          handlersRef.current.onCornerResize(
+            imageIdRef.current,
+            corner,
+            event.translationX,
+            event.translationY,
+          );
+        })
+        .onFinalize(() => {
+          if (!started) return;
+          started = false;
+          handlersRef.current.onGestureEnd();
+        });
+    };
+    const corners: Record<ImageCorner, ReturnType<typeof makeCornerGesture>> = {
+      topLeft: makeCornerGesture('topLeft'),
+      topRight: makeCornerGesture('topRight'),
+      bottomLeft: makeCornerGesture('bottomLeft'),
+      bottomRight: makeCornerGesture('bottomRight'),
+    };
+
+    const pan = Gesture.Pan()
+      .runOnJS(true)
+      .minDistance(IMAGE_DRAG_MIN_DISTANCE)
+      .averageTouches(true)
+      .hitSlop(IMAGE_HIT_SLOP)
+      // A touch that belongs to a corner handle must not also move the body.
+      .requireExternalGestureToFail(
+        corners.topLeft,
+        corners.topRight,
+        corners.bottomLeft,
+        corners.bottomRight,
+      )
+      .onStart(() => {
+        panStartedRef.current = true;
+        begin();
+      })
+      .onUpdate((event) => {
+        // Only the one-finger translation drives movement; while a two-finger pinch is
+        // active the centroid pan is ignored.
+        if (event.numberOfPointers > 1) return;
+        panTranslationRef.current = { x: event.translationX, y: event.translationY };
+        pushTransform();
+      })
+      .onFinalize(() => {
+        if (!panStartedRef.current) return;
+        panStartedRef.current = false;
+        settle();
+      });
+
+    const pinch = Gesture.Pinch()
+      .runOnJS(true)
+      .onStart(() => {
+        pinchStartedRef.current = true;
+        begin();
+      })
+      .onUpdate((event) => {
+        pinchScaleRef.current = event.scale;
+        pushTransform();
+      })
+      .onFinalize(() => {
+        if (!pinchStartedRef.current) return;
+        pinchStartedRef.current = false;
+        settle();
+      });
+
+    return {
+      bodyGesture: Gesture.Race(tap, Gesture.Simultaneous(pan, pinch)),
+      cornerGestures: corners,
+    };
+  }, []);
+
+  const offsetX = selected ? moveOffset.x : 0;
+  const offsetY = selected ? moveOffset.y : 0;
+  const left = image.x + offsetX;
+  const top = image.y + offsetY;
+  const cornerCenters: Record<ImageCorner, { x: number; y: number }> = {
+    topLeft: { x: left, y: top },
+    topRight: { x: left + image.width, y: top },
+    bottomLeft: { x: left, y: top + image.height },
+    bottomRight: { x: left + image.width, y: top + image.height },
+  };
+
+  return (
+    <>
+      <GestureDetector gesture={bodyGesture}>
+        <View
+          collapsable={false}
+          style={[
+            styles.imageObject,
+            { left, top, width: image.width, height: image.height },
+            selected && styles.imageObjectSelected,
+          ]}
+        >
+          <RNImage source={{ uri: image.uri }} style={styles.imageObjectMedia} resizeMode="contain" />
+        </View>
+      </GestureDetector>
+      {selected
+        ? IMAGE_CORNERS.map((corner) => (
+            <GestureDetector key={corner} gesture={cornerGestures[corner]}>
+              <View
+                collapsable={false}
+                style={[
+                  styles.imageCornerHit,
+                  {
+                    left: cornerCenters[corner].x - IMAGE_CORNER_HANDLE_HALF,
+                    top: cornerCenters[corner].y - IMAGE_CORNER_HANDLE_HALF,
+                  },
+                ]}
+              >
+                <View style={styles.imageHandleDot} />
+              </View>
+            </GestureDetector>
+          ))
+        : null}
+    </>
+  );
+}
+
+function ModeIconBase({
+  mode,
+  active,
+  color: colorOverride,
+  size,
+}: {
+  mode: CanvasMode;
+  active: boolean;
+  color?: string;
+  size?: number;
+}) {
+  const color = colorOverride ?? (active ? colors.pearlWhite : colors.deepNavy);
+  const glyphName: ToolbarGlyphName =
+    mode === 'write'
+      ? 'pen'
+      : mode === 'highlight'
+        ? 'highlighter'
+        : mode === 'type'
+          ? 'type'
+          : mode === 'erase'
+            ? 'eraser'
+            : mode === 'select'
+              ? 'select'
+              : mode === 'insert'
+                ? 'insert'
+                : 'hand';
+  return <ToolbarGlyph name={glyphName} color={color} size={size} />;
+}
+
+// Memoized pure presentational components. The canvas re-renders on every
+// drawing frame (setCurrentPoints) and on every tool/toolbar state change;
+// these leaves take stable props, so memo keeps each render from reconciling
+// the whole toolbar (SVG glyphs, navy gradient) and every image object.
+const ToolbarGlyph = memo(ToolbarGlyphBase);
+const NavySurface = memo(NavySurfaceBase);
+const GripDots = memo(GripDotsBase);
+const SelectionShapeIcon = memo(SelectionShapeIconBase);
+const ModeIcon = memo(ModeIconBase);
+const NotebookImageObject = memo(NotebookImageObjectBase);
 
 type NotebookCanvasProps = {
   strokes: NoteStroke[];
   text: string;
   onStrokesChange: (strokes: NoteStroke[]) => void;
   onTextChange: (text: string) => void;
+  /** Image objects placed on the canvas. */
+  images?: NoteImage[];
+  onImagesChange?: (images: NoteImage[]) => void;
   /** When false: read-only — no toolbar, no input. Defaults to true. */
   editable?: boolean;
+  /** Other floating overlays, in this canvas container's coordinate space. */
+  avoidRects?: NotebookOverlayRect[];
   style?: ViewStyle;
 };
 
@@ -227,23 +1047,60 @@ export function NotebookCanvas({
   text,
   onStrokesChange,
   onTextChange,
+  images: rawImages,
+  onImagesChange: rawOnImagesChange,
   editable = true,
+  avoidRects = [],
   style,
 }: NotebookCanvasProps) {
-  const [mode, setMode] = useState<CanvasMode>('write');
+  const images = useMemo(() => rawImages ?? [], [rawImages]);
+  const onImagesChange = rawOnImagesChange ?? NOOP_IMAGES_CHANGE;
+  const [mode, setMode] = useState<CanvasMode>(DEFAULT_TOOLBAR_PREFERENCES.mode);
   const [penColor, setPenColor] = useState(PEN_COLORS[0].value);
   const [penWidth, setPenWidth] = useState(PEN_WIDTHS[1].value);
   const [highlighterColor, setHighlighterColor] = useState(HIGHLIGHTER_COLORS[0].value);
   const [highlighterWidth, setHighlighterWidth] = useState(HIGHLIGHTER_WIDTHS[1].value);
-  const [eraserSizeKey, setEraserSizeKey] = useState<EraserSizeKey>('medium');
+  const [eraserSizeKey, setEraserSizeKey] = useState<EraserSizeKey>(
+    DEFAULT_TOOLBAR_PREFERENCES.eraserSize,
+  );
+  const [toolbarCollapsed, setToolbarCollapsed] = useState(
+    DEFAULT_TOOLBAR_PREFERENCES.collapsed,
+  );
+  const [toolbarDock, setToolbarDock] = useState<NotebookToolbarDock>(
+    DEFAULT_TOOLBAR_PREFERENCES.dock,
+  );
+  const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
+  const [toolbarSize, setToolbarSize] = useState({ width: 0, height: 0 });
+  const [toolbarPreferencesLoaded, setToolbarPreferencesLoaded] = useState(false);
   const eraserRadius = ERASER_SIZES.find((option) => option.key === eraserSizeKey)?.radius ?? 26;
   const [, setTemporaryEraser] = useState(false);
   const [currentPoints, setCurrentPoints] = useState<NotePoint[]>([]);
   const [erasedIds, setErasedIds] = useState<string[]>([]);
   const [erasePoint, setErasePoint] = useState<NotePoint | null>(null);
-  const [undoEraseSnapshot, setUndoEraseSnapshot] = useState<NoteStroke[] | null>(null);
+  /**
+   * Snapshot-based undo/redo history. Each completed content action pushes the
+   * pre-action snapshot ({strokes, images, text}) onto the undo stack; Undo
+   * restores it (pushing the current state to the redo stack); a new action
+   * clears the redo stack. In-memory only (bounded), document state still
+   * persists through the parent callbacks.
+   */
+  const undoStackRef = useRef<NotebookSnapshot[]>([]);
+  const redoStackRef = useRef<NotebookSnapshot[]>([]);
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+  /** Leading-edge flag so a typing burst coalesces into one history entry. */
+  const textBurstRef = useRef(false);
+  const textHistoryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Transient "Pen" / "Eraser" badge shown after a Pencil double-tap. */
   const [toolToast, setToolToast] = useState<DrawingMode | 'erase' | null>(null);
+  /** IDs of currently selected strokes or images. */
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  /** Points drawn for the active lasso selection (cleared after commit). */
+  const [lassoPoints, setLassoPoints] = useState<NotePoint[]>([]);
+  const [selectionShape, setSelectionShape] = useState<SelectionShape>('lasso');
+  const [selectionRect, setSelectionRect] = useState<NotebookOverlayRect | null>(null);
+  /** Offset applied to selected objects while a move drag is in progress. */
+  const [selectionMoveOffset, setSelectionMoveOffset] = useState<NotePoint>({ x: 0, y: 0 });
   /** Dev-only diagnostic to verify what real hardware reports in Expo Go. */
   const [lastPointerType, setLastPointerType] = useState<PointerLabel | null>(null);
   const [lastGestureDecision, setLastGestureDecision] = useState<'activated' | 'failed' | null>(
@@ -251,6 +1108,8 @@ export function NotebookCanvas({
   );
   /** Disable page scrolling only while a confirmed stylus stroke is live. */
   const [stylusStrokeActive, setStylusStrokeActive] = useState(false);
+  /** Disable page scrolling while an image is being dragged or pinch-resized. */
+  const [imageManipulationActive, setImageManipulationActive] = useState(false);
 
   // Latest-value refs so the memoized gesture never sees a stale closure.
   const penColorRef = useRef(penColor);
@@ -267,6 +1126,10 @@ export function NotebookCanvas({
   strokesRef.current = strokes;
   const onStrokesChangeRef = useRef(onStrokesChange);
   onStrokesChangeRef.current = onStrokesChange;
+  const textRef = useRef(text);
+  textRef.current = text;
+  const onTextChangeRef = useRef(onTextChange);
+  onTextChangeRef.current = onTextChange;
   const modeRef = useRef(mode);
   modeRef.current = mode;
   const previousDrawingToolRef = useRef<DrawingMode>('write');
@@ -288,11 +1151,640 @@ export function NotebookCanvas({
   const activeTouchIdRef = useRef<number | null>(null);
   /** Current page offset so viewport-local Pencil coordinates map onto the long paper. */
   const scrollOffsetYRef = useRef(0);
+  const toolbarPosition = useRef(new Animated.ValueXY({ x: TOOLBAR_EDGE_MARGIN, y: TOOLBAR_EDGE_MARGIN })).current;
+  const toolbarTransition = useRef(
+    new Animated.Value(DEFAULT_TOOLBAR_PREFERENCES.collapsed ? 0 : 1),
+  ).current;
+  const toolbarPositionRef = useRef({ x: TOOLBAR_EDGE_MARGIN, y: TOOLBAR_EDGE_MARGIN });
+  const toolbarDragStartRef = useRef(toolbarPositionRef.current);
+  const toolbarTouchStartRef = useRef<{ pageX: number; pageY: number } | null>(null);
+  const toolbarDraggingRef = useRef(false);
+  const toolbarContextScrollActiveRef = useRef(false);
+  const toolbarSuppressPressUntilRef = useRef(0);
+  /** Latest drag finger position in container coordinates, for edge-intent snapping. */
+  const toolbarDragFingerRef = useRef<{ x: number; y: number } | null>(null);
+  /** Container (Canvas) top-left in window/page coordinates, measured on layout. */
+  const containerRef = useRef<View>(null);
+  const containerOriginRef = useRef({ x: 0, y: 0 });
+  const avoidRectsRef = useRef(avoidRects);
+  avoidRectsRef.current = avoidRects;
+  const imagesRef = useRef(images);
+  imagesRef.current = images;
+  const onImagesChangeRef = useRef(onImagesChange);
+  onImagesChangeRef.current = onImagesChange;
+  const containerSizeRef = useRef(containerSize);
+  containerSizeRef.current = containerSize;
+  const selectedIdsRef = useRef<Set<string>>(new Set());
+  selectedIdsRef.current = selectedIds;
+  const selectionShapeRef = useRef<SelectionShape>('lasso');
+  selectionShapeRef.current = selectionShape;
+  /** 'lasso'/'rect' while drawing a selection shape; 'move' while dragging selected objects. */
+  const selectActionRef = useRef<'idle' | 'lasso' | 'rect' | 'move'>('idle');
+  const lassoPointsRef = useRef<NotePoint[]>([]);
+  const selectionRectStartRef = useRef<NotePoint | null>(null);
+  const selectionRectEndRef = useRef<NotePoint | null>(null);
+  const selectionMoveOffsetRef = useRef<NotePoint>({ x: 0, y: 0 });
+  const selectionMoveStartRef = useRef<NotePoint>({ x: 0, y: 0 });
+  const imageGestureStartRef = useRef<{
+    id: string;
+    image: NoteImage;
+    snapshot: NotebookSnapshot;
+    changed: boolean;
+    committed: boolean;
+  } | null>(null);
+  /** Auto-releases the page-scroll lock shortly after image-gesture updates stop. */
+  const imageScrollLockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const selectedObjectCount = useMemo(
+    () =>
+      strokes.reduce((count, stroke) => count + (selectedIds.has(stroke.id) ? 1 : 0), 0) +
+      images.reduce((count, image) => count + (selectedIds.has(image.id) ? 1 : 0), 0),
+    [strokes, images, selectedIds],
+  );
+  const hasSelection = selectedObjectCount > 0;
+  const avoidRectsSignature = JSON.stringify(avoidRects);
+  const effectiveToolbarCollapsed =
+    toolbarCollapsed || (containerSize.width > 0 && containerSize.width < NARROW_TOOLBAR_WIDTH);
+  const toolbarHasContext = !effectiveToolbarCollapsed && mode !== 'scroll';
+  const toolbarVertical = toolbarDockIsVertical(toolbarDock);
+  const toolbarOnRight = toolbarDock === 'rightCenter';
+  const collapsedToolbarSize = useMemo(
+    () =>
+      toolbarVertical
+        ? { width: TOOLBAR_COLLAPSED_HEIGHT, height: TOOLBAR_COLLAPSED_WIDTH }
+        : { width: TOOLBAR_COLLAPSED_WIDTH, height: TOOLBAR_COLLAPSED_HEIGHT },
+    [toolbarVertical],
+  );
+  const toolbarContextWidth = toolbarHasContext
+    ? Math.min(
+        TOOLBAR_VERTICAL_CONTEXT_WIDTH,
+        Math.max(
+          260,
+          containerSize.width -
+            TOOLBAR_VERTICAL_RAIL_WIDTH -
+            TOOLBAR_VERTICAL_ACTION_WIDTH -
+            TOOLBAR_RIGHT_PILL_GAP * 3 -
+            TOOLBAR_EDGE_MARGIN * 2,
+        ),
+      )
+    : 0;
+  const contextFade = useRef(new Animated.Value(1)).current;
+  const expandedToolbarWidth =
+    mode === 'write' || mode === 'highlight' || mode === 'select' || mode === 'insert'
+      ? TOOLBAR_WIDTHS.drawing
+      : mode === 'erase'
+        ? TOOLBAR_WIDTHS.erase
+        : TOOLBAR_WIDTHS.compact;
+  const expandedToolbarHeight =
+    TOOLBAR_PRIMARY_HEIGHT + (toolbarHasContext ? TOOLBAR_CONTEXT_HEIGHT : 0);
+  const verticalRailHeight =
+    22 +
+    PRIMARY_TOOLS.length * 48 +
+    44 +
+    44 +
+    TOOLBAR_VERTICAL_BUTTON_GAP * (PRIMARY_TOOLS.length + 1) +
+    2;
+  const toolbarVisualSize = useMemo(
+    () => {
+      if (effectiveToolbarCollapsed) {
+        return collapsedToolbarSize;
+      }
+      if (toolbarVertical) {
+        return {
+          width: TOOLBAR_VERTICAL_RAIL_WIDTH + toolbarContextWidth,
+          height: verticalRailHeight,
+        };
+      }
+      return {
+        width: Math.min(
+          expandedToolbarWidth,
+          Math.max(TOOLBAR_COLLAPSED_WIDTH, containerSize.width - TOOLBAR_EDGE_MARGIN * 2),
+        ),
+        height: expandedToolbarHeight,
+      };
+    },
+    [
+      containerSize.width,
+      effectiveToolbarCollapsed,
+      expandedToolbarHeight,
+      expandedToolbarWidth,
+      toolbarContextWidth,
+      toolbarVertical,
+      verticalRailHeight,
+      collapsedToolbarSize,
+    ],
+  );
+  const getToolbarFootprintForDock = useCallback(
+    (dock: NotebookToolbarDock) => {
+      const dockIsVertical = toolbarDockIsVertical(dock);
+      if (effectiveToolbarCollapsed) {
+        return dockIsVertical
+          ? { width: TOOLBAR_MINI_CAPSULE_WIDTH, height: TOOLBAR_MINI_CAPSULE_HEIGHT }
+          : { width: TOOLBAR_COLLAPSED_WIDTH, height: TOOLBAR_COLLAPSED_HEIGHT };
+      }
+
+      if (dockIsVertical) {
+        // Two-column capsule (tool column + inward context column) + separate action
+        // capsules stacked below. The action capsules are narrower than the capsule, so
+        // width is the capsule's; height adds the history capsule (+ selection when shown).
+        const hasContext = mode !== 'scroll' && mode !== 'type';
+        const contextWidth =
+          mode === 'insert'
+            ? TOOLBAR_VERTICAL_CONTEXT_WIDE
+            : TOOLBAR_VERTICAL_CONTEXT_NARROW;
+        return {
+          width:
+            TOOLBAR_VERTICAL_TOOL_COL_WIDTH +
+            (hasContext ? TOOLBAR_VERTICAL_COL_DIVIDER + contextWidth : 0),
+          height:
+            TOOLBAR_VERTICAL_CAPSULE_HEIGHT +
+            TOOLBAR_VERTICAL_GROUP_GAP +
+            TOOLBAR_VERTICAL_ACTION_HEIGHT +
+            (hasSelection
+              ? TOOLBAR_VERTICAL_GROUP_GAP + TOOLBAR_VERTICAL_SELECTION_HEIGHT
+              : 0),
+        };
+      }
+
+      const rightPillWidth =
+        TOOLBAR_HISTORY_PILL_WIDTH +
+        (hasSelection ? TOOLBAR_RIGHT_PILL_GAP + TOOLBAR_SELECTION_PILL_WIDTH : 0);
+      return {
+        width: Math.min(
+          expandedToolbarWidth,
+          Math.max(TOOLBAR_COLLAPSED_WIDTH, containerSize.width - TOOLBAR_EDGE_MARGIN * 2),
+        ) + TOOLBAR_RIGHT_PILL_GAP + rightPillWidth,
+        height: expandedToolbarHeight,
+      };
+    },
+    [
+      containerSize.width,
+      effectiveToolbarCollapsed,
+      expandedToolbarHeight,
+      expandedToolbarWidth,
+      hasSelection,
+      mode,
+    ],
+  );
+  const toolbarFrameSize = useMemo(
+    () => getToolbarFootprintForDock(toolbarDock),
+    [getToolbarFootprintForDock, toolbarDock],
+  );
+  useEffect(() => {
+    if (selectedIds.size === 0) return;
+    const validIds = new Set([
+      ...strokes.map((stroke) => stroke.id),
+      ...images.map((image) => image.id),
+    ]);
+    let changed = false;
+    const next = new Set<string>();
+    selectedIds.forEach((id) => {
+      if (validIds.has(id)) next.add(id);
+      else changed = true;
+    });
+    if (!changed) return;
+    selectedIdsRef.current = next;
+    setSelectedIds(next);
+  }, [strokes, images, selectedIds]);
+  const expandedContentOpacity = toolbarTransition.interpolate({
+    inputRange: [0, 0.35, 1],
+    outputRange: [0, 0, 1],
+  });
+  const collapsedContentOpacity = toolbarTransition.interpolate({
+    inputRange: [0, 0.7, 1],
+    outputRange: [1, 0.18, 0],
+  });
+  const toolbarScale = toolbarTransition.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.98, 1],
+  });
   /** Pending tool-toast hide timer. */
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /** Whether native Apple Pencil double-tap is compiled into this build. */
   const doubleTapAvailable = useMemo(() => isPencilDoubleTapAvailable(), []);
+
+  useEffect(() => {
+    const footprint = getToolbarFootprintForDock(toolbarDock);
+    setToolbarSize((current) =>
+      current.width === footprint.width && current.height === footprint.height ? current : footprint,
+    );
+  }, [getToolbarFootprintForDock, toolbarDock]);
+
+  useEffect(() => {
+    Animated.timing(toolbarTransition, {
+      toValue: effectiveToolbarCollapsed ? 0 : 1,
+      duration: TOOLBAR_ANIMATION_MS,
+      easing: TOOLBAR_EASING,
+      useNativeDriver: false,
+    }).start();
+  }, [effectiveToolbarCollapsed, toolbarTransition]);
+
+  const chooseToolbarDock = useCallback(
+    (
+      sourcePoint: { x: number; y: number },
+      preferredDock: NotebookToolbarDock = toolbarDock,
+      // When true (layout re-clamp), keep the current region if it is still valid.
+      // When false (drag release), always snap to the nearest valid region to the drop point.
+      preferCurrent = true,
+    ): NotebookToolbarDock => {
+      if (
+        containerSize.width <= 0 ||
+        containerSize.height <= 0 ||
+        toolbarSize.width <= 0 ||
+        toolbarSize.height <= 0
+      ) {
+        return preferredDock;
+      }
+
+      const validDocks = TOOLBAR_DOCKS.filter((dock) => {
+        const footprint = getToolbarFootprintForDock(dock);
+        if (
+          toolbarDockIsVertical(dock) &&
+          footprint.height > containerSize.height - TOOLBAR_EDGE_MARGIN * 2
+        ) {
+          return false;
+        }
+        const point = toolbarDockPoint(dock, containerSize, footprint);
+        const rect = toolbarRect(point, footprint);
+        return !avoidRectsRef.current.some((avoidRect) =>
+          rectsOverlap(rect, avoidRect, TOOLBAR_COLLISION_GAP),
+        );
+      });
+      const candidates = validDocks.length > 0 ? validDocks : TOOLBAR_DOCKS;
+      if (preferCurrent && validDocks.includes(preferredDock)) return preferredDock;
+
+      return candidates.reduce((nearest, dock) => {
+        const nearestPoint = toolbarDockPoint(nearest, containerSize, getToolbarFootprintForDock(nearest));
+        const dockPoint = toolbarDockPoint(dock, containerSize, getToolbarFootprintForDock(dock));
+        const nearestDistance = Math.hypot(
+          nearestPoint.x - sourcePoint.x,
+          nearestPoint.y - sourcePoint.y,
+        );
+        const dockDistance = Math.hypot(dockPoint.x - sourcePoint.x, dockPoint.y - sourcePoint.y);
+        return dockDistance < nearestDistance ? dock : nearest;
+      }, candidates[0]);
+    },
+    [containerSize, getToolbarFootprintForDock, toolbarDock, toolbarSize],
+  );
+
+  /**
+   * Decide the dock when the user RELEASES a toolbar drag.
+   *
+   * `chooseToolbarDock` compares the toolbar's top-left corner to each anchor by
+   * Euclidean distance. For a wide horizontal toolbar that biases toward the
+   * top/bottom anchors: dragging the toolbar BODY onto the right edge leaves the
+   * top-left near the `topRight`/`bottomRight` anchors, so `rightCenter` rarely
+   * wins — the reported "sometimes stays horizontal" bug.
+   *
+   * Instead we read the release FINGER position (container coords) and apply an
+   * explicit edge-intent rule: a finger inside the left/right activation band
+   * snaps to that side edge (vertical layout) and wins over top/bottom corners.
+   * The accepted dock alone determines orientation — no stale orientation state.
+   */
+  const resolveReleaseDock = useCallback((): NotebookToolbarDock => {
+    const cw = containerSize.width;
+    const ch = containerSize.height;
+    if (cw <= 0 || ch <= 0 || toolbarSize.width <= 0 || toolbarSize.height <= 0) {
+      return toolbarDock;
+    }
+
+    const validDocks = TOOLBAR_DOCKS.filter((dock) => {
+      const footprint = getToolbarFootprintForDock(dock);
+      if (toolbarDockIsVertical(dock) && footprint.height > ch - TOOLBAR_EDGE_MARGIN * 2) {
+        return false;
+      }
+      const point = toolbarDockPoint(dock, containerSize, footprint);
+      const rect = toolbarRect(point, footprint);
+      return !avoidRectsRef.current.some((avoidRect) =>
+        rectsOverlap(rect, avoidRect, TOOLBAR_COLLISION_GAP),
+      );
+    });
+    const candidates = validDocks.length > 0 ? validDocks : TOOLBAR_DOCKS;
+    const isValid = (dock: NotebookToolbarDock) => candidates.includes(dock);
+    const nearestValidTo = (point: { x: number; y: number }) =>
+      candidates.reduce((nearest, dock) => {
+        const nearestPoint = toolbarDockPoint(nearest, containerSize, getToolbarFootprintForDock(nearest));
+        const dockPoint = toolbarDockPoint(dock, containerSize, getToolbarFootprintForDock(dock));
+        const nd = Math.hypot(nearestPoint.x - point.x, nearestPoint.y - point.y);
+        const dd = Math.hypot(dockPoint.x - point.x, dockPoint.y - point.y);
+        return dd < nd ? dock : nearest;
+      }, candidates[0]);
+    const anchorOf = (dock: NotebookToolbarDock) =>
+      toolbarDockPoint(dock, containerSize, getToolbarFootprintForDock(dock));
+
+    // Release intent point: the finger location (container coords). Fall back to
+    // the toolbar centre if no finger sample was captured during the drag.
+    const footprint = getToolbarFootprintForDock(toolbarDock);
+    const release = toolbarDragFingerRef.current ?? {
+      x: toolbarPositionRef.current.x + footprint.width / 2,
+      y: toolbarPositionRef.current.y + footprint.height / 2,
+    };
+
+    const sideZone = Math.max(TOOLBAR_SIDE_EDGE_ZONE_MIN, cw * TOOLBAR_SIDE_EDGE_ZONE_RATIO);
+    const vEdgeZone = Math.max(TOOLBAR_VERT_EDGE_ZONE_MIN, ch * TOOLBAR_VERT_EDGE_ZONE_RATIO);
+    const nearRight = release.x >= cw - sideZone;
+    const nearLeft = release.x <= sideZone;
+    const nearTop = release.y <= vEdgeZone;
+    const nearBottom = release.y >= ch - vEdgeZone;
+
+    // Side-edge intent wins over top/bottom corners.
+    if (nearRight && !nearLeft) {
+      return isValid('rightCenter') ? 'rightCenter' : nearestValidTo(anchorOf('rightCenter'));
+    }
+    if (nearLeft && !nearRight) {
+      return isValid('leftCenter') ? 'leftCenter' : nearestValidTo(anchorOf('leftCenter'));
+    }
+
+    const band: 'Left' | 'Center' | 'Right' =
+      release.x < cw / 3 ? 'Left' : release.x > (cw * 2) / 3 ? 'Right' : 'Center';
+    if (nearTop) {
+      const cand = `top${band}` as NotebookToolbarDock;
+      return isValid(cand) ? cand : nearestValidTo(release);
+    }
+    if (nearBottom) {
+      const cand = `bottom${band}` as NotebookToolbarDock;
+      return isValid(cand) ? cand : nearestValidTo(release);
+    }
+
+    // Released away from any edge: nearest valid anchor to the finger.
+    return nearestValidTo(release);
+  }, [containerSize, getToolbarFootprintForDock, toolbarDock, toolbarSize]);
+
+  const moveToolbarToDock = useCallback(
+    (dock: NotebookToolbarDock, animated: boolean) => {
+      if (
+        containerSize.width <= 0 ||
+        containerSize.height <= 0 ||
+        toolbarSize.width <= 0 ||
+        toolbarSize.height <= 0
+      ) {
+        return;
+      }
+      const footprint = getToolbarFootprintForDock(dock);
+      const point = toolbarDockPoint(dock, containerSize, footprint);
+      toolbarPositionRef.current = point;
+      const animation = Animated.timing(toolbarPosition, {
+        toValue: point,
+        duration: animated ? 150 : 0,
+        useNativeDriver: true,
+      });
+      animation.start();
+    },
+    [containerSize, getToolbarFootprintForDock, toolbarPosition, toolbarSize],
+  );
+
+  useEffect(() => {
+    let active = true;
+    AsyncStorage.getItem(TOOLBAR_STORAGE_KEY)
+      .then((raw) => {
+        if (!active || !raw) return;
+        const stored = JSON.parse(raw) as Partial<ToolbarPreferences>;
+        if (typeof stored.collapsed === 'boolean') setToolbarCollapsed(stored.collapsed);
+        if (TOOLBAR_DOCKS.includes(stored.dock as NotebookToolbarDock)) {
+          setToolbarDock(stored.dock as NotebookToolbarDock);
+        }
+        if (DRAW_MODES.some((tool) => tool.key === stored.mode) || stored.mode === 'scroll') {
+          const storedMode = stored.mode as CanvasMode;
+          modeRef.current = storedMode;
+          setMode(storedMode);
+          if (storedMode === 'write' || storedMode === 'highlight') {
+            previousDrawingToolRef.current = storedMode;
+          }
+        }
+        if (ERASER_SIZES.some((size) => size.key === stored.eraserSize)) {
+          setEraserSizeKey(stored.eraserSize as EraserSizeKey);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (active) setToolbarPreferencesLoaded(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!toolbarPreferencesLoaded) return;
+    const preferences: ToolbarPreferences = {
+      collapsed: toolbarCollapsed,
+      dock: toolbarDock,
+      mode,
+      eraserSize: eraserSizeKey,
+    };
+    AsyncStorage.setItem(TOOLBAR_STORAGE_KEY, JSON.stringify(preferences)).catch(() => {});
+  }, [eraserSizeKey, mode, toolbarCollapsed, toolbarDock, toolbarPreferencesLoaded]);
+
+  useEffect(() => {
+    if (
+      containerSize.width <= 0 ||
+      containerSize.height <= 0 ||
+      toolbarSize.width <= 0 ||
+      toolbarSize.height <= 0
+    ) {
+      return;
+    }
+    // Keep the toolbar in its logical snap region. If the region's footprint now
+    // overlaps the caption/recording overlay (avoid-rects) or the toolbar grew
+    // (context row, expand), re-pick the nearest still-valid region and re-clamp.
+    const preferredPoint = toolbarDockPoint(toolbarDock, containerSize, toolbarSize);
+    const nextDock = chooseToolbarDock(preferredPoint, toolbarDock);
+    if (nextDock !== toolbarDock) setToolbarDock(nextDock);
+    moveToolbarToDock(nextDock, true);
+  }, [
+    avoidRectsSignature,
+    chooseToolbarDock,
+    containerSize,
+    effectiveToolbarCollapsed,
+    moveToolbarToDock,
+    toolbarDock,
+    toolbarSize,
+  ]);
+
+  const moveToolbarDrag = useCallback(
+    (dx: number, dy: number) => {
+      const dragBoundsFootprint = TOOLBAR_DOCKS.reduce(
+        (smallest, dock) => {
+          const footprint = getToolbarFootprintForDock(dock);
+          return {
+            width: Math.min(smallest.width, footprint.width),
+            height: Math.min(smallest.height, footprint.height),
+          };
+        },
+        getToolbarFootprintForDock(toolbarDock),
+      );
+      const maxX = Math.max(
+        TOOLBAR_EDGE_MARGIN,
+        containerSize.width - dragBoundsFootprint.width - TOOLBAR_EDGE_MARGIN,
+      );
+      const maxY = Math.max(
+        TOOLBAR_EDGE_MARGIN,
+        containerSize.height - dragBoundsFootprint.height - TOOLBAR_EDGE_MARGIN,
+      );
+      const point = {
+        x: clamp(toolbarDragStartRef.current.x + dx, TOOLBAR_EDGE_MARGIN, maxX),
+        y: clamp(toolbarDragStartRef.current.y + dy, TOOLBAR_EDGE_MARGIN, maxY),
+      };
+      toolbarPositionRef.current = point;
+      toolbarPosition.setValue(point);
+    },
+    [
+      containerSize.height,
+      containerSize.width,
+      getToolbarFootprintForDock,
+      toolbarDock,
+      toolbarPosition,
+    ],
+  );
+
+  const finishToolbarDrag = useCallback(() => {
+    if (!toolbarDraggingRef.current) return;
+    toolbarDraggingRef.current = false;
+    toolbarSuppressPressUntilRef.current = Date.now() + 200;
+    // Release -> edge-intent snap based on the finger position. The accepted dock
+    // alone determines orientation (rightCenter/leftCenter => vertical).
+    const nextDock = resolveReleaseDock();
+    toolbarDragFingerRef.current = null;
+    setToolbarDock(nextDock);
+    moveToolbarToDock(nextDock, true);
+  }, [moveToolbarToDock, resolveReleaseDock]);
+
+  const releaseToolbarContextScrollLock = useCallback(() => {
+    setTimeout(() => {
+      toolbarContextScrollActiveRef.current = false;
+    }, 80);
+  }, []);
+
+  const contextScrollHandlers = useMemo(
+    () => ({
+      onTouchStart: () => {
+        toolbarContextScrollActiveRef.current = true;
+        toolbarTouchStartRef.current = null;
+      },
+      onTouchEnd: releaseToolbarContextScrollLock,
+      onTouchCancel: releaseToolbarContextScrollLock,
+      onScrollBeginDrag: () => {
+        toolbarContextScrollActiveRef.current = true;
+        toolbarTouchStartRef.current = null;
+      },
+      onScrollEndDrag: releaseToolbarContextScrollLock,
+      onMomentumScrollEnd: releaseToolbarContextScrollLock,
+    }),
+    [releaseToolbarContextScrollLock],
+  );
+
+  const toolbarDragTouchHandlers = useMemo(
+    () => ({
+      onTouchStart: (event: { nativeEvent: { touches: { pageX: number; pageY: number }[] } }) => {
+        if (toolbarContextScrollActiveRef.current) return;
+        const touch = event.nativeEvent.touches[0];
+        if (!touch) return;
+        toolbarTouchStartRef.current = { pageX: touch.pageX, pageY: touch.pageY };
+        toolbarDragStartRef.current = { ...toolbarPositionRef.current };
+        toolbarDraggingRef.current = false;
+        toolbarDragFingerRef.current = {
+          x: touch.pageX - containerOriginRef.current.x,
+          y: touch.pageY - containerOriginRef.current.y,
+        };
+      },
+      onTouchMove: (event: { nativeEvent: { touches: { pageX: number; pageY: number }[] } }) => {
+        if (toolbarContextScrollActiveRef.current) return;
+        const touch = event.nativeEvent.touches[0];
+        const start = toolbarTouchStartRef.current;
+        if (!touch || !start) return;
+        toolbarDragFingerRef.current = {
+          x: touch.pageX - containerOriginRef.current.x,
+          y: touch.pageY - containerOriginRef.current.y,
+        };
+        const dx = touch.pageX - start.pageX;
+        const dy = touch.pageY - start.pageY;
+        if (!toolbarDraggingRef.current) {
+          if (Math.hypot(dx, dy) <= TOOLBAR_DRAG_THRESHOLD) return;
+          toolbarDraggingRef.current = true;
+          toolbarSuppressPressUntilRef.current = Date.now() + 200;
+        }
+        moveToolbarDrag(dx, dy);
+      },
+      onTouchEnd: () => {
+        toolbarTouchStartRef.current = null;
+        finishToolbarDrag();
+      },
+      onTouchCancel: () => {
+        toolbarTouchStartRef.current = null;
+        finishToolbarDrag();
+      },
+    }),
+    [finishToolbarDrag, moveToolbarDrag],
+  );
+
+  const toolbarDragResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => false,
+        onStartShouldSetPanResponderCapture: () => false,
+        onMoveShouldSetPanResponder: (_event, gesture) =>
+          !toolbarContextScrollActiveRef.current &&
+          Math.hypot(gesture.dx, gesture.dy) > TOOLBAR_DRAG_THRESHOLD,
+        onMoveShouldSetPanResponderCapture: (_event, gesture) =>
+          !toolbarContextScrollActiveRef.current &&
+          Math.hypot(gesture.dx, gesture.dy) > TOOLBAR_DRAG_THRESHOLD,
+        onPanResponderGrant: (event) => {
+          if (toolbarContextScrollActiveRef.current) return;
+          toolbarDraggingRef.current = true;
+          toolbarSuppressPressUntilRef.current = Date.now() + 200;
+          toolbarDragStartRef.current = { ...toolbarPositionRef.current };
+          toolbarDragFingerRef.current = {
+            x: event.nativeEvent.pageX - containerOriginRef.current.x,
+            y: event.nativeEvent.pageY - containerOriginRef.current.y,
+          };
+        },
+        onPanResponderMove: (event, gesture) => {
+          if (!toolbarDraggingRef.current) return;
+          toolbarDragFingerRef.current = {
+            x: event.nativeEvent.pageX - containerOriginRef.current.x,
+            y: event.nativeEvent.pageY - containerOriginRef.current.y,
+          };
+          moveToolbarDrag(gesture.dx, gesture.dy);
+        },
+        onPanResponderRelease: finishToolbarDrag,
+        onPanResponderTerminate: finishToolbarDrag,
+        onPanResponderTerminationRequest: () => false,
+      }),
+    [finishToolbarDrag, moveToolbarDrag],
+  );
+
+  const disabledToolbarPanGesture = useMemo(() => Gesture.Pan().enabled(false), []);
+
+  const toolbarPanGesture = useMemo(
+    () =>
+      Gesture.Pan()
+        .runOnJS(true)
+        .minDistance(TOOLBAR_DRAG_THRESHOLD)
+        .onStart((event) => {
+          toolbarDraggingRef.current = true;
+          toolbarSuppressPressUntilRef.current = Date.now() + 200;
+          toolbarDragStartRef.current = { ...toolbarPositionRef.current };
+          toolbarDragFingerRef.current = {
+            x: event.absoluteX - containerOriginRef.current.x,
+            y: event.absoluteY - containerOriginRef.current.y,
+          };
+        })
+        .onUpdate((event) => {
+          toolbarDragFingerRef.current = {
+            x: event.absoluteX - containerOriginRef.current.x,
+            y: event.absoluteY - containerOriginRef.current.y,
+          };
+          moveToolbarDrag(event.translationX, event.translationY);
+        })
+        .onEnd(finishToolbarDrag)
+        .onFinalize(finishToolbarDrag),
+    [finishToolbarDrag, moveToolbarDrag],
+  );
+
+  const runToolbarPress = useCallback((action: () => void) => {
+    if (toolbarDraggingRef.current || Date.now() < toolbarSuppressPressUntilRef.current) return;
+    action();
+  }, []);
 
   /** Briefly show the current drawing tool badge with a light haptic tick. */
   const showToolToast = useCallback((tool: DrawingMode | 'erase') => {
@@ -309,6 +1801,13 @@ export function NotebookCanvas({
     if (next === 'write' || next === 'highlight') {
       previousDrawingToolRef.current = next;
     }
+    if (next !== 'select') {
+      // Leave any active selection behind when switching tools.
+      selectedIdsRef.current = new Set();
+      setSelectedIds(new Set());
+      lassoPointsRef.current = [];
+      setLassoPoints([]);
+    }
     setMode(next);
   }, []);
 
@@ -321,6 +1820,309 @@ export function NotebookCanvas({
     setMode(restored);
     showToolToast(restored);
   }, [showToolToast]);
+
+  // ---- Undo / Redo snapshot history ----
+
+  const captureSnapshot = useCallback(
+    (): NotebookSnapshot =>
+      cloneSnapshot({
+        strokes: strokesRef.current,
+        images: imagesRef.current,
+        text: textRef.current,
+      }),
+    [],
+  );
+
+  const updateHistoryFlags = useCallback(() => {
+    setCanUndo(undoStackRef.current.length > 0);
+    setCanRedo(redoStackRef.current.length > 0);
+  }, []);
+
+  /**
+   * Record the current content as a new undo entry — call this once at the
+   * start of a completed action, before mutating state. Clears the redo stack
+   * (a new action invalidates redo) and the text-burst flag.
+   */
+  const endTextHistoryBurst = useCallback(() => {
+    if (textHistoryTimerRef.current) {
+      clearTimeout(textHistoryTimerRef.current);
+      textHistoryTimerRef.current = null;
+    }
+    textBurstRef.current = false;
+  }, []);
+
+  const pushUndoSnapshot = useCallback((snapshot: NotebookSnapshot) => {
+    undoStackRef.current.push(cloneSnapshot(snapshot));
+    if (undoStackRef.current.length > HISTORY_MAX) undoStackRef.current.shift();
+  }, []);
+
+  const pushRedoSnapshot = useCallback((snapshot: NotebookSnapshot) => {
+    redoStackRef.current.push(cloneSnapshot(snapshot));
+    if (redoStackRef.current.length > HISTORY_MAX) redoStackRef.current.shift();
+  }, []);
+
+  const recordHistory = useCallback(() => {
+    endTextHistoryBurst();
+    undoStackRef.current.push(captureSnapshot());
+    if (undoStackRef.current.length > HISTORY_MAX) undoStackRef.current.shift();
+    redoStackRef.current = [];
+    updateHistoryFlags();
+  }, [captureSnapshot, endTextHistoryBurst, updateHistoryFlags]);
+
+  /** Replace all content with a snapshot, clearing transient selection/erase. */
+  const applySnapshot = useCallback((snap: NotebookSnapshot) => {
+    const next = cloneSnapshot(snap);
+    onStrokesChangeRef.current(next.strokes);
+    onImagesChangeRef.current(next.images);
+    onTextChangeRef.current(snap.text);
+    selectedIdsRef.current = new Set();
+    setSelectedIds(new Set());
+    erasedIdsRef.current = [];
+    setErasedIds([]);
+  }, []);
+
+  const undo = useCallback(() => {
+    if (undoStackRef.current.length === 0) return;
+    endTextHistoryBurst();
+    pushRedoSnapshot(captureSnapshot());
+    applySnapshot(undoStackRef.current.pop()!);
+    updateHistoryFlags();
+  }, [captureSnapshot, applySnapshot, endTextHistoryBurst, pushRedoSnapshot, updateHistoryFlags]);
+
+  const redo = useCallback(() => {
+    if (redoStackRef.current.length === 0) return;
+    endTextHistoryBurst();
+    pushUndoSnapshot(captureSnapshot());
+    applySnapshot(redoStackRef.current.pop()!);
+    updateHistoryFlags();
+  }, [captureSnapshot, applySnapshot, endTextHistoryBurst, pushUndoSnapshot, updateHistoryFlags]);
+
+  /** Text edit — coalesce a typing burst into one undo entry (leading edge). */
+  const handleTextChange = useCallback(
+    (next: string) => {
+      if (next === textRef.current) return;
+      if (!textBurstRef.current) {
+        pushUndoSnapshot(captureSnapshot());
+        redoStackRef.current = [];
+        textBurstRef.current = true;
+        updateHistoryFlags();
+      }
+      if (textHistoryTimerRef.current) clearTimeout(textHistoryTimerRef.current);
+      textHistoryTimerRef.current = setTimeout(endTextHistoryBurst, TEXT_HISTORY_DEBOUNCE_MS);
+      onTextChangeRef.current(next);
+    },
+    [captureSnapshot, endTextHistoryBurst, pushUndoSnapshot, updateHistoryFlags],
+  );
+
+  const findImageAtPoint = useCallback((point: NotePoint) => {
+    for (let index = imagesRef.current.length - 1; index >= 0; index -= 1) {
+      const image = imagesRef.current[index];
+      if (
+        point.x >= image.x &&
+        point.x <= image.x + image.width &&
+        point.y >= image.y &&
+        point.y <= image.y + image.height
+      ) {
+        return image;
+      }
+    }
+    return null;
+  }, []);
+
+  const selectImage = useCallback((id: string) => {
+    const image = imagesRef.current.find((img) => img.id === id);
+    if (!image) return;
+    selectedIdsRef.current = new Set([id]);
+    setSelectedIds(new Set([id]));
+  }, []);
+
+  /**
+   * Lock page scrolling for the duration of a direct manipulation, and arm a
+   * debounced auto-release. The release is re-armed on every gesture update, so the
+   * lock always clears shortly after the drag stops — even for a corner-handle drag
+   * whose end callback can be missed when its small view re-positions mid-gesture.
+   */
+  const holdImageScrollLock = useCallback(() => {
+    setImageManipulationActive(true);
+    if (imageScrollLockTimerRef.current) clearTimeout(imageScrollLockTimerRef.current);
+    imageScrollLockTimerRef.current = setTimeout(() => {
+      imageScrollLockTimerRef.current = null;
+      setImageManipulationActive(false);
+    }, 220);
+  }, []);
+
+  const beginImageGesture = useCallback(
+    (id: string) => {
+      const image = imagesRef.current.find((img) => img.id === id);
+      if (!image) return;
+      selectedIdsRef.current = new Set([id]);
+      setSelectedIds(new Set([id]));
+      holdImageScrollLock();
+      imageGestureStartRef.current = {
+        id,
+        image: cloneImage(image),
+        snapshot: captureSnapshot(),
+        changed: false,
+        committed: false,
+      };
+    },
+    [captureSnapshot, holdImageScrollLock],
+  );
+
+  /**
+   * Push the pre-gesture snapshot exactly once per interaction, on the FIRST real
+   * change (leading edge). This makes the undo entry depend only on an update
+   * actually happening — never on a gesture's onEnd/onFinalize, which can be missed
+   * when a handle view re-positions mid-drag. Repeated drags each capture a fresh
+   * baseline in beginImageGesture, so each completed drag is exactly one undo step.
+   */
+  const commitImageHistoryOnce = useCallback(() => {
+    const start = imageGestureStartRef.current;
+    if (!start || start.committed) return;
+    start.committed = true;
+    endTextHistoryBurst();
+    pushUndoSnapshot(start.snapshot);
+    redoStackRef.current = [];
+    updateHistoryFlags();
+  }, [endTextHistoryBurst, pushUndoSnapshot, updateHistoryFlags]);
+
+  /**
+   * Single combined transform for one direct-manipulation interaction.
+   *
+   * `translationX/Y` is the cumulative one-finger pan and `scale` the cumulative
+   * pinch scale, both relative to the geometry captured at gesture start. They are
+   * applied together — scale around the baseline centre (aspect preserved, min/max
+   * clamped), then translate, then clamp on-page — so pan and pinch never fight and
+   * a two-finger pinch does not jump. One interaction commits exactly one undo step.
+   */
+  const updateImageTransform = useCallback(
+    (id: string, translationX: number, translationY: number, scale: number) => {
+      const start = imageGestureStartRef.current;
+      if (!start || start.id !== id) return;
+      const width = containerSizeRef.current.width;
+      const scaled = resizeImageAroundCenter(start.image, scale, width);
+      const nextImage = clampImageGeometry(
+        { ...scaled, x: scaled.x + translationX, y: scaled.y + translationY },
+        width,
+      );
+      const changed =
+        Math.abs(nextImage.x - start.image.x) > 0.5 ||
+        Math.abs(nextImage.y - start.image.y) > 0.5 ||
+        Math.abs(nextImage.width - start.image.width) > 0.5 ||
+        Math.abs(nextImage.height - start.image.height) > 0.5;
+      if (!changed) return;
+      start.changed = true;
+      commitImageHistoryOnce();
+      holdImageScrollLock();
+      onImagesChangeRef.current(
+        imagesRef.current.map((img) => (img.id === id ? nextImage : img)),
+      );
+    },
+    [commitImageHistoryOnce, holdImageScrollLock],
+  );
+
+  /**
+   * Corner-handle resize. `translationX/Y` is the cumulative drag of the grabbed
+   * corner from the gesture start; the opposite corner stays pinned and aspect is
+   * preserved. Shares the same begin/end interaction as move/pinch, so it commits
+   * exactly one undo snapshot per completed drag.
+   */
+  const resizeImageFromCornerGesture = useCallback(
+    (id: string, corner: ImageCorner, translationX: number, translationY: number) => {
+      const start = imageGestureStartRef.current;
+      if (!start || start.id !== id) return;
+      const nextImage = resizeImageFromCorner(
+        start.image,
+        corner,
+        translationX,
+        translationY,
+        containerSizeRef.current.width,
+      );
+      const changed =
+        Math.abs(nextImage.x - start.image.x) > 0.5 ||
+        Math.abs(nextImage.y - start.image.y) > 0.5 ||
+        Math.abs(nextImage.width - start.image.width) > 0.5 ||
+        Math.abs(nextImage.height - start.image.height) > 0.5;
+      if (!changed) return;
+      start.changed = true;
+      commitImageHistoryOnce();
+      holdImageScrollLock();
+      onImagesChangeRef.current(
+        imagesRef.current.map((img) => (img.id === id ? nextImage : img)),
+      );
+    },
+    [commitImageHistoryOnce, holdImageScrollLock],
+  );
+
+  // History is committed on the first change (commitImageHistoryOnce); end-of-gesture
+  // (when it fires) releases the scroll lock immediately and clears the baseline.
+  const endImageGesture = useCallback(() => {
+    if (imageScrollLockTimerRef.current) {
+      clearTimeout(imageScrollLockTimerRef.current);
+      imageScrollLockTimerRef.current = null;
+    }
+    setImageManipulationActive(false);
+    imageGestureStartRef.current = null;
+  }, []);
+
+  // ---- Selection engine helpers ----
+
+  const commitLasso = useCallback(() => {
+    const lasso = lassoPointsRef.current;
+    if (lasso.length < 3) return;
+    const newIds = new Set<string>();
+    for (const stroke of strokesRef.current) {
+      if (stroke.points.some((pt) => pointInPolygon(pt, lasso))) newIds.add(stroke.id);
+    }
+    for (const img of imagesRef.current) {
+      const corners: NotePoint[] = [
+        { x: img.x, y: img.y },
+        { x: img.x + img.width, y: img.y },
+        { x: img.x, y: img.y + img.height },
+        { x: img.x + img.width, y: img.y + img.height },
+      ];
+      if (corners.some((c) => pointInPolygon(c, lasso))) newIds.add(img.id);
+    }
+    selectedIdsRef.current = newIds;
+    setSelectedIds(new Set(newIds));
+  }, []);
+
+  const commitRectSelection = useCallback(() => {
+    const start = selectionRectStartRef.current;
+    const end = selectionRectEndRef.current;
+    if (!start || !end) return;
+    const rect = rectFromPoints(start, end);
+    if (rect.width < 3 || rect.height < 3) return;
+    const newIds = new Set<string>();
+    for (const stroke of strokesRef.current) {
+      if (stroke.points.some((pt) => pointInRect(pt, rect))) newIds.add(stroke.id);
+    }
+    for (const img of imagesRef.current) {
+      if (rectsOverlap(rect, imageRect(img))) newIds.add(img.id);
+    }
+    selectedIdsRef.current = newIds;
+    setSelectedIds(new Set(newIds));
+  }, []);
+
+  const commitMove = useCallback(() => {
+    const { x: dx, y: dy } = selectionMoveOffsetRef.current;
+    if (dx === 0 && dy === 0) return;
+    const ids = selectedIdsRef.current;
+    const movesStroke = strokesRef.current.some((stroke) => ids.has(stroke.id));
+    const movesImage = imagesRef.current.some((image) => ids.has(image.id));
+    if (!movesStroke && !movesImage) return;
+    recordHistory();
+    const newStrokes = strokesRef.current.map((s) =>
+      ids.has(s.id)
+        ? { ...s, points: s.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) }
+        : s,
+    );
+    onStrokesChangeRef.current(newStrokes);
+    const newImages = imagesRef.current.map((img) =>
+      ids.has(img.id) ? { ...img, x: img.x + dx, y: img.y + dy } : img,
+    );
+    onImagesChangeRef.current(newImages);
+  }, [recordHistory]);
 
   // Commit the in-progress stroke (read synchronously from the ref) as its own
   // new stroke, then clear it. A 1-point stroke is kept — it renders as a dot.
@@ -337,16 +2139,17 @@ export function NotebookCanvas({
         points: pts,
         createdAt: new Date().toISOString(),
       };
-      setUndoEraseSnapshot(null);
+      recordHistory();
       onStrokesChangeRef.current([...strokesRef.current, stroke]);
     }
     currentPointsRef.current = [];
     setCurrentPoints([]);
-  }, []);
+  }, [recordHistory]);
 
   // Erase any not-yet-erased stroke whose path passes within the eraser
   // radius of (x, y). Changes are kept local until the drag ends.
   const eraseAt = useCallback((x: number, y: number) => {
+    // Whole-stroke erase: mark each touched stroke for removal on release.
     let changed = false;
     for (const stroke of strokesRef.current) {
       if (erasedIdsRef.current.includes(stroke.id)) continue;
@@ -361,13 +2164,13 @@ export function NotebookCanvas({
   const commitErase = useCallback(() => {
     if (erasedIdsRef.current.length > 0) {
       const removed = new Set(erasedIdsRef.current);
-      setUndoEraseSnapshot(strokesRef.current);
+      recordHistory();
       onStrokesChangeRef.current(strokesRef.current.filter((s) => !removed.has(s.id)));
     }
     erasedIdsRef.current = [];
     setErasedIds([]);
     setErasePoint(null);
-  }, []);
+  }, [recordHistory]);
 
   /**
    * End the live stroke: commit whichever drag was in progress (the other
@@ -379,10 +2182,24 @@ export function NotebookCanvas({
     drawingRef.current = false;
     activeTouchIdRef.current = null;
     setStylusStrokeActive(false);
+    if (modeRef.current === 'select') {
+      if (selectActionRef.current === 'lasso') commitLasso();
+      else if (selectActionRef.current === 'rect') commitRectSelection();
+      else if (selectActionRef.current === 'move') commitMove();
+      selectActionRef.current = 'idle';
+      lassoPointsRef.current = [];
+      selectionRectStartRef.current = null;
+      selectionRectEndRef.current = null;
+      setLassoPoints([]);
+      setSelectionRect(null);
+      selectionMoveOffsetRef.current = { x: 0, y: 0 };
+      setSelectionMoveOffset({ x: 0, y: 0 });
+      return;
+    }
     commitStroke();
     commitErase();
     restoreTemporaryEraserIfNeeded();
-  }, [commitStroke, commitErase, restoreTemporaryEraserIfNeeded]);
+  }, [commitLasso, commitMove, commitRectSelection, commitStroke, commitErase, restoreTemporaryEraserIfNeeded]);
 
   /** Discard the in-progress stroke without committing it (used on tool change). */
   const abortStroke = useCallback(() => {
@@ -390,10 +2207,19 @@ export function NotebookCanvas({
     activeTouchIdRef.current = null;
     currentPointsRef.current = [];
     erasedIdsRef.current = [];
+    selectActionRef.current = 'idle';
+    lassoPointsRef.current = [];
+    selectionRectStartRef.current = null;
+    selectionRectEndRef.current = null;
+    selectionMoveOffsetRef.current = { x: 0, y: 0 };
+    imageGestureStartRef.current = null;
     setStylusStrokeActive(false);
     setCurrentPoints([]);
     setErasePoint(null);
     setErasedIds([]);
+    setLassoPoints([]);
+    setSelectionRect(null);
+    setSelectionMoveOffset({ x: 0, y: 0 });
   }, []);
 
   /**
@@ -428,16 +2254,15 @@ export function NotebookCanvas({
           if (drawingRef.current) endStroke();
 
           const activeMode = modeRef.current;
-          if (activeMode !== 'write' && activeMode !== 'highlight' && activeMode !== 'erase') {
+          if (activeMode !== 'write' && activeMode !== 'highlight' && activeMode !== 'erase' && activeMode !== 'select') {
             manager.fail();
             return;
           }
 
           setLastPointerType(pointerLabel(event.pointerType));
 
-          // Only confirmed Apple Pencil / stylus input draws; every other
-          // pointer fails the gesture so the ScrollView scrolls (finger scroll).
-          if (event.pointerType !== PointerType.STYLUS) {
+          // Draw/erase modes require a stylus; select mode accepts any pointer.
+          if (activeMode !== 'select' && event.pointerType !== PointerType.STYLUS) {
             setLastGestureDecision('failed');
             manager.fail();
             return;
@@ -450,11 +2275,64 @@ export function NotebookCanvas({
           }
 
           const point = { x: touch.x, y: touch.y + scrollOffsetYRef.current };
+          if (findImageAtPoint(point)) {
+            setLastGestureDecision('failed');
+            manager.fail();
+            return;
+          }
+
           manager.activate();
           drawingRef.current = true;
           activeTouchIdRef.current = touch.id;
           setLastGestureDecision('activated');
           setStylusStrokeActive(true);
+
+          if (activeMode === 'select') {
+            // If touch lands inside the existing selection bounding box → move mode.
+            // Otherwise start a fresh lasso.
+            const ids = selectedIdsRef.current;
+            let inBounds = false;
+            if (ids.size > 0) {
+              // Quick bounding-box check from the current strokes/images.
+              let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+              for (const s of strokesRef.current) {
+                if (!ids.has(s.id)) continue;
+                for (const p of s.points) {
+                  if (p.x < minX) minX = p.x; if (p.y < minY) minY = p.y;
+                  if (p.x > maxX) maxX = p.x; if (p.y > maxY) maxY = p.y;
+                }
+              }
+              for (const img of imagesRef.current) {
+                if (!ids.has(img.id)) continue;
+                if (img.x < minX) minX = img.x; if (img.y < minY) minY = img.y;
+                if (img.x + img.width > maxX) maxX = img.x + img.width;
+                if (img.y + img.height > maxY) maxY = img.y + img.height;
+              }
+              const pad = 12;
+              inBounds = Number.isFinite(minX) &&
+                point.x >= minX - pad && point.x <= maxX + pad &&
+                point.y >= minY - pad && point.y <= maxY + pad;
+            }
+            if (inBounds) {
+              selectActionRef.current = 'move';
+              selectionMoveStartRef.current = point;
+              selectionMoveOffsetRef.current = { x: 0, y: 0 };
+            } else {
+              if (selectionShapeRef.current === 'rect') {
+                selectActionRef.current = 'rect';
+                selectionRectStartRef.current = point;
+                selectionRectEndRef.current = point;
+                setSelectionRect(rectFromPoints(point, point));
+              } else {
+                selectActionRef.current = 'lasso';
+                lassoPointsRef.current = [point];
+                setLassoPoints([point]);
+              }
+              selectedIdsRef.current = new Set();
+              setSelectedIds(new Set());
+            }
+            return;
+          }
 
           if (activeMode === 'write' || activeMode === 'highlight') {
             // A brand-new stroke — its point list starts from scratch.
@@ -474,6 +2352,28 @@ export function NotebookCanvas({
             event.allTouches.find((t) => t.id === activeTouchIdRef.current);
           if (!touch) return;
           const point = { x: touch.x, y: touch.y + scrollOffsetYRef.current };
+
+          if (modeRef.current === 'select') {
+            if (selectActionRef.current === 'lasso') {
+              const pts = lassoPointsRef.current;
+              const last = pts[pts.length - 1];
+              if (last && Math.hypot(point.x - last.x, point.y - last.y) < MIN_POINT_DISTANCE) return;
+              const next = [...pts, point];
+              lassoPointsRef.current = next;
+              setLassoPoints(next);
+            } else if (selectActionRef.current === 'rect') {
+              const start = selectionRectStartRef.current;
+              if (!start) return;
+              selectionRectEndRef.current = point;
+              setSelectionRect(rectFromPoints(start, point));
+            } else if (selectActionRef.current === 'move') {
+              const start = selectionMoveStartRef.current;
+              const offset = { x: point.x - start.x, y: point.y - start.y };
+              selectionMoveOffsetRef.current = offset;
+              setSelectionMoveOffset({ ...offset });
+            }
+            return;
+          }
 
           if (modeRef.current === 'write' || modeRef.current === 'highlight') {
             const pts = currentPointsRef.current;
@@ -510,7 +2410,7 @@ export function NotebookCanvas({
           // Backstop — commit + clear anything still in progress (idempotent).
           endStroke();
         }),
-    [endStroke, eraseAt],
+    [endStroke, eraseAt, findImageAtPoint],
   );
 
   // A tool change must never leave a half-finished stroke behind for the next
@@ -519,9 +2419,21 @@ export function NotebookCanvas({
     abortStroke();
   }, [mode, abortStroke]);
 
+  // Context row swaps fade rather than cut, per the toolbar motion spec.
+  useEffect(() => {
+    contextFade.setValue(0);
+    Animated.timing(contextFade, {
+      toValue: 1,
+      duration: TOOLBAR_ANIMATION_MS,
+      easing: TOOLBAR_EASING,
+      useNativeDriver: false,
+    }).start();
+  }, [mode, contextFade]);
+
   useEffect(
     () => () => {
       if (toastTimer.current) clearTimeout(toastTimer.current);
+      if (textHistoryTimerRef.current) clearTimeout(textHistoryTimerRef.current);
     },
     [],
   );
@@ -558,51 +2470,166 @@ export function NotebookCanvas({
     return addPencilDoubleTapListener(handleDoubleTap);
   }, [editable, handleDoubleTap]);
 
-  const undo = useCallback(() => {
-    if (undoEraseSnapshot) {
-      onStrokesChange(undoEraseSnapshot);
-      setUndoEraseSnapshot(null);
-      return;
-    }
-    if (strokes.length > 0) onStrokesChange(strokes.slice(0, -1));
-  }, [strokes, onStrokesChange, undoEraseSnapshot]);
-
   const clearPage = useCallback(() => {
-    if (strokes.length === 0 && text.length === 0) return;
+    if (strokes.length === 0 && text.length === 0 && images.length === 0) return;
     Alert.alert(
       'Clear page',
-      'Remove all handwriting and typed notes from this page? This cannot be undone.',
+      'Remove all handwriting, images, and typed notes from this page? You can undo this.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Clear',
           style: 'destructive',
           onPress: () => {
-            setUndoEraseSnapshot(null);
+            recordHistory();
             onStrokesChange([]);
             onTextChange('');
+            onImagesChange([]);
+            selectedIdsRef.current = new Set();
+            setSelectedIds(new Set());
           },
         },
       ],
     );
-  }, [strokes.length, text.length, onStrokesChange, onTextChange]);
+  }, [strokes.length, text.length, images.length, onStrokesChange, onTextChange, onImagesChange, recordHistory]);
 
-  // Committed strokes rebuild only when strokes change or a stroke is erased —
-  // not on every touch move while the current stroke is being drawn. Each is
-  // its own StrokeShape, so committed strokes always render independently.
-  const committedShapes = useMemo(
+  const deleteSelectedObjects = useCallback(() => {
+    const ids = selectedIdsRef.current;
+    if (ids.size === 0) return false;
+
+    const hasSelectedStroke = strokesRef.current.some((stroke) => ids.has(stroke.id));
+    const hasSelectedImage = imagesRef.current.some((image) => ids.has(image.id));
+    if (!hasSelectedStroke && !hasSelectedImage) return false;
+
+    recordHistory();
+    if (hasSelectedStroke) {
+      onStrokesChangeRef.current(strokesRef.current.filter((stroke) => !ids.has(stroke.id)));
+    }
+    if (hasSelectedImage) {
+      onImagesChangeRef.current(imagesRef.current.filter((image) => !ids.has(image.id)));
+    }
+    selectedIdsRef.current = new Set();
+    setSelectedIds(new Set());
+    selectionMoveOffsetRef.current = { x: 0, y: 0 };
+    setSelectionMoveOffset({ x: 0, y: 0 });
+    return true;
+  }, [recordHistory]);
+
+  const handleTrashPress = useCallback(() => {
+    if (deleteSelectedObjects()) return;
+    clearPage();
+  }, [clearPage, deleteSelectedObjects]);
+
+  const duplicateSelected = useCallback(() => {
+    const ids = selectedIdsRef.current;
+    if (ids.size === 0) return;
+    const OFFSET = 18;
+    const newIds = new Set<string>();
+    const extraStrokes: NoteStroke[] = [];
+    for (const s of strokesRef.current) {
+      if (!ids.has(s.id)) continue;
+      const newId = makeStrokeId();
+      newIds.add(newId);
+      extraStrokes.push({
+        ...s,
+        id: newId,
+        points: s.points.map((p) => ({ x: p.x + OFFSET, y: p.y + OFFSET })),
+        createdAt: new Date().toISOString(),
+      });
+    }
+    const extraImages: NoteImage[] = [];
+    for (const img of imagesRef.current) {
+      if (!ids.has(img.id)) continue;
+      const newId = makeImageId();
+      newIds.add(newId);
+      extraImages.push(
+        clampImageGeometry(
+          { ...img, id: newId, x: img.x + OFFSET, y: img.y + OFFSET, createdAt: new Date().toISOString() },
+          containerSizeRef.current.width,
+        ),
+      );
+    }
+    if (extraStrokes.length === 0 && extraImages.length === 0) return;
+    recordHistory();
+    if (extraStrokes.length > 0) onStrokesChangeRef.current([...strokesRef.current, ...extraStrokes]);
+    if (extraImages.length > 0) onImagesChangeRef.current([...imagesRef.current, ...extraImages]);
+    selectedIdsRef.current = newIds;
+    setSelectedIds(new Set(newIds));
+  }, [recordHistory]);
+
+  const pickImage = useCallback(async () => {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) return;
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsEditing: false,
+      quality: 0.85,
+    });
+    if (result.canceled || result.assets.length === 0) return;
+    const asset = result.assets[0];
+    const MAX_W = 380;
+    const aspect = (asset.height ?? MAX_W) / (asset.width ?? MAX_W);
+    const displayW = Math.min(MAX_W, asset.width ?? MAX_W);
+    const displayH = displayW * aspect;
+    const cs = containerSizeRef.current;
+    const cx = Math.max(MARGIN_X, (cs.width - displayW) / 2);
+    const cy = scrollOffsetYRef.current + 60;
+    const img: NoteImage = {
+      id: makeImageId(),
+      uri: asset.uri,
+      x: cx,
+      y: cy,
+      width: displayW,
+      height: displayH,
+      createdAt: new Date().toISOString(),
+    };
+    recordHistory();
+    onImagesChangeRef.current([...imagesRef.current, img]);
+    selectedIdsRef.current = new Set([img.id]);
+    setSelectedIds(new Set([img.id]));
+  }, [recordHistory]);
+
+  const canClear = strokes.length > 0 || images.length > 0 || text.length > 0;
+
+  // Bounding box of all selected objects in canvas coordinates (for the selection overlay).
+  const selectionBounds = useMemo(() => {
+    if (selectedIds.size === 0) return null;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const s of strokes) {
+      if (!selectedIds.has(s.id)) continue;
+      for (const p of s.points) {
+        if (p.x < minX) minX = p.x; if (p.y < minY) minY = p.y;
+        if (p.x > maxX) maxX = p.x; if (p.y > maxY) maxY = p.y;
+      }
+    }
+    for (const img of images) {
+      if (!selectedIds.has(img.id)) continue;
+      if (img.x < minX) minX = img.x; if (img.y < minY) minY = img.y;
+      if (img.x + img.width > maxX) maxX = img.x + img.width;
+      if (img.y + img.height > maxY) maxY = img.y + img.height;
+    }
+    if (!Number.isFinite(minX)) return null;
+    const pad = 8;
+    return { x: minX - pad, y: minY - pad, w: maxX - minX + pad * 2, h: maxY - minY + pad * 2 };
+  }, [selectedIds, strokes, images]);
+
+  // Committed strokes split into unselected (stable) and selected (rendered in a transform group).
+  const { unselectedShapes, selectedShapes } = useMemo(
     () => {
-      const visible = strokes.filter((stroke) => !erasedIds.includes(stroke.id));
-      return [
-        ...visible
-          .filter((stroke) => stroke.tool === 'highlighter')
-          .map((stroke) => <StrokeShape key={stroke.id} stroke={stroke} />),
-        ...visible
-          .filter((stroke) => stroke.tool !== 'highlighter')
-          .map((stroke) => <StrokeShape key={stroke.id} stroke={stroke} />),
+      const visible = strokes.filter((s) => !erasedIds.includes(s.id));
+      const unsel = [
+        ...visible.filter((s) => s.tool === 'highlighter' && !selectedIds.has(s.id)).map((s) => <StrokeShape key={s.id} stroke={s} />),
+        ...visible.filter((s) => s.tool !== 'highlighter' && !selectedIds.has(s.id)).map((s) => <StrokeShape key={s.id} stroke={s} />),
       ];
+      const sel = visible
+        .filter((s) => selectedIds.has(s.id))
+        .flatMap((s) => [
+          <StrokeShape key={`${s.id}_hl`} stroke={{ ...s, width: s.width + 5, color: '#5F86E8', opacity: 0.28 }} />,
+          <StrokeShape key={s.id} stroke={s} />,
+        ]);
+      return { unselectedShapes: unsel, selectedShapes: sel };
     },
-    [strokes, erasedIds],
+    [strokes, erasedIds, selectedIds],
   );
 
   const ruleLines = useMemo(() => {
@@ -612,195 +2639,379 @@ export function NotebookCanvas({
     ));
   }, []);
 
-  const isEmpty = strokes.length === 0 && currentPoints.length === 0 && text.length === 0;
+  const isEmpty = strokes.length === 0 && currentPoints.length === 0 && text.length === 0 && images.length === 0;
+
+  const handleContainerLayout = (event: LayoutChangeEvent) => {
+    const { width, height } = event.nativeEvent.layout;
+    setContainerSize((current) =>
+      current.width === width && current.height === height ? current : { width, height },
+    );
+    // Page origin lets us map drag finger pageX/pageY into container coordinates
+    // for edge-intent snapping (see resolveReleaseDock).
+    containerRef.current?.measureInWindow((x, y) => {
+      if (typeof x === 'number' && typeof y === 'number') {
+        containerOriginRef.current = { x, y };
+      }
+    });
+  };
+
+  /**
+   * Side-docked vertical toolbar (Concept C). A purpose-built layout — independent of the
+   * horizontal JSX. The primary rail is fixed-size and never resizes when tools change; the
+   * inward context card, the history mini-rail and the selection cluster are separate navy
+   * surfaces. The active indicator is an inward-edge bar (no underline). Left vs right mirror
+   * via `toolbarOnRight`. Only built when the toolbar is actually docked left/right.
+   */
+  const verticalActiveIndicatorStyle = [
+    styles.vActiveIndicator,
+    toolbarOnRight ? styles.vActiveIndicatorRight : styles.vActiveIndicatorLeft,
+  ];
+  const verticalHasContext = toolbarHasContext && mode !== 'type';
+  const verticalContextWidth =
+    mode === 'insert'
+      ? TOOLBAR_VERTICAL_CONTEXT_WIDE
+      : TOOLBAR_VERTICAL_CONTEXT_NARROW;
+  const verticalToolbar = !toolbarVertical ? null : effectiveToolbarCollapsed ? (
+    // ---- Minimized capsule: grip · current tool · inward expand chevron (purpose-built) ----
+    <View
+      style={[styles.toolbarSurface, styles.vMiniCapsule]}
+      {...toolbarDragResponder.panHandlers}
+      {...toolbarDragTouchHandlers}
+    >
+      <NavySurface />
+      <View accessibilityLabel="Move notebook tools" accessibilityRole="adjustable" style={styles.vMiniGrip}>
+        <GripDots />
+      </View>
+      <View style={styles.vMiniCur}>
+        <ModeIcon mode={mode} active color={colors.pearlWhite} size={24} />
+      </View>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Expand notebook tools"
+        onPress={() => runToolbarPress(() => setToolbarCollapsed(false))}
+        hitSlop={TOOLBAR_ICON_HIT_SLOP}
+        {...toolbarDragResponder.panHandlers}
+        {...toolbarDragTouchHandlers}
+        style={({ pressed }) => [styles.vMiniExpand, pressed && styles.toolbarPressed]}
+      >
+        <ToolbarGlyph
+          name={toolbarOnRight ? 'chevronLeft' : 'chevronRight'}
+          color="rgba(255,255,255,0.6)"
+          size={18}
+        />
+      </Pressable>
+    </View>
+  ) : (
+    <View style={[styles.vEdgeColumn, toolbarOnRight ? styles.vEdgeColumnRight : null]}>
+      {/* MAIN CAPSULE — two narrow columns (tools + active-tool context) in one navy shell */}
+      <View
+        style={[styles.toolbarSurface, styles.vCapsule, toolbarOnRight ? styles.vCapsuleRight : null]}
+      >
+        <NavySurface />
+        {/* Primary tool column — nearest the screen edge */}
+        <View
+          style={styles.vToolColumn}
+          {...toolbarDragResponder.panHandlers}
+          {...toolbarDragTouchHandlers}
+        >
+          {PRIMARY_TOOLS.map((tool) => {
+            const active = mode === tool.key;
+            return (
+              <Pressable
+                key={tool.key}
+                accessibilityRole="button"
+                accessibilityLabel={`${tool.label} tool`}
+                accessibilityState={{ selected: active }}
+                onPress={() => runToolbarPress(() => changeMode(tool.key))}
+                hitSlop={TOOLBAR_ICON_HIT_SLOP}
+                {...toolbarDragResponder.panHandlers}
+                {...toolbarDragTouchHandlers}
+                style={({ pressed }) => [styles.vRailButton, pressed && styles.toolbarPressed]}
+              >
+                {active ? <View style={styles.vActiveChip} /> : null}
+                <ModeIcon
+                  mode={tool.key}
+                  active={active}
+                  color={active ? TOOLBAR_SELECTED : TOOLBAR_ICON_IDLE}
+                  size={25}
+                />
+                {active ? <View style={verticalActiveIndicatorStyle} /> : null}
+              </Pressable>
+            );
+          })}
+          <View style={styles.vRailDivider} />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Hand — move canvas"
+            accessibilityState={{ selected: mode === 'scroll' }}
+            onPress={() => runToolbarPress(() => changeMode(mode === 'scroll' ? 'write' : 'scroll'))}
+            hitSlop={TOOLBAR_ICON_HIT_SLOP}
+            {...toolbarDragResponder.panHandlers}
+            {...toolbarDragTouchHandlers}
+            style={({ pressed }) => [styles.vRailIconButton, pressed && styles.toolbarPressed]}
+          >
+            {mode === 'scroll' ? <View style={styles.vActiveChip} /> : null}
+            <ToolbarGlyph name="hand" color={mode === 'scroll' ? TOOLBAR_SELECTED : TOOLBAR_ICON_IDLE} />
+            {mode === 'scroll' ? <View style={verticalActiveIndicatorStyle} /> : null}
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Minimize notebook tools"
+            onPress={() => runToolbarPress(() => setToolbarCollapsed(true))}
+            hitSlop={TOOLBAR_ICON_HIT_SLOP}
+            {...toolbarDragResponder.panHandlers}
+            {...toolbarDragTouchHandlers}
+            style={({ pressed }) => [styles.vRailIconButton, pressed && styles.toolbarPressed]}
+          >
+            <ToolbarGlyph name={toolbarOnRight ? 'chevronRight' : 'chevronLeft'} color={TOOLBAR_ICON_IDLE} />
+          </Pressable>
+        </View>
+
+        {/* Context column — only the active tool's controls, facing inward toward the Canvas */}
+        {verticalHasContext ? (
+          <>
+            <View style={styles.vColumnDivider} />
+            <View style={[styles.vContextColumn, { width: verticalContextWidth }]}>
+              {mode === 'write' || mode === 'highlight' ? (
+                <ScrollView
+                  style={styles.vContextScroll}
+                  contentContainerStyle={styles.vContextScrollContent}
+                  directionalLockEnabled
+                  keyboardShouldPersistTaps="handled"
+                  nestedScrollEnabled
+                  scrollEventThrottle={16}
+                  showsVerticalScrollIndicator={false}
+                  {...contextScrollHandlers}
+                >
+                  <View style={styles.vSwatchColumn}>
+                    {(mode === 'highlight' ? HIGHLIGHTER_COLORS : PEN_COLORS).map((option) => {
+                      const selectedColor = mode === 'highlight' ? highlighterColor : penColor;
+                      const isActive = selectedColor === option.value;
+                      return (
+                        <Pressable
+                          key={option.key}
+                          accessibilityRole="button"
+                          accessibilityLabel={`${mode === 'highlight' ? 'Highlighter' : 'Pen'} colour ${option.key}`}
+                          accessibilityState={{ selected: isActive }}
+                          onPress={() =>
+                            runToolbarPress(() =>
+                              mode === 'highlight'
+                                ? setHighlighterColor(option.value)
+                                : setPenColor(option.value),
+                            )
+                          }
+                          style={({ pressed }) => [styles.inkSwatch, pressed && styles.toolbarPressed]}
+                        >
+                          <View style={[StyleSheet.absoluteFill, styles.inkSwatchFill, { backgroundColor: option.value }]} />
+                          {isActive ? <View style={styles.inkSwatchRing} /> : null}
+                          {isActive ? <ToolbarGlyph name="pen" color={colors.pearlWhite} size={13} /> : null}
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                  <View style={styles.vCtxDivider} />
+                  <View style={styles.vNibColumn}>
+                    {(mode === 'highlight' ? HIGHLIGHTER_WIDTHS : PEN_WIDTHS).map((option) => {
+                      const selectedWidth = mode === 'highlight' ? highlighterWidth : penWidth;
+                      const active = selectedWidth === option.value;
+                      return (
+                        <Pressable
+                          key={option.key}
+                          accessibilityRole="button"
+                          accessibilityLabel={`${mode === 'highlight' ? 'Highlighter' : 'Pen'} width ${option.key}`}
+                          accessibilityState={{ selected: active }}
+                          onPress={() =>
+                            runToolbarPress(() =>
+                              mode === 'highlight'
+                                ? setHighlighterWidth(option.value)
+                                : setPenWidth(option.value),
+                            )
+                          }
+                          style={({ pressed }) => [styles.nib, active && styles.nibActive, pressed && styles.toolbarPressed]}
+                        >
+                          <View
+                            style={{
+                              width: option.dot,
+                              height: option.dot,
+                              borderRadius: option.dot / 2,
+                              backgroundColor: 'rgba(255,255,255,0.92)',
+                            }}
+                          />
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                </ScrollView>
+              ) : null}
+
+              {mode === 'erase' ? (
+                <View style={styles.vNibColumn}>
+                  {ERASER_SIZES.map((option) => {
+                    const active = eraserSizeKey === option.key;
+                    const dot = option.key === 'small' ? 8 : option.key === 'medium' ? 13 : 19;
+                    return (
+                      <Pressable
+                        key={option.key}
+                        accessibilityRole="button"
+                        accessibilityLabel={`${option.label} eraser`}
+                        accessibilityState={{ selected: active }}
+                        onPress={() => runToolbarPress(() => setEraserSizeKey(option.key))}
+                        style={({ pressed }) => [styles.nib, active && styles.nibActive, pressed && styles.toolbarPressed]}
+                      >
+                        <View
+                          style={{
+                            width: dot,
+                            height: dot,
+                            borderRadius: dot / 2,
+                            backgroundColor: 'rgba(255,255,255,0.92)',
+                          }}
+                        />
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              ) : null}
+
+              {mode === 'select' ? (
+                <View style={styles.vSelectShapePanel}>
+                  {(['lasso', 'rect'] as SelectionShape[]).map((shape) => {
+                    const active = selectionShape === shape;
+                    return (
+                      <Pressable
+                        key={shape}
+                        accessibilityRole="button"
+                        accessibilityLabel={shape === 'rect' ? 'Rectangular selection' : 'Freeform lasso selection'}
+                        accessibilityState={{ selected: active }}
+                        onPress={() => runToolbarPress(() => setSelectionShape(shape))}
+                        hitSlop={TOOLBAR_ICON_HIT_SLOP}
+                        {...toolbarDragResponder.panHandlers}
+                        {...toolbarDragTouchHandlers}
+                        style={({ pressed }) => [
+                          styles.vShapeButton,
+                          active && styles.vShapeButtonActive,
+                          pressed && styles.toolbarPressed,
+                        ]}
+                      >
+                        <SelectionShapeIcon
+                          shape={shape}
+                          color={active ? TOOLBAR_SELECTED : TOOLBAR_ICON_IDLE}
+                        />
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              ) : null}
+
+              {mode === 'insert' ? (
+                <View style={styles.vCtxPanel}>
+                  <Text style={styles.vCtxLabel}>Insert</Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Insert image from Photos"
+                    onPress={() => runToolbarPress(pickImage)}
+                    style={({ pressed }) => [styles.vInsertButton, pressed && styles.toolbarPressed]}
+                  >
+                    <Svg width={20} height={20} viewBox="0 0 24 24">
+                      <Rect x="7" y="7" width="13" height="13" rx="2.2" stroke={colors.pearlWhite} strokeWidth={1.8} fill="none" />
+                      <Path d="M4 16V5.5A1.5 1.5 0 0 1 5.5 4H16" stroke={colors.pearlWhite} strokeWidth={1.8} strokeLinecap="round" fill="none" />
+                      <Circle cx="11" cy="11.5" r="1.3" fill={colors.pearlWhite} />
+                      <Path d="M8 18l3-3 2.2 2.2L16 14l4 4" stroke={colors.pearlWhite} strokeWidth={1.6} strokeLinejoin="round" fill="none" />
+                    </Svg>
+                    <Text style={styles.vInsertLabel}>Photos</Text>
+                  </Pressable>
+                </View>
+              ) : null}
+            </View>
+          </>
+        ) : null}
+      </View>
+
+      {/* History action capsule — separate, narrow, aligned under the tool column */}
+      <View
+        style={[styles.toolbarSurface, styles.vActionCapsule]}
+        {...toolbarDragResponder.panHandlers}
+        {...toolbarDragTouchHandlers}
+      >
+        <NavySurface />
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Undo last action"
+          accessibilityState={{ disabled: !canUndo }}
+          onPress={() => runToolbarPress(undo)}
+          disabled={!canUndo}
+          hitSlop={TOOLBAR_ICON_HIT_SLOP}
+          {...toolbarDragResponder.panHandlers}
+          {...toolbarDragTouchHandlers}
+          style={({ pressed }) => [
+            styles.vRailIconButton,
+            !canUndo && styles.iconToolButtonDisabled,
+            pressed && canUndo && styles.toolbarPressed,
+          ]}
+        >
+          <ToolbarGlyph name="undo" color={canUndo ? TOOLBAR_ICON_IDLE : TOOLBAR_ICON_DISABLED} />
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Redo last undone action"
+          accessibilityState={{ disabled: !canRedo }}
+          onPress={() => runToolbarPress(redo)}
+          disabled={!canRedo}
+          hitSlop={TOOLBAR_ICON_HIT_SLOP}
+          {...toolbarDragResponder.panHandlers}
+          {...toolbarDragTouchHandlers}
+          style={({ pressed }) => [
+            styles.vRailIconButton,
+            !canRedo && styles.iconToolButtonDisabled,
+            pressed && canRedo && styles.toolbarPressed,
+          ]}
+        >
+          <ToolbarGlyph name="redo" color={canRedo ? TOOLBAR_ICON_IDLE : TOOLBAR_ICON_DISABLED} />
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={hasSelection ? 'Delete selected' : 'Clear page'}
+          accessibilityState={{ disabled: !canClear }}
+          onPress={() => runToolbarPress(handleTrashPress)}
+          disabled={!canClear}
+          hitSlop={TOOLBAR_ICON_HIT_SLOP}
+          {...toolbarDragResponder.panHandlers}
+          {...toolbarDragTouchHandlers}
+          style={({ pressed }) => [
+            styles.vRailIconButton,
+            !canClear && styles.iconToolButtonDisabled,
+            pressed && canClear && styles.toolbarPressed,
+          ]}
+        >
+          <ToolbarGlyph name="more" color={canClear ? TOOLBAR_ICON_IDLE : TOOLBAR_ICON_DISABLED} />
+        </Pressable>
+      </View>
+
+      {/* Selection action capsule — separate, contextual (never replaces Undo/Redo) */}
+      {hasSelection ? (
+        <View
+          style={[styles.toolbarSurface, styles.vActionCapsule]}
+          {...toolbarDragResponder.panHandlers}
+          {...toolbarDragTouchHandlers}
+        >
+          <NavySurface />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Duplicate selected"
+            onPress={() => runToolbarPress(duplicateSelected)}
+            hitSlop={TOOLBAR_ICON_HIT_SLOP}
+            {...toolbarDragResponder.panHandlers}
+            {...toolbarDragTouchHandlers}
+            style={({ pressed }) => [styles.vRailIconButton, pressed && styles.toolbarPressed]}
+          >
+            <ToolbarGlyph name="duplicate" color={TOOLBAR_ICON_IDLE} />
+          </Pressable>
+        </View>
+      ) : null}
+    </View>
+  );
 
   return (
-    <View style={[styles.container, style]}>
-      {editable ? (
-        <View style={styles.toolbar}>
-          <View style={styles.toolbarLeft}>
-            {/* Primary tool toggle */}
-            <View style={styles.segment}>
-              {DRAW_MODES.map((m) => {
-                const active = mode === m.key;
-                return (
-                  <Pressable
-                    key={m.key}
-                    accessibilityRole="button"
-                    accessibilityState={{ selected: active }}
-                    onPress={() => changeMode(m.key)}
-                    style={[styles.segmentBtn, active && styles.segmentBtnActive]}
-                  >
-                    <ModeIcon mode={m.key} active={active} />
-                    <Text style={[styles.segmentText, active && styles.segmentTextActive]}>
-                      {m.label}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-
-            {/* Pen options — only meaningful while writing */}
-            {mode === 'write' || mode === 'highlight' ? (
-              <>
-                <View style={styles.toolGroup}>
-                  {(mode === 'highlight' ? HIGHLIGHTER_COLORS : PEN_COLORS).map((pen) => {
-                    const selectedColor = mode === 'highlight' ? highlighterColor : penColor;
-                    return (
-                    <Pressable
-                      key={pen.key}
-                      accessibilityRole="button"
-                      accessibilityLabel={`${mode === 'highlight' ? 'Highlighter' : 'Pen'} colour ${pen.key}`}
-                      accessibilityState={{ selected: selectedColor === pen.value }}
-                      onPress={() => (mode === 'highlight' ? setHighlighterColor(pen.value) : setPenColor(pen.value))}
-                      style={[styles.swatch, selectedColor === pen.value && styles.swatchActive]}
-                    >
-                      <View style={[styles.swatchDot, { backgroundColor: pen.value }]} />
-                    </Pressable>
-                    );
-                  })}
-                </View>
-                <View style={styles.toolGroup}>
-                  {(mode === 'highlight' ? HIGHLIGHTER_WIDTHS : PEN_WIDTHS).map((pen) => {
-                    const selectedWidth = mode === 'highlight' ? highlighterWidth : penWidth;
-                    return (
-                    <Pressable
-                      key={pen.key}
-                      accessibilityRole="button"
-                      accessibilityLabel={`${mode === 'highlight' ? 'Highlighter' : 'Pen'} width ${pen.key}`}
-                      accessibilityState={{ selected: selectedWidth === pen.value }}
-                      onPress={() => (mode === 'highlight' ? setHighlighterWidth(pen.value) : setPenWidth(pen.value))}
-                      style={[styles.widthBtn, selectedWidth === pen.value && styles.widthBtnActive]}
-                    >
-                      <View
-                        style={{
-                          width: pen.dot,
-                          height: pen.dot,
-                          borderRadius: pen.dot / 2,
-                          backgroundColor: colors.deepNavy,
-                        }}
-                      />
-                    </Pressable>
-                    );
-                  })}
-                </View>
-              </>
-            ) : null}
-
-            {/*
-             * Eraser size options are NOT rendered here. They used to live
-             * inside this flexWrap row alongside the segment + (when in
-             * write/highlight mode) color/width groups. With four segment
-             * buttons plus three eraser-size buttons the row wrapped into a
-             * second line on iPad widths, and that second line sat over the
-             * top edge of the GestureScrollView below — drawGesture (Pan +
-             * manualActivation) hit-tested the wrapped row first and swallowed
-             * the taps before the Pressables ever fired. The eraser size row
-             * is now a dedicated secondary bar below the main toolbar (see
-             * `<View style={styles.eraserSizeBar} />` further down) which is
-             * outside any gesture container and never wraps.
-             */}
-          </View>
-
-          <View style={styles.toolbarRight}>
-            {/* Manual fallback only — normal iPad use should be Pencil writes, finger scrolls. */}
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Scroll mode (fallback)"
-              accessibilityState={{ selected: mode === 'scroll' }}
-              onPress={() => changeMode(mode === 'scroll' ? 'write' : 'scroll')}
-              style={[styles.fallbackBtn, mode === 'scroll' && styles.fallbackBtnActive]}
-            >
-              <Ionicons
-                name="hand-left-outline"
-                size={15}
-                color={mode === 'scroll' ? colors.pearlWhite : colors.textTertiary}
-              />
-              <Text
-                style={[styles.fallbackText, mode === 'scroll' && styles.fallbackTextActive]}
-              >
-                Scroll
-              </Text>
-            </Pressable>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Undo last stroke"
-              onPress={undo}
-              disabled={strokes.length === 0 && !undoEraseSnapshot}
-              style={[styles.toolBtn, strokes.length === 0 && !undoEraseSnapshot && styles.toolBtnDisabled]}
-            >
-              <Ionicons name="arrow-undo" size={18} color={colors.deepNavy} />
-            </Pressable>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Clear page"
-              onPress={clearPage}
-              style={styles.toolBtn}
-            >
-              <Ionicons name="trash-outline" size={18} color={colors.recordingRed} />
-            </Pressable>
-          </View>
-        </View>
-      ) : null}
-
-      {/* ---- Dedicated eraser-size bar ----
-          Lives *outside* the flexWrap-prone primary toolbar and *outside* the
-          GestureDetector below. Renders only in erase mode. Bigger tap
-          targets, hitSlop, and a console.warn on press so on-device taps
-          are observable in the Metro log without a debugger. */}
-      {editable && mode === 'erase' ? (
-        <View style={styles.eraserSizeBar} pointerEvents="auto">
-          <Text style={styles.eraserSizeBarLabel}>Eraser size</Text>
-          <View style={styles.eraserSizeSegment}>
-            {ERASER_SIZES.map((option) => {
-              const active = eraserSizeKey === option.key;
-              return (
-                <Pressable
-                  key={option.key}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Eraser size ${option.label}`}
-                  accessibilityState={{ selected: active }}
-                  hitSlop={10}
-                  onPress={() => {
-                    if (__DEV__) {
-                      // console.warn so the log is visibly louder than other
-                      // diagnostics — proves the tap reached the Pressable.
-                      console.warn('[NotebookCanvas] eraser size press', option.key, option.radius);
-                    }
-                    setEraserSizeKey(option.key);
-                  }}
-                  style={({ pressed }) => [
-                    styles.eraserSizeSegmentBtn,
-                    active && styles.eraserSizeSegmentBtnActive,
-                    pressed && styles.eraserSizeSegmentBtnPressed,
-                  ]}
-                >
-                  <View
-                    style={[
-                      styles.eraserSizeIndicator,
-                      {
-                        width: option.radius * 0.45,
-                        height: option.radius * 0.45,
-                        borderRadius: option.radius * 0.225,
-                      },
-                      active && styles.eraserSizeIndicatorActive,
-                    ]}
-                  />
-                  <Text
-                    style={[
-                      styles.eraserSizeSegmentText,
-                      active && styles.eraserSizeSegmentTextActive,
-                    ]}
-                  >
-                    {option.label}
-                  </Text>
-                </Pressable>
-              );
-            })}
-          </View>
-        </View>
-      ) : null}
-
+    <View ref={containerRef} style={[styles.container, style]} onLayout={handleContainerLayout}>
       {/* ---- Long scrollable paper ----
           The gesture lives on the actual ScrollView, not on an absolute overlay
           above it. That keeps finger touches in the scroll view's hit-test path
@@ -809,7 +3020,7 @@ export function NotebookCanvas({
         <GestureScrollView
           style={styles.scroll}
           keyboardShouldPersistTaps="handled"
-          scrollEnabled={!stylusStrokeActive}
+          scrollEnabled={!stylusStrokeActive && !imageManipulationActive}
           scrollEventThrottle={16}
           onScroll={(event) => {
             scrollOffsetYRef.current = event.nativeEvent.contentOffset.y;
@@ -826,7 +3037,8 @@ export function NotebookCanvas({
           <TextInput
             style={styles.textLayer}
             value={text}
-            onChangeText={onTextChange}
+            onChangeText={handleTextChange}
+            onBlur={endTextHistoryBurst}
             editable={editable && mode === 'type'}
             pointerEvents={editable && mode === 'type' ? 'auto' : 'none'}
             multiline
@@ -835,10 +3047,32 @@ export function NotebookCanvas({
             textAlignVertical="top"
           />
 
-          {/* Handwriting layer (never captures touches) */}
+          {/* Image objects layer */}
+          {images.map((img) => {
+            const isSel = selectedIds.has(img.id);
+            return (
+              <NotebookImageObject
+                key={img.id}
+                image={img}
+                selected={isSel}
+                moveOffset={selectionMoveOffset}
+                onSelect={selectImage}
+                onTransform={updateImageTransform}
+                onCornerResize={resizeImageFromCornerGesture}
+                onGestureStart={beginImageGesture}
+                onGestureEnd={endImageGesture}
+              />
+            );
+          })}
+
+          {/* Handwriting + selection overlay (never captures touches) */}
           <View style={StyleSheet.absoluteFill} pointerEvents="none">
             <Svg width="100%" height={PAGE_HEIGHT}>
-              {committedShapes}
+              {unselectedShapes}
+              {/* Selected strokes rendered inside a translate group during move. */}
+              <G translateX={selectionMoveOffset.x} translateY={selectionMoveOffset.y}>
+                {selectedShapes}
+              </G>
               {currentPoints.length > 0 ? (
                 <StrokeShape
                   stroke={{
@@ -868,6 +3102,42 @@ export function NotebookCanvas({
                   />
                 </>
               ) : null}
+              {/* Lasso path while drawing */}
+              {mode === 'select' && lassoPoints.length > 1 ? (
+                <Path
+                  d={`M ${lassoPoints.map((p) => `${p.x} ${p.y}`).join(' L ')} Z`}
+                  stroke="#5F86E8"
+                  strokeWidth={1.6}
+                  strokeDasharray="5 3"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  fill="rgba(95,134,232,0.08)"
+                />
+              ) : null}
+              {mode === 'select' && selectionRect ? (
+                <Rect
+                  x={selectionRect.x}
+                  y={selectionRect.y}
+                  width={selectionRect.width}
+                  height={selectionRect.height}
+                  rx={3}
+                  stroke="#5F86E8"
+                  strokeWidth={1.6}
+                  strokeDasharray="6 4"
+                  fill="rgba(95,134,232,0.08)"
+                />
+              ) : null}
+              {/* Selection bounding box */}
+              {selectionBounds && mode === 'select' ? (
+                <Path
+                  d={`M ${selectionBounds.x + selectionMoveOffset.x} ${selectionBounds.y + selectionMoveOffset.y} h ${selectionBounds.w} v ${selectionBounds.h} h ${-selectionBounds.w} Z`}
+                  stroke="#5F86E8"
+                  strokeWidth={1.5}
+                  strokeDasharray="6 3"
+                  strokeLinecap="round"
+                  fill="rgba(95,134,232,0.06)"
+                />
+              ) : null}
             </Svg>
           </View>
 
@@ -890,6 +3160,439 @@ export function NotebookCanvas({
           </View>
         </GestureScrollView>
       </GestureDetector>
+
+      {editable ? (
+        <GestureDetector gesture={toolbarVertical ? disabledToolbarPanGesture : toolbarPanGesture}>
+          <Animated.View
+            pointerEvents="auto"
+            style={[
+              styles.floatingToolbarWrap,
+              toolbarVertical && styles.floatingToolbarWrapVertical,
+              toolbarOnRight && styles.floatingToolbarWrapRight,
+              { width: toolbarFrameSize.width, height: toolbarFrameSize.height },
+              { transform: toolbarPosition.getTranslateTransform() },
+            ]}
+          >
+            {toolbarVertical ? (
+              verticalToolbar
+            ) : (
+              <>
+            <Animated.View
+              style={[
+                styles.toolbarSurface,
+                styles.toolbarShell,
+                { borderRadius: effectiveToolbarCollapsed ? TOOLBAR_MINIMIZED_RADIUS : TOOLBAR_SHELL_RADIUS },
+                {
+                  width: toolbarTransition.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [collapsedToolbarSize.width, toolbarVisualSize.width],
+                  }),
+                  height: toolbarTransition.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [collapsedToolbarSize.height, toolbarVisualSize.height],
+                  }),
+                  transform: [{ scale: toolbarScale }],
+                },
+              ]}
+              {...toolbarDragResponder.panHandlers}
+              {...toolbarDragTouchHandlers}
+            >
+              <NavySurface width={toolbarVisualSize.width} height={toolbarVisualSize.height} />
+              {/* Minimized tag: grip · current-tool icon · expand chevron (design .tbmin). */}
+              <Animated.View
+                pointerEvents={effectiveToolbarCollapsed ? 'auto' : 'none'}
+                style={[
+                  styles.collapsedContent,
+                  toolbarVertical && styles.collapsedContentVertical,
+                  { opacity: collapsedContentOpacity },
+                ]}
+              >
+                <View
+                  accessibilityLabel="Move notebook tools"
+                  accessibilityRole="adjustable"
+                  style={styles.collapsedGrip}
+                >
+                  <GripDots />
+                </View>
+                <View style={styles.collapsedCur}>
+                  <ModeIcon mode={mode} active color={colors.pearlWhite} size={24} />
+                </View>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Expand notebook tools"
+                  onPress={() => runToolbarPress(() => setToolbarCollapsed(false))}
+                  hitSlop={TOOLBAR_ICON_HIT_SLOP}
+                  {...toolbarDragResponder.panHandlers}
+                  {...toolbarDragTouchHandlers}
+                  style={({ pressed }) => [
+                    styles.collapsedExpand,
+                    pressed && styles.toolbarPressed,
+                  ]}
+                >
+                  <ToolbarGlyph
+                    name={toolbarVertical ? (toolbarOnRight ? 'chevronRight' : 'chevronLeft') : 'chevronUp'}
+                    color="rgba(255,255,255,0.6)"
+                    size={18}
+                  />
+                </Pressable>
+              </Animated.View>
+
+            <Animated.View
+              pointerEvents={effectiveToolbarCollapsed ? 'none' : 'auto'}
+              style={[
+                styles.expandedContent,
+                toolbarVertical && styles.expandedContentVertical,
+                toolbarOnRight && styles.expandedContentVerticalRight,
+                { opacity: expandedContentOpacity },
+              ]}
+            >
+              <View style={[styles.primaryToolbarRow, toolbarVertical && styles.primaryToolbarRail]}>
+                <View
+                  accessibilityLabel="Move notebook tools"
+                  accessibilityRole="adjustable"
+                  style={[styles.expandedDragHandle, toolbarVertical && styles.expandedDragHandleVertical]}
+                >
+                  <GripDots />
+                </View>
+
+                <View style={[styles.primaryTools, toolbarVertical && styles.primaryToolsVertical]}>
+                  {PRIMARY_TOOLS.map((tool) => {
+                    const active = mode === tool.key;
+                    return (
+                      <Pressable
+                        key={tool.key}
+                        accessibilityRole="button"
+                        accessibilityLabel={`${tool.label} tool`}
+                        accessibilityState={{ selected: active }}
+                        onPress={() => runToolbarPress(() => changeMode(tool.key))}
+                        hitSlop={TOOLBAR_ICON_HIT_SLOP}
+                        {...toolbarDragResponder.panHandlers}
+                        {...toolbarDragTouchHandlers}
+                        style={({ pressed }) => [styles.toolButton, pressed && styles.toolbarPressed]}
+                      >
+                        <ModeIcon
+                          mode={tool.key}
+                          active={active}
+                          color={active ? TOOLBAR_SELECTED : TOOLBAR_ICON_IDLE}
+                          size={25}
+                        />
+                        {active ? (
+                          <View
+                            style={[
+                              styles.toolUnderline,
+                              toolbarVertical && styles.toolUnderlineVertical,
+                              toolbarOnRight && styles.toolUnderlineVerticalRight,
+                            ]}
+                          />
+                        ) : null}
+                      </Pressable>
+                    );
+                  })}
+                </View>
+
+                <View style={[styles.vDivider, toolbarVertical && styles.hDivider]} />
+
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Hand — move canvas"
+                  accessibilityState={{ selected: mode === 'scroll' }}
+                  onPress={() => runToolbarPress(() => changeMode(mode === 'scroll' ? 'write' : 'scroll'))}
+                  hitSlop={TOOLBAR_ICON_HIT_SLOP}
+                  {...toolbarDragResponder.panHandlers}
+                  {...toolbarDragTouchHandlers}
+                  style={({ pressed }) => [styles.iconToolButton, pressed && styles.toolbarPressed]}
+                >
+                  <ToolbarGlyph
+                    name="hand"
+                    color={mode === 'scroll' ? TOOLBAR_SELECTED : TOOLBAR_ICON_IDLE}
+                  />
+                  {mode === 'scroll' ? (
+                    <View
+                      style={[
+                        styles.toolUnderline,
+                        toolbarVertical && styles.toolUnderlineVertical,
+                        toolbarOnRight && styles.toolUnderlineVerticalRight,
+                      ]}
+                    />
+                  ) : null}
+                </Pressable>
+
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Minimize notebook tools"
+                  onPress={() => runToolbarPress(() => setToolbarCollapsed(true))}
+                  hitSlop={TOOLBAR_ICON_HIT_SLOP}
+                  {...toolbarDragResponder.panHandlers}
+                  {...toolbarDragTouchHandlers}
+                  style={({ pressed }) => [
+                    styles.collapseButton,
+                    toolbarVertical && styles.collapseButtonVertical,
+                    pressed && styles.toolbarPressed,
+                  ]}
+                >
+                  <ToolbarGlyph name={toolbarVertical ? 'chevronDown' : 'chevronRight'} color={TOOLBAR_ICON_IDLE} />
+                </Pressable>
+              </View>
+
+              {toolbarHasContext ? (
+                <Animated.View
+                  style={[
+                    styles.contextToolbarRow,
+                    toolbarVertical && styles.contextToolbarPanel,
+                    toolbarVertical && toolbarOnRight && styles.contextToolbarPanelRight,
+                    toolbarVertical && { width: toolbarContextWidth },
+                    {
+                      opacity: Animated.multiply(
+                        toolbarTransition.interpolate({
+                          inputRange: [0, 0.65, 1],
+                          outputRange: [0, 0, 1],
+                        }),
+                        contextFade,
+                      ),
+                    },
+                  ]}
+                >
+                  {mode === 'write' || mode === 'highlight' ? (
+                    <>
+                      <Text style={styles.contextLabel}>{mode === 'highlight' ? 'Highlight' : 'Pen'}</Text>
+                      <View style={styles.swatchGroup}>
+                        {(mode === 'highlight' ? HIGHLIGHTER_COLORS : PEN_COLORS).map((option) => {
+                          const selectedColor = mode === 'highlight' ? highlighterColor : penColor;
+                          const isActive = selectedColor === option.value;
+                          return (
+                            <Pressable
+                              key={option.key}
+                              accessibilityRole="button"
+                              accessibilityLabel={`${mode === 'highlight' ? 'Highlighter' : 'Pen'} colour ${option.key}`}
+                              accessibilityState={{ selected: isActive }}
+                              onPress={() =>
+                                runToolbarPress(() =>
+                                  mode === 'highlight'
+                                    ? setHighlighterColor(option.value)
+                                    : setPenColor(option.value),
+                                )
+                              }
+                              {...toolbarDragResponder.panHandlers}
+                              {...toolbarDragTouchHandlers}
+                              style={({ pressed }) => [styles.inkSwatch, pressed && styles.toolbarPressed]}
+                            >
+                              <View style={[StyleSheet.absoluteFill, styles.inkSwatchFill, { backgroundColor: option.value }]} />
+                              {isActive ? <View style={styles.inkSwatchRing} /> : null}
+                              {isActive ? <ToolbarGlyph name="pen" color={colors.pearlWhite} size={13} /> : null}
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                      <View style={styles.vDivider} />
+                      <View style={styles.nibGroup}>
+                        {(mode === 'highlight' ? HIGHLIGHTER_WIDTHS : PEN_WIDTHS).map((option) => {
+                          const selectedWidth = mode === 'highlight' ? highlighterWidth : penWidth;
+                          const active = selectedWidth === option.value;
+                          return (
+                            <Pressable
+                              key={option.key}
+                              accessibilityRole="button"
+                              accessibilityLabel={`${mode === 'highlight' ? 'Highlighter' : 'Pen'} width ${option.key}`}
+                              accessibilityState={{ selected: active }}
+                              onPress={() =>
+                                runToolbarPress(() =>
+                                  mode === 'highlight'
+                                    ? setHighlighterWidth(option.value)
+                                    : setPenWidth(option.value),
+                                )
+                              }
+                              {...toolbarDragResponder.panHandlers}
+                              {...toolbarDragTouchHandlers}
+                              style={({ pressed }) => [styles.nib, active && styles.nibActive, pressed && styles.toolbarPressed]}
+                            >
+                              <View
+                                style={{
+                                  width: option.dot,
+                                  height: option.dot,
+                                  borderRadius: option.dot / 2,
+                                  backgroundColor: 'rgba(255,255,255,0.92)',
+                                }}
+                              />
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                    </>
+                  ) : null}
+
+                  {mode === 'erase' ? (
+                    <>
+                      <Text style={styles.contextLabel}>Size</Text>
+                      <View style={styles.nibGroup}>
+                        {ERASER_SIZES.map((option) => {
+                          const active = eraserSizeKey === option.key;
+                          const dot = option.key === 'small' ? 8 : option.key === 'medium' ? 13 : 19;
+                          return (
+                            <Pressable
+                              key={option.key}
+                              accessibilityRole="button"
+                              accessibilityLabel={`${option.label} eraser`}
+                              accessibilityState={{ selected: active }}
+                              onPress={() => runToolbarPress(() => setEraserSizeKey(option.key))}
+                              {...toolbarDragResponder.panHandlers}
+                              {...toolbarDragTouchHandlers}
+                              style={({ pressed }) => [styles.nib, active && styles.nibActive, pressed && styles.toolbarPressed]}
+                            >
+                              <View
+                                style={{
+                                  width: dot,
+                                  height: dot,
+                                  borderRadius: dot / 2,
+                                  backgroundColor: 'rgba(255,255,255,0.92)',
+                                }}
+                              />
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                    </>
+                  ) : null}
+
+                  {mode === 'type' ? (
+                    <Text style={styles.contextHint}>Body · 17 pt · tap the page to add a text box</Text>
+                  ) : null}
+
+                  {mode === 'select' ? (
+                    <Text style={styles.contextHint}>
+                      {hasSelection
+                        ? 'Drag to move · duplicate from the right bar'
+                        : 'Circle objects to select · drag to move · duplicate from the right bar'}
+                    </Text>
+                  ) : null}
+
+                  {mode === 'insert' ? (
+                    <View style={styles.insertRow}>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel="Insert image from Photos"
+                        onPress={() => runToolbarPress(pickImage)}
+                        {...toolbarDragResponder.panHandlers}
+                        {...toolbarDragTouchHandlers}
+                        style={({ pressed }) => [styles.insertButton, pressed && styles.toolbarPressed]}
+                      >
+                        <Svg width={17} height={17} viewBox="0 0 24 24">
+                          <Rect x="7" y="7" width="13" height="13" rx="2.2" stroke={colors.pearlWhite} strokeWidth={1.8} fill="none" />
+                          <Path d="M4 16V5.5A1.5 1.5 0 0 1 5.5 4H16" stroke={colors.pearlWhite} strokeWidth={1.8} strokeLinecap="round" fill="none" />
+                          <Circle cx="11" cy="11.5" r="1.3" fill={colors.pearlWhite} />
+                          <Path d="M8 18l3-3 2.2 2.2L16 14l4 4" stroke={colors.pearlWhite} strokeWidth={1.6} strokeLinejoin="round" fill="none" />
+                        </Svg>
+                        <Text style={styles.insertButtonLabel}>Choose from Photos</Text>
+                      </Pressable>
+                      <Text style={styles.contextHint}>Insert a screenshot or image</Text>
+                    </View>
+                  ) : null}
+                </Animated.View>
+              ) : null}
+            </Animated.View>
+          </Animated.View>
+
+          {/* Right-hand actions: history always visible; selection actions appear beside it. */}
+          {effectiveToolbarCollapsed ? null : (
+            <>
+              <View
+                style={[
+                  styles.toolbarSurface,
+                  styles.rightPill,
+                  toolbarVertical && styles.actionPillVertical,
+                ]}
+                {...toolbarDragResponder.panHandlers}
+                {...toolbarDragTouchHandlers}
+              >
+                <NavySurface
+                  width={toolbarVertical ? TOOLBAR_VERTICAL_ACTION_WIDTH : TOOLBAR_HISTORY_PILL_WIDTH}
+                  height={toolbarVertical ? TOOLBAR_HISTORY_PILL_WIDTH : 60}
+                />
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Undo last action"
+                  accessibilityState={{ disabled: !canUndo }}
+                  onPress={() => runToolbarPress(undo)}
+                  disabled={!canUndo}
+                  hitSlop={TOOLBAR_ICON_HIT_SLOP}
+                  {...toolbarDragResponder.panHandlers}
+                  {...toolbarDragTouchHandlers}
+                  style={({ pressed }) => [
+                    styles.iconToolButton,
+                    !canUndo && styles.iconToolButtonDisabled,
+                    pressed && canUndo && styles.toolbarPressed,
+                  ]}
+                >
+                  <ToolbarGlyph name="undo" color={canUndo ? TOOLBAR_ICON_IDLE : TOOLBAR_ICON_DISABLED} />
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Redo last undone action"
+                  accessibilityState={{ disabled: !canRedo }}
+                  onPress={() => runToolbarPress(redo)}
+                  disabled={!canRedo}
+                  hitSlop={TOOLBAR_ICON_HIT_SLOP}
+                  {...toolbarDragResponder.panHandlers}
+                  {...toolbarDragTouchHandlers}
+                  style={({ pressed }) => [
+                    styles.iconToolButton,
+                    !canRedo && styles.iconToolButtonDisabled,
+                    pressed && canRedo && styles.toolbarPressed,
+                  ]}
+                >
+                  <ToolbarGlyph name="redo" color={canRedo ? TOOLBAR_ICON_IDLE : TOOLBAR_ICON_DISABLED} />
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={hasSelection ? 'Delete selected' : 'Clear page'}
+                  accessibilityState={{ disabled: !canClear }}
+                  onPress={() => runToolbarPress(handleTrashPress)}
+                  disabled={!canClear}
+                  hitSlop={TOOLBAR_ICON_HIT_SLOP}
+                  {...toolbarDragResponder.panHandlers}
+                  {...toolbarDragTouchHandlers}
+                  style={({ pressed }) => [
+                    styles.iconToolButton,
+                    !canClear && styles.iconToolButtonDisabled,
+                    pressed && canClear && styles.toolbarPressed,
+                  ]}
+                >
+                  <ToolbarGlyph name="more" color={canClear ? TOOLBAR_ICON_IDLE : TOOLBAR_ICON_DISABLED} />
+                </Pressable>
+              </View>
+              {hasSelection ? (
+                <View
+                  style={[
+                    styles.toolbarSurface,
+                    styles.selectionPill,
+                    toolbarVertical && styles.selectionPillVertical,
+                  ]}
+                  {...toolbarDragResponder.panHandlers}
+                  {...toolbarDragTouchHandlers}
+                >
+                  <NavySurface
+                    width={toolbarVertical ? TOOLBAR_VERTICAL_ACTION_WIDTH : TOOLBAR_SELECTION_PILL_WIDTH}
+                    height={toolbarVertical ? TOOLBAR_SELECTION_PILL_WIDTH : 60}
+                  />
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Duplicate selected"
+                    onPress={() => runToolbarPress(duplicateSelected)}
+                    hitSlop={TOOLBAR_ICON_HIT_SLOP}
+                    {...toolbarDragResponder.panHandlers}
+                    {...toolbarDragTouchHandlers}
+                    style={({ pressed }) => [styles.iconToolButton, pressed && styles.toolbarPressed]}
+                  >
+                    <ToolbarGlyph name="duplicate" color={TOOLBAR_ICON_IDLE} />
+                  </Pressable>
+                </View>
+              ) : null}
+            </>
+          )}
+            </>
+            )}
+          </Animated.View>
+        </GestureDetector>
+      ) : null}
 
       {__DEV__ && editable && lastPointerType ? (
         <View style={styles.pointerDebug} pointerEvents="none">
@@ -975,202 +3678,580 @@ const styles = StyleSheet.create({
     flex: 1,
   },
 
-  // ---- Toolbar ----
-  toolbar: {
+  // ---- Independent floating toolbar overlay (unified navy, matches Live Caption) ----
+  floatingToolbarWrap: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    zIndex: 20,
     flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: TOOLBAR_RIGHT_PILL_GAP,
+    overflow: 'visible',
+  },
+  // Vertical dock: rail edge-column and inward card-column sit side by side, centred on the
+  // cross (vertical) axis so the context card aligns with the rail's middle.
+  floatingToolbarWrapVertical: {
     alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: spacing.md,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-    backgroundColor: colors.surface,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
   },
-  toolbarLeft: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: spacing.md,
+  // Right dock mirrors the layout so the rail still hugs the screen edge.
+  floatingToolbarWrapRight: {
+    flexDirection: 'row-reverse',
   },
-  toolbarRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-  },
-  segment: {
-    flexDirection: 'row',
-    backgroundColor: colors.surfaceMuted,
-    borderRadius: radius.md,
-    padding: 3,
-    gap: 3,
-  },
-  segmentBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: spacing.md,
-    paddingVertical: 8,
-    borderRadius: radius.sm,
-  },
-  segmentBtnActive: {
-    backgroundColor: colors.deepNavy,
-  },
-  segmentText: {
-    fontSize: fontSize.sm,
-    fontWeight: '700',
-    color: colors.deepNavy,
-  },
-  segmentTextActive: {
-    color: colors.pearlWhite,
-  },
-  toolGroup: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
-  },
-  swatch: {
-    width: 34,
-    height: 34,
-    borderRadius: radius.pill,
-    borderWidth: 2,
-    borderColor: 'transparent',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  swatchActive: {
-    borderColor: colors.deepNavy,
-  },
-  swatchDot: {
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-  },
-  widthBtn: {
-    width: 38,
-    height: 38,
-    borderRadius: radius.md,
-    backgroundColor: colors.surfaceMuted,
+  toolbarSurface: {
     borderWidth: 1,
-    borderColor: 'transparent',
-    alignItems: 'center',
-    justifyContent: 'center',
+    borderColor: TOOLBAR_BORDER_COLOR,
+    overflow: 'hidden',
+    backgroundColor: TOOLBAR_NAVY_BOTTOM,
+    shadowColor: 'rgba(8,16,34,0.4)',
+    shadowOffset: { width: 0, height: 16 },
+    shadowOpacity: 1,
+    shadowRadius: 38,
+    elevation: 10,
   },
-  widthBtnActive: {
-    backgroundColor: colors.iceTint,
-    borderColor: colors.iceBlue,
-  },
-  eraserSizeBtn: {
-    minWidth: 56,
-    height: 38,
-    borderRadius: radius.md,
-    backgroundColor: colors.surfaceMuted,
-    borderWidth: 1,
-    borderColor: 'transparent',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: spacing.sm,
-  },
-  eraserSizeText: {
-    fontSize: fontSize.xs,
-    fontWeight: '800',
-    color: colors.deepNavy,
-  },
-
-  // ---- Dedicated eraser-size bar (Phase: NotebookCanvas eraser fix) ----
-  // Lives below the primary toolbar, outside the GestureDetector.
-  eraserSizeBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm + 2,
-    backgroundColor: colors.surface,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-  },
-  eraserSizeBarLabel: {
-    fontSize: fontSize.xs,
-    fontWeight: '800',
-    letterSpacing: 0.4,
-    color: colors.textTertiary,
-    textTransform: 'uppercase',
-  },
-  eraserSizeSegment: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
-    backgroundColor: colors.surfaceMuted,
-    borderRadius: radius.md,
-    padding: 3,
-  },
-  eraserSizeSegmentBtn: {
-    minWidth: 78,
-    minHeight: 38,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.xs,
-    paddingHorizontal: spacing.md,
-    borderRadius: radius.sm,
+  navySurfaceLayer: {
+    ...StyleSheet.absoluteFillObject,
     backgroundColor: 'transparent',
   },
-  eraserSizeSegmentBtnActive: {
-    backgroundColor: colors.deepNavy,
+  toolbarShell: {
+    borderRadius: TOOLBAR_SHELL_RADIUS,
   },
-  eraserSizeSegmentBtnPressed: {
-    opacity: 0.85,
-    transform: [{ scale: 0.97 }],
+  collapsedContent: {
+    ...StyleSheet.absoluteFillObject,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 9,
+    gap: 4,
   },
-  eraserSizeSegmentText: {
-    fontSize: fontSize.sm,
-    fontWeight: '800',
-    color: colors.deepNavy,
+  collapsedContentVertical: {
+    flexDirection: 'column',
+    paddingHorizontal: 0,
+    paddingVertical: 9,
   },
-  eraserSizeSegmentTextActive: {
-    color: colors.pearlWhite,
+  expandedContent: {
+    ...StyleSheet.absoluteFillObject,
   },
-  eraserSizeIndicator: {
-    backgroundColor: colors.deepNavy,
+  expandedContentVertical: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
   },
-  eraserSizeIndicatorActive: {
-    backgroundColor: colors.pearlWhite,
+  expandedContentVerticalRight: {
+    flexDirection: 'row-reverse',
   },
-  toolBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: radius.md,
-    backgroundColor: colors.surfaceMuted,
+  primaryToolbarRow: {
+    height: TOOLBAR_PRIMARY_HEIGHT,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  primaryToolbarRail: {
+    width: TOOLBAR_VERTICAL_RAIL_WIDTH,
+    height: '100%',
+    flexDirection: 'column',
+    alignItems: 'center',
+  },
+  expandedDragHandle: {
+    width: 22,
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRightWidth: StyleSheet.hairlineWidth,
+    borderRightColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  expandedDragHandleVertical: {
+    width: '100%',
+    height: 22,
+    borderRightWidth: 0,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  // Grip — design `.grip`: two columns × three 3pt dots, gap 3.
+  gripDots: {
+    flexDirection: 'row',
+    gap: 3,
+  },
+  gripCol: {
+    gap: 3,
+  },
+  gripDot: {
+    width: 3,
+    height: 3,
+    borderRadius: 1.5,
+    backgroundColor: 'rgba(255, 255, 255, 0.30)',
+  },
+  collapsedGrip: {
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingRight: 3,
+  },
+  // Current-tool tag — design `.tbmin .cur` (46, tinted blue, radius 11).
+  collapsedCur: {
+    width: 46,
+    height: 46,
+    borderRadius: TOOLBAR_CHIP_RADIUS,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(95,134,232,0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(95,134,232,0.3)',
+  },
+  collapsedExpand: {
+    width: 38,
+    height: 46,
+    borderRadius: TOOLBAR_CHIP_RADIUS,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  toolBtnDisabled: {
-    opacity: 0.4,
-  },
-  // Scroll fallback — available, but intentionally quieter than the core tools.
-  fallbackBtn: {
+  primaryTools: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: spacing.md,
-    paddingVertical: 9,
-    borderRadius: radius.md,
-    backgroundColor: colors.surfaceMuted,
-    borderWidth: 1,
-    borderColor: colors.border,
+    gap: 2,
+    paddingHorizontal: 4,
   },
-  fallbackBtnActive: {
-    backgroundColor: colors.deepNavy,
-    borderColor: colors.deepNavy,
+  primaryToolsVertical: {
+    flexDirection: 'column',
+    paddingHorizontal: 0,
+    paddingVertical: 4,
+    gap: TOOLBAR_VERTICAL_BUTTON_GAP,
   },
-  fallbackText: {
-    fontSize: fontSize.xs,
+  /** Primary tool button — design `.tool` (48 × 46, radius 11). */
+  toolButton: {
+    width: 48,
+    height: 46,
+    borderRadius: TOOLBAR_CHIP_RADIUS,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  /** Icon button — design `.icbtn` (44 × 44, radius 11). Hand · Minimize · right pill. */
+  iconToolButton: {
+    width: 44,
+    height: 44,
+    minWidth: 44,
+    minHeight: 44,
+    borderRadius: TOOLBAR_CHIP_RADIUS,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  toolUnderline: {
+    position: 'absolute',
+    bottom: 3,
+    width: 20,
+    height: 3,
+    borderRadius: 3,
+    backgroundColor: TOOLBAR_SELECTED,
+  },
+  toolUnderlineVertical: {
+    top: 13,
+    right: 3,
+    bottom: undefined,
+    width: 3,
+    height: 20,
+  },
+  toolUnderlineVerticalRight: {
+    right: undefined,
+    left: 3,
+  },
+  iconToolButtonDisabled: {
+    opacity: 0.32,
+  },
+  vDivider: {
+    width: 1,
+    height: 30,
+    backgroundColor: TOOLBAR_DIVIDER_COLOR,
+    marginHorizontal: 8,
+  },
+  hDivider: {
+    width: 30,
+    height: 1,
+    marginHorizontal: 0,
+    marginVertical: 8,
+  },
+  vDividerSmall: {
+    width: StyleSheet.hairlineWidth,
+    height: 22,
+    backgroundColor: TOOLBAR_DIVIDER_COLOR,
+  },
+  contextToolbarRow: {
+    height: TOOLBAR_CONTEXT_HEIGHT,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 14,
+    paddingHorizontal: 22,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: TOOLBAR_DIVIDER_COLOR,
+  },
+  contextToolbarPanel: {
+    height: '100%',
+    justifyContent: 'center',
+    flexWrap: 'wrap',
+    rowGap: 12,
+    borderTopWidth: 0,
+    borderLeftWidth: StyleSheet.hairlineWidth,
+    borderLeftColor: TOOLBAR_DIVIDER_COLOR,
+    paddingHorizontal: 18,
+  },
+  contextToolbarPanelRight: {
+    borderLeftWidth: 0,
+    borderRightWidth: StyleSheet.hairlineWidth,
+    borderRightColor: TOOLBAR_DIVIDER_COLOR,
+  },
+  /** Ink swatch row — design `.swatches` gap 11. */
+  swatchGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  /** Width / size nib row — design `.nibs` gap 9. */
+  nibGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  /** Ink swatch — design `.sw` (28 circle; selected ring sits 4pt outside). */
+  inkSwatch: {
+    width: 28,
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  inkSwatchFill: {
+    borderRadius: 14,
+  },
+  inkSwatchRing: {
+    position: 'absolute',
+    top: -4,
+    left: -4,
+    right: -4,
+    bottom: -4,
+    borderRadius: 18,
+    borderWidth: 2.5,
+    borderColor: TOOLBAR_SELECTED,
+  },
+  /** Width / eraser-size nib — design `.nib` (38 circle, 2pt selected ring). */
+  nib: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: 'transparent',
+  },
+  nibActive: {
+    borderColor: TOOLBAR_SELECTED,
+  },
+  contextLabel: {
+    fontSize: 11,
+    lineHeight: 13,
     fontWeight: '700',
-    color: colors.textTertiary,
+    letterSpacing: 1.05,
+    textTransform: 'uppercase',
+    color: 'rgba(255,255,255,0.36)',
+    marginRight: 3,
   },
-  fallbackTextActive: {
+  contextHint: {
+    fontSize: 13,
+    lineHeight: 17,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.46)',
+  },
+  insertRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+  },
+  insertButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(255,255,255,0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.15)',
+    borderRadius: 11,
+    paddingHorizontal: 15,
+    paddingVertical: 9,
+  },
+  insertButtonLabel: {
+    fontSize: 13.5,
+    fontWeight: '600',
     color: colors.pearlWhite,
+  },
+  collapseButton: {
+    width: 34,
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderLeftWidth: StyleSheet.hairlineWidth,
+    borderLeftColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  collapseButtonVertical: {
+    width: '100%',
+    height: 44,
+    borderLeftWidth: 0,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  toolbarPressed: {
+    opacity: 0.7,
+    transform: [{ scale: 0.92 }],
+  },
+  rightPill: {
+    width: TOOLBAR_HISTORY_PILL_WIDTH,
+    borderRadius: TOOLBAR_SHELL_RADIUS,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    paddingHorizontal: 10,
+    height: 60,
+  },
+  actionPillVertical: {
+    width: TOOLBAR_VERTICAL_ACTION_WIDTH,
+    height: TOOLBAR_HISTORY_PILL_WIDTH,
+    flexDirection: 'column',
+    paddingHorizontal: 8,
+    paddingVertical: 10,
+  },
+  selectionPill: {
+    width: TOOLBAR_SELECTION_PILL_WIDTH,
+    borderRadius: TOOLBAR_SHELL_RADIUS,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    paddingHorizontal: 8,
+    height: 60,
+  },
+  selectionPillVertical: {
+    width: TOOLBAR_VERTICAL_ACTION_WIDTH,
+    height: TOOLBAR_SELECTION_PILL_WIDTH,
+    flexDirection: 'column',
+    paddingHorizontal: 8,
+    paddingVertical: 8,
+  },
+
+  // ==== Side-docked vertical toolbar — compact two-column capsule (reference layout) ====
+  // Edge column stacks the main capsule above the separate history / selection capsules,
+  // flush to the screen edge.
+  vEdgeColumn: {
+    flexDirection: 'column',
+    alignItems: 'flex-start',
+    gap: TOOLBAR_VERTICAL_GROUP_GAP,
+  },
+  vEdgeColumnRight: {
+    alignItems: 'flex-end',
+  },
+  // Unified capsule = [tool column | divider | context column] in one navy shell.
+  vCapsule: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    height: TOOLBAR_VERTICAL_CAPSULE_HEIGHT,
+    borderRadius: TOOLBAR_SHELL_RADIUS,
+  },
+  vCapsuleRight: {
+    flexDirection: 'row-reverse',
+  },
+  vToolColumn: {
+    width: TOOLBAR_VERTICAL_TOOL_COL_WIDTH,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+  },
+  /** Primary tool button — 48 × 44, radius 11. */
+  vRailButton: {
+    width: 48,
+    height: 44,
+    borderRadius: TOOLBAR_CHIP_RADIUS,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  /** Soft selected chip behind the active tool icon. */
+  vActiveChip: {
+    position: 'absolute',
+    top: 2,
+    left: 6,
+    right: 6,
+    bottom: 2,
+    borderRadius: TOOLBAR_CHIP_RADIUS,
+    backgroundColor: 'rgba(95,134,232,0.14)',
+  },
+  /** Inward-edge active indicator (no underline). */
+  vActiveIndicator: {
+    position: 'absolute',
+    top: 11,
+    width: 3,
+    height: 22,
+    borderRadius: 2,
+    backgroundColor: TOOLBAR_SELECTED,
+  },
+  vActiveIndicatorLeft: {
+    right: 1,
+  },
+  vActiveIndicatorRight: {
+    left: 1,
+  },
+  vRailDivider: {
+    width: 28,
+    height: 1,
+    backgroundColor: TOOLBAR_DIVIDER_COLOR,
+    marginVertical: 2,
+  },
+  /** Icon button (Hand · Minimize · history · selection) — 44 × 44, radius 11. */
+  vRailIconButton: {
+    width: 44,
+    height: 44,
+    borderRadius: TOOLBAR_CHIP_RADIUS,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  /** Full-height hairline between the two columns. */
+  vColumnDivider: {
+    width: StyleSheet.hairlineWidth,
+    backgroundColor: TOOLBAR_DIVIDER_COLOR,
+    marginVertical: 16,
+  },
+  /** Inward context column — width set inline per active tool. */
+  vContextColumn: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 14,
+  },
+  vContextScroll: {
+    alignSelf: 'stretch',
+    flex: 1,
+  },
+  vContextScrollContent: {
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 8,
+  },
+  vSwatchColumn: {
+    alignItems: 'center',
+    gap: 9,
+  },
+  vNibColumn: {
+    alignItems: 'center',
+    gap: 9,
+  },
+  vCtxDivider: {
+    width: 26,
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: TOOLBAR_DIVIDER_COLOR,
+    marginVertical: 2,
+  },
+  /** Compact side context panel; Text/Select side modes stay icon-only. */
+  vCtxPanel: {
+    alignSelf: 'stretch',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingHorizontal: 0,
+  },
+  vSelectShapePanel: {
+    alignSelf: 'stretch',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+  },
+  vShapeButton: {
+    width: 40,
+    height: 40,
+    borderRadius: TOOLBAR_CHIP_RADIUS,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  vShapeButtonActive: {
+    backgroundColor: 'rgba(95,134,232,0.14)',
+    borderColor: 'rgba(95,134,232,0.42)',
+  },
+  vCtxLabel: {
+    fontSize: 11,
+    lineHeight: 13,
+    fontWeight: '700',
+    letterSpacing: 1.05,
+    textTransform: 'uppercase',
+    color: 'rgba(255,255,255,0.36)',
+  },
+  vCtxTitle: {
+    fontSize: 20,
+    lineHeight: 24,
+    fontWeight: '700',
+    color: colors.pearlWhite,
+  },
+  vCardHint: {
+    fontSize: 11,
+    lineHeight: 14,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.5)',
+    textAlign: 'center',
+  },
+  vCardHintStrong: {
+    fontSize: 13,
+    lineHeight: 16,
+    fontWeight: '600',
+    color: colors.pearlWhite,
+    textAlign: 'center',
+  },
+  vInsertButton: {
+    alignSelf: 'stretch',
+    alignItems: 'center',
+    gap: 7,
+    backgroundColor: 'rgba(255,255,255,0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.15)',
+    borderRadius: 12,
+    paddingHorizontal: 6,
+    paddingVertical: 12,
+  },
+  vInsertLabel: {
+    fontSize: 12,
+    lineHeight: 15,
+    fontWeight: '600',
+    color: colors.pearlWhite,
+    textAlign: 'center',
+  },
+  // Separate action capsule (history; reused for the contextual selection actions).
+  vActionCapsule: {
+    width: TOOLBAR_VERTICAL_TOOL_COL_WIDTH,
+    borderRadius: 18,
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+    paddingVertical: 8,
+  },
+  // Minimized capsule — two states of the same component, built for the column.
+  vMiniCapsule: {
+    width: TOOLBAR_MINI_CAPSULE_WIDTH,
+    height: TOOLBAR_MINI_CAPSULE_HEIGHT,
+    borderRadius: TOOLBAR_MINIMIZED_RADIUS,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  vMiniGrip: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  vMiniCur: {
+    width: 44,
+    height: 44,
+    borderRadius: TOOLBAR_CHIP_RADIUS,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(95,134,232,0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(95,134,232,0.3)',
+  },
+  vMiniExpand: {
+    width: 44,
+    height: 34,
+    borderRadius: TOOLBAR_CHIP_RADIUS,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   // ---- Paper ----
   scroll: {
@@ -1209,6 +4290,37 @@ const styles = StyleSheet.create({
     lineHeight: 26,
     fontWeight: '500',
     color: colors.textPrimary,
+  },
+  imageObject: {
+    position: 'absolute',
+    borderWidth: 1.5,
+    borderColor: 'transparent',
+  },
+  imageObjectSelected: {
+    borderColor: '#5F86E8',
+    backgroundColor: 'rgba(95,134,232,0.04)',
+  },
+  imageObjectMedia: {
+    width: '100%',
+    height: '100%',
+  },
+  // Corner handle: a comfortable ~36pt touch target (its own absolutely-positioned
+  // view, NOT clipped by the image) with a small centred dot.
+  imageCornerHit: {
+    position: 'absolute',
+    width: IMAGE_CORNER_HANDLE_HALF * 2,
+    height: IMAGE_CORNER_HANDLE_HALF * 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  imageHandleDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#5F86E8',
+    // White ring keeps the dot visible against both bright and dark images.
+    borderWidth: 2,
+    borderColor: colors.pearlWhite,
   },
   emptyHint: {
     position: 'absolute',

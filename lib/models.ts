@@ -41,6 +41,23 @@ export type NoteStroke = {
   createdAt: string;
 };
 
+/** An image object placed on a notebook page. */
+export type NoteImage = {
+  id: string;
+  /** Local file URI (expo-image-picker result). */
+  uri: string;
+  /** X position in canvas coordinates. */
+  x: number;
+  /** Y position in canvas coordinates. */
+  y: number;
+  /** Display width in canvas units. */
+  width: number;
+  /** Display height in canvas units. */
+  height: number;
+  /** ISO timestamp. */
+  createdAt: string;
+};
+
 /** A user-created course. */
 export type Course = {
   id: string;
@@ -116,6 +133,8 @@ export type Lecture = {
   notes: string;
   /** Handwritten strokes for this lecture's notebook page. */
   noteStrokes?: NoteStroke[];
+  /** Image objects placed on the notebook page. */
+  noteImages?: NoteImage[];
   /** ISO timestamp of the last notes edit. */
   noteUpdatedAt?: string;
 

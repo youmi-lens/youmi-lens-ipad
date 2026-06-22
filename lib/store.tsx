@@ -28,6 +28,7 @@ import {
   type LectureMaterialLink,
   type MaterialAnnotationStroke,
   type MaterialPageAnnotation,
+  type NoteImage,
   type NoteStroke,
 } from './models';
 import { supabase } from './supabase';
@@ -67,6 +68,8 @@ export type NewLectureInput = {
   notes?: string;
   /** Handwritten strokes captured during recording (Mini Workspace). */
   noteStrokes?: NoteStroke[];
+  /** Image objects placed on the notebook page during recording. */
+  noteImages?: NoteImage[];
 };
 
 /** Result of attempting to soft-delete a course. */
@@ -666,9 +669,11 @@ export function DataProvider({ children }: { children: ReactNode }) {
       liveTranscript: input.liveTranscript ?? '',
       notes: input.notes ?? '',
       noteStrokes: input.noteStrokes ?? [],
+      noteImages: input.noteImages ?? [],
       noteUpdatedAt:
         (input.notes && input.notes.length > 0) ||
-        (input.noteStrokes && input.noteStrokes.length > 0)
+        (input.noteStrokes && input.noteStrokes.length > 0) ||
+        (input.noteImages && input.noteImages.length > 0)
           ? new Date().toISOString()
           : undefined,
     };

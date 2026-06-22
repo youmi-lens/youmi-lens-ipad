@@ -22,7 +22,7 @@ import {
 } from 'react';
 
 import { useAuth } from './auth';
-import type { NoteStroke } from './models';
+import type { NoteImage, NoteStroke } from './models';
 
 /** One "important moment" mark captured during recording. */
 export type RecordingMark = {
@@ -40,8 +40,11 @@ type RecordingNotesValue = {
   draftNotes: string;
   /** Handwritten strokes for the in-progress recording. */
   draftStrokes: NoteStroke[];
+  /** Image objects placed on the notebook page during recording. */
+  draftImages: NoteImage[];
   setDraftNotes: (text: string) => void;
   setDraftStrokes: (strokes: NoteStroke[]) => void;
+  setDraftImages: (images: NoteImage[]) => void;
   /** Important-moment marks for the in-progress recording. */
   marks: RecordingMark[];
   /** Authoritative recorder clock mirrored from the Recording screen. */
@@ -68,6 +71,7 @@ export function RecordingNotesProvider({ children }: { children: ReactNode }) {
   const previousUserId = useRef<string | null>(null);
   const [draftNotes, setDraftNotes] = useState('');
   const [draftStrokes, setDraftStrokes] = useState<NoteStroke[]>([]);
+  const [draftImages, setDraftImages] = useState<NoteImage[]>([]);
   const [marks, setMarks] = useState<RecordingMark[]>([]);
   const [currentDurationMillis, setCurrentDurationMillisState] = useState(0);
 
@@ -97,6 +101,7 @@ export function RecordingNotesProvider({ children }: { children: ReactNode }) {
   const resetDraft = useCallback(() => {
     setDraftNotes('');
     setDraftStrokes([]);
+    setDraftImages([]);
     setMarks([]);
     setCurrentDurationMillisState(0);
   }, []);
@@ -113,8 +118,10 @@ export function RecordingNotesProvider({ children }: { children: ReactNode }) {
     () => ({
       draftNotes,
       draftStrokes,
+      draftImages,
       setDraftNotes,
       setDraftStrokes,
+      setDraftImages,
       marks,
       currentDurationMillis,
       setCurrentDurationMillis,
@@ -126,6 +133,7 @@ export function RecordingNotesProvider({ children }: { children: ReactNode }) {
     [
       draftNotes,
       draftStrokes,
+      draftImages,
       marks,
       currentDurationMillis,
       setCurrentDurationMillis,

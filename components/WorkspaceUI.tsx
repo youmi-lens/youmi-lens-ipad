@@ -1,8 +1,9 @@
 import { Ionicons } from '@expo/vector-icons';
 import { ComponentProps, ReactNode } from 'react';
-import { Pressable, StyleSheet, Text, View, ViewStyle } from 'react-native';
+import { StyleSheet, Text, View, ViewStyle } from 'react-native';
 
 import { colors, fontSize, radius, spacing } from '@/constants/theme';
+import { PressableScale } from '@/components/PressableScale';
 
 type IconName = ComponentProps<typeof Ionicons>['name'];
 
@@ -78,14 +79,16 @@ export function GlassIconButton({
   style?: ViewStyle;
 }) {
   return (
-    <Pressable
+    <PressableScale
       accessibilityRole="button"
       onPress={onPress}
-      style={({ pressed }) => [styles.iconButton, label && styles.iconButtonLabelled, pressed && styles.pressed, style]}
+      scaleTo={0.92}
+      opacityTo={0.82}
+      style={[styles.iconButton, label && styles.iconButtonLabelled, style]}
     >
       {icon ? <Ionicons name={icon} size={18} color={colors.ink} /> : null}
       {label ? <Text style={styles.iconButtonText}>{label}</Text> : null}
-    </Pressable>
+    </PressableScale>
   );
 }
 

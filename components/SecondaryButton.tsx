@@ -1,8 +1,9 @@
 import { Ionicons } from '@expo/vector-icons';
 import { ComponentProps } from 'react';
-import { Pressable, StyleSheet, Text, View, ViewStyle } from 'react-native';
+import { StyleSheet, Text, View, ViewStyle } from 'react-native';
 
 import { colors, fontSize, spacing } from '@/constants/theme';
+import { PressableScale } from '@/components/PressableScale';
 
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
 
@@ -34,17 +35,18 @@ export function SecondaryButton({
   const fg = danger ? colors.recordingRed : colors.textPrimary;
 
   return (
-    <Pressable
+    <PressableScale
       accessibilityRole="button"
       accessibilityState={{ disabled }}
       onPress={onPress}
       disabled={disabled}
-      style={({ pressed }) => [
+      scaleTo={0.97}
+      opacityTo={0.85}
+      style={[
         styles.base,
         tone === 'ice' ? styles.ice : styles.plain,
         danger && styles.danger,
         disabled && styles.disabled,
-        pressed && !disabled && styles.pressed,
         style,
       ]}
     >
@@ -52,7 +54,7 @@ export function SecondaryButton({
         {icon ? <Ionicons name={icon} size={19} color={fg} /> : null}
         <Text style={[styles.label, { color: fg }]}>{label}</Text>
       </View>
-    </Pressable>
+    </PressableScale>
   );
 }
 

@@ -53,6 +53,7 @@ export default function RecordingScreen() {
   const {
     draftNotes,
     draftStrokes,
+    draftImages,
     marks,
     addMarkMillis,
     setCurrentDurationMillis,
@@ -314,6 +315,7 @@ export default function RecordingScreen() {
       liveTranscript: isGuest ? '' : finalCaptions.join('\n'),
       notes: draftNotes,
       noteStrokes: draftStrokes,
+      noteImages: draftImages,
     });
     resetDraft();
 

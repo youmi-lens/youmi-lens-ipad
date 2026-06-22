@@ -85,7 +85,14 @@ function AuthGate() {
       </Stack.Protected>
       <Stack.Protected guard={canUseApp}>
         <Stack.Screen name="(tabs)" />
-        <Stack.Screen name="create-course" options={{ presentation: 'modal' }} />
+        <Stack.Screen
+          name="create-course"
+          options={{
+            presentation: 'transparentModal',
+            animation: 'fade',
+            contentStyle: { backgroundColor: 'transparent' },
+          }}
+        />
         <Stack.Screen name="recording" />
         <Stack.Screen name="mini-caption" options={{ animation: 'fade' }} />
         <Stack.Screen name="processing" />

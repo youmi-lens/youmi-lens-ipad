@@ -2,7 +2,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { ComponentProps } from 'react';
 import {
   ActivityIndicator,
-  Pressable,
   StyleSheet,
   Text,
   View,
@@ -10,6 +9,7 @@ import {
 } from 'react-native';
 
 import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
+import { PressableScale } from '@/components/PressableScale';
 
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
 
@@ -42,16 +42,17 @@ export function PrimaryButton({
   const isInactive = disabled || loading;
 
   return (
-    <Pressable
+    <PressableScale
       accessibilityRole="button"
       accessibilityState={{ disabled: isInactive }}
       onPress={onPress}
       disabled={isInactive}
-      style={({ pressed }) => [
+      scaleTo={0.97}
+      opacityTo={0.9}
+      style={[
         styles.base,
         isLarge ? styles.large : styles.medium,
         isInactive && styles.inactive,
-        pressed && !isInactive && styles.pressed,
         style,
       ]}
     >
@@ -67,7 +68,7 @@ export function PrimaryButton({
           </>
         )}
       </View>
-    </Pressable>
+    </PressableScale>
   );
 }
 
