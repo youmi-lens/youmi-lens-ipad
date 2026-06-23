@@ -443,6 +443,7 @@ export default function LectureDetailScreen() {
             onStrokesChange={setStrokesDraft}
             onTextChange={setNotesDraft}
             onImagesChange={setImagesDraft}
+            showFixedHistory
           />
         </SafeAreaView>
       </Modal>

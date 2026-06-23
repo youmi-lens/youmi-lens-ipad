@@ -435,6 +435,7 @@ export default function MiniCaptionScreen() {
             onTextChange={setDraftNotes}
             onImagesChange={setDraftImages}
             avoidRects={notebookAvoidRects}
+            showFixedHistory
           />
         </View>
       </SafeAreaView>

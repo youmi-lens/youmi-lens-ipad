@@ -82,6 +82,7 @@ const TOOLBAR_BORDER_COLOR = 'rgba(255,255,255,0.07)';
 const TOOLBAR_SELECTED = '#5F86E8';
 const TOOLBAR_ICON_IDLE = 'rgba(255,255,255,0.62)';
 const TOOLBAR_ICON_DISABLED = 'rgba(255,255,255,0.26)';
+const TOOLBAR_DELETE_RED = '#FF8A8A';
 const TOOLBAR_DIVIDER_COLOR = 'rgba(255,255,255,0.11)';
 const TOOLBAR_SHELL_RADIUS = 22;
 const TOOLBAR_MINIMIZED_RADIUS = 16;
@@ -118,7 +119,17 @@ const ERASER_SIZES: { key: EraserSizeKey; label: string; radius: number }[] = [
 const LINE_GAP = 34;
 const MARGIN_X = 56;
 const MIN_POINT_DISTANCE = 1.8;
-/** The notebook is one long ruled page — roughly three iPad screens tall. */
+/**
+ * Page-based paper. The notebook is a vertical stack of A4-like sheets in one
+ * continuous coordinate space: a stroke/image at canvas-y N belongs to the sheet
+ * whose band contains N. Sheet height = sheet width × PAGE_ASPECT, with a small
+ * gap between sheets so it reads as stacked paper rather than one endless canvas.
+ * Total pages = (sheets that contain content) + 1 trailing blank sheet, so a new
+ * blank page appears automatically the moment the user writes on the last one.
+ * PAGE_HEIGHT remains the pre-layout fallback (before the container is measured).
+ */
+const PAGE_ASPECT = 1.414; // height / width ≈ A4
+const PAGE_GAP = 22; // gap shown between stacked sheets
 const PAGE_HEIGHT = 3200;
 /** How long the Pen / Eraser badge stays on screen after a double-tap. */
 const TOOL_TOAST_MS = 1100;
@@ -144,17 +155,19 @@ const TOOLBAR_DRAG_THRESHOLD = 8;
 // lands within the left/right band of the usable width is treated as explicit
 // intent to dock to that side edge (vertical layout), winning over top/bottom
 // corner anchors. Generous so the user never has to hit a tiny target.
-const TOOLBAR_SIDE_EDGE_ZONE_RATIO = 0.2; // rightmost / leftmost 20% of width
-const TOOLBAR_SIDE_EDGE_ZONE_MIN = 220; // ...but at least 220pt
+const TOOLBAR_SIDE_EDGE_ZONE_RATIO = 0.28; // rightmost / leftmost 28% of width
+const TOOLBAR_SIDE_EDGE_ZONE_MIN = 300; // ...but at least 300pt
 const TOOLBAR_VERT_EDGE_ZONE_RATIO = 0.2; // top / bottom 20% of height
 const TOOLBAR_VERT_EDGE_ZONE_MIN = 150; // ...but at least 150pt
 const TOOLBAR_VERTICAL_RAIL_WIDTH = 60;
 const TOOLBAR_VERTICAL_CONTEXT_WIDTH = 360;
 const TOOLBAR_VERTICAL_ACTION_WIDTH = 60;
 const TOOLBAR_VERTICAL_BUTTON_GAP = 2;
-/** History pill (3 × 44pt + 2 × 2pt gaps + 16pt padding) plus contextual selection pill when visible. */
-const TOOLBAR_HISTORY_PILL_WIDTH = 156;
-const TOOLBAR_SELECTION_PILL_WIDTH = 60;
+// Undo/Redo now live in a fixed top-right control (not the draggable toolbar),
+// so the action pill holds only the context-aware Trash (1 × 44 + padding) and
+// the selection pill holds Duplicate + Delete (2 × 44 + gap + padding).
+const TOOLBAR_HISTORY_PILL_WIDTH = 64;
+const TOOLBAR_SELECTION_PILL_WIDTH = 106;
 const TOOLBAR_RIGHT_PILL_GAP = 12;
 
 // ---- Side-docked vertical toolbar (Concept C: stable rail + detached inward cards) ----
@@ -169,8 +182,7 @@ const TOOLBAR_VERTICAL_CONTEXT_WIDE = 76; // Text / Select / Insert (compact lab
 const TOOLBAR_VERTICAL_COL_DIVIDER = 1;
 const TOOLBAR_VERTICAL_CAPSULE_HEIGHT = 400;
 const TOOLBAR_VERTICAL_GROUP_GAP = 12;
-const TOOLBAR_VERTICAL_ACTION_HEIGHT = 152; // history capsule: 3 stacked icon buttons
-const TOOLBAR_VERTICAL_SELECTION_HEIGHT = 60; // selection capsule: Duplicate only
+const TOOLBAR_VERTICAL_ACTION_HEIGHT = 60; // action capsule: Trash only (Undo/Redo moved to fixed top-right)
 const TOOLBAR_MINI_CAPSULE_WIDTH = 56;
 const TOOLBAR_MINI_CAPSULE_HEIGHT = 132;
 const IMAGE_MIN_EDGE = 56;
@@ -184,6 +196,10 @@ const IMAGE_TAP_MAX_DISTANCE = 12;
 const IMAGE_HIT_SLOP = 6;
 /** Half-extent of a corner handle's touch target (so the hit area is ~36pt though the dot is ~8pt). */
 const IMAGE_CORNER_HANDLE_HALF = 18;
+const IMAGE_ACTION_BAR_WIDTH = 104;
+const IMAGE_ACTION_BAR_HEIGHT = 44;
+const IMAGE_ACTION_BAR_GAP = 10;
+const IMAGE_ACTION_BAR_EDGE = 8;
 
 /** One reversible snapshot of all editable notebook content for undo/redo. */
 type NotebookSnapshot = { strokes: NoteStroke[]; images: NoteImage[]; text: string };
@@ -326,12 +342,12 @@ function imageRect(image: NoteImage): NotebookOverlayRect {
   return { x: image.x, y: image.y, width: image.width, height: image.height };
 }
 
-function clampImageGeometry(image: NoteImage, canvasWidth: number): NoteImage {
+function clampImageGeometry(image: NoteImage, canvasWidth: number, canvasHeight: number = PAGE_HEIGHT): NoteImage {
   const safeCanvasWidth = Math.max(canvasWidth, IMAGE_VISIBLE_EDGE * 2);
   const minX = -image.width + IMAGE_VISIBLE_EDGE;
   const maxX = safeCanvasWidth - IMAGE_VISIBLE_EDGE;
   const minY = -image.height + IMAGE_VISIBLE_EDGE;
-  const maxY = PAGE_HEIGHT - IMAGE_VISIBLE_EDGE;
+  const maxY = Math.max(canvasHeight, PAGE_HEIGHT) - IMAGE_VISIBLE_EDGE;
   return {
     ...image,
     x: clamp(image.x, minX, maxX),
@@ -339,7 +355,7 @@ function clampImageGeometry(image: NoteImage, canvasWidth: number): NoteImage {
   };
 }
 
-function resizeImageAroundCenter(image: NoteImage, scale: number, canvasWidth: number): NoteImage {
+function resizeImageAroundCenter(image: NoteImage, scale: number, canvasWidth: number, canvasHeight: number = PAGE_HEIGHT): NoteImage {
   const aspect = image.height / Math.max(image.width, 1);
   const maxEdge = Math.max(
     IMAGE_MIN_EDGE,
@@ -361,6 +377,7 @@ function resizeImageAroundCenter(image: NoteImage, scale: number, canvasWidth: n
       height: nextHeight,
     },
     canvasWidth,
+    canvasHeight,
   );
 }
 
@@ -379,6 +396,7 @@ function resizeImageFromCorner(
   dx: number,
   dy: number,
   canvasWidth: number,
+  canvasHeight: number = PAGE_HEIGHT,
 ): NoteImage {
   const w = Math.max(image.width, 1);
   const h = Math.max(image.height, 1);
@@ -408,6 +426,7 @@ function resizeImageFromCorner(
   return clampImageGeometry(
     { ...image, x: nextX, y: nextY, width: nextWidth, height: nextHeight },
     canvasWidth,
+    canvasHeight,
   );
 }
 
@@ -561,7 +580,8 @@ type ToolbarGlyphName =
   | 'chevronDown'
   | 'select'
   | 'insert'
-  | 'duplicate';
+  | 'duplicate'
+  | 'trash';
 
 /**
  * Toolbar icon glyphs. SVG paths are ported verbatim from the approved design
@@ -668,6 +688,12 @@ function ToolbarGlyphBase({
           <Rect x="9" y="9" width="13" height="13" rx="2.4" stroke={color} strokeWidth={1.8} fill="none" />
           <Path d="M6 17V7.5A1.5 1.5 0 0 1 7.5 6H17" stroke={color} strokeWidth={1.8} strokeLinecap="round" fill="none" />
         </>
+      ) : null}
+      {name === 'trash' ? (
+        <Path
+          d="M7 9h14M11 9V7.5a1.2 1.2 0 0 1 1.2-1.2h3.6a1.2 1.2 0 0 1 1.2 1.2V9M9 9v12.5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9"
+          {...outline}
+        />
       ) : null}
     </Svg>
   );
@@ -1031,6 +1057,8 @@ type NotebookCanvasProps = {
   onImagesChange?: (images: NoteImage[]) => void;
   /** When false: read-only — no toolbar, no input. Defaults to true. */
   editable?: boolean;
+  /** Show the fixed top-right Undo/Redo control (lecture notes editor). Defaults to false. */
+  showFixedHistory?: boolean;
   /** Other floating overlays, in this canvas container's coordinate space. */
   avoidRects?: NotebookOverlayRect[];
   style?: ViewStyle;
@@ -1050,6 +1078,7 @@ export function NotebookCanvas({
   images: rawImages,
   onImagesChange: rawOnImagesChange,
   editable = true,
+  showFixedHistory = false,
   avoidRects = [],
   style,
 }: NotebookCanvasProps) {
@@ -1151,6 +1180,8 @@ export function NotebookCanvas({
   const activeTouchIdRef = useRef<number | null>(null);
   /** Current page offset so viewport-local Pencil coordinates map onto the long paper. */
   const scrollOffsetYRef = useRef(0);
+  /** Live page geometry (set each render) so stable callbacks can read it without re-creating. */
+  const pageGeomRef = useRef({ pageHeight: PAGE_HEIGHT, pageStride: PAGE_HEIGHT + PAGE_GAP, totalPages: 1, canvasHeight: PAGE_HEIGHT });
   const toolbarPosition = useRef(new Animated.ValueXY({ x: TOOLBAR_EDGE_MARGIN, y: TOOLBAR_EDGE_MARGIN })).current;
   const toolbarTransition = useRef(
     new Animated.Value(DEFAULT_TOOLBAR_PREFERENCES.collapsed ? 0 : 1),
@@ -1204,7 +1235,9 @@ export function NotebookCanvas({
   const avoidRectsSignature = JSON.stringify(avoidRects);
   const effectiveToolbarCollapsed =
     toolbarCollapsed || (containerSize.width > 0 && containerSize.width < NARROW_TOOLBAR_WIDTH);
-  const toolbarHasContext = !effectiveToolbarCollapsed && mode !== 'scroll';
+  // Text mode shows no context row (no "Body / tap the page" prompt) — keeps the
+  // toolbar compact; tapping the canvas focuses the text input directly.
+  const toolbarHasContext = !effectiveToolbarCollapsed && mode !== 'scroll' && mode !== 'type';
   const toolbarVertical = toolbarDockIsVertical(toolbarDock);
   const toolbarOnRight = toolbarDock === 'rightCenter';
   const collapsedToolbarSize = useMemo(
@@ -1298,16 +1331,13 @@ export function NotebookCanvas({
           height:
             TOOLBAR_VERTICAL_CAPSULE_HEIGHT +
             TOOLBAR_VERTICAL_GROUP_GAP +
-            TOOLBAR_VERTICAL_ACTION_HEIGHT +
-            (hasSelection
-              ? TOOLBAR_VERTICAL_GROUP_GAP + TOOLBAR_VERTICAL_SELECTION_HEIGHT
-              : 0),
+            TOOLBAR_VERTICAL_ACTION_HEIGHT,
         };
       }
 
-      const rightPillWidth =
-        TOOLBAR_HISTORY_PILL_WIDTH +
-        (hasSelection ? TOOLBAR_RIGHT_PILL_GAP + TOOLBAR_SELECTION_PILL_WIDTH : 0);
+      // Selection Duplicate/Delete is no longer a toolbar pill (it floats above the
+      // selected image), so the toolbar footprint never grows with the selection.
+      const rightPillWidth = TOOLBAR_HISTORY_PILL_WIDTH;
       return {
         width: Math.min(
           expandedToolbarWidth,
@@ -1321,7 +1351,6 @@ export function NotebookCanvas({
       effectiveToolbarCollapsed,
       expandedToolbarHeight,
       expandedToolbarWidth,
-      hasSelection,
       mode,
     ],
   );
@@ -2000,10 +2029,12 @@ export function NotebookCanvas({
       const start = imageGestureStartRef.current;
       if (!start || start.id !== id) return;
       const width = containerSizeRef.current.width;
-      const scaled = resizeImageAroundCenter(start.image, scale, width);
+      const canvasH = pageGeomRef.current.canvasHeight;
+      const scaled = resizeImageAroundCenter(start.image, scale, width, canvasH);
       const nextImage = clampImageGeometry(
         { ...scaled, x: scaled.x + translationX, y: scaled.y + translationY },
         width,
+        canvasH,
       );
       const changed =
         Math.abs(nextImage.x - start.image.x) > 0.5 ||
@@ -2037,6 +2068,7 @@ export function NotebookCanvas({
         translationX,
         translationY,
         containerSizeRef.current.width,
+        pageGeomRef.current.canvasHeight,
       );
       const changed =
         Math.abs(nextImage.x - start.image.x) > 0.5 ||
@@ -2472,9 +2504,43 @@ export function NotebookCanvas({
 
   const clearPage = useCallback(() => {
     if (strokes.length === 0 && text.length === 0 && images.length === 0) return;
+    // Clear only the page nearest the viewport centre — not the whole notebook.
+    const { pageStride: stride, pageHeight: ph, totalPages: tp } = pageGeomRef.current;
+    const viewportH = containerSizeRef.current.height || 0;
+    const centerY = scrollOffsetYRef.current + viewportH / 2;
+    const pageIdx = clamp(Math.floor(centerY / Math.max(stride, 1)), 0, Math.max(tp - 1, 0));
+    const bandTop = pageIdx * stride;
+    const bandBottom = bandTop + ph;
+    const strokeCenterY = (s: NoteStroke) => {
+      let mn = Infinity;
+      let mx = -Infinity;
+      for (const p of s.points) {
+        if (p.y < mn) mn = p.y;
+        if (p.y > mx) mx = p.y;
+      }
+      return mn === Infinity ? 0 : (mn + mx) / 2;
+    };
+    const remainingStrokes = strokes.filter((s) => {
+      const c = strokeCenterY(s);
+      return c < bandTop || c >= bandBottom;
+    });
+    const remainingImages = images.filter((im) => {
+      const c = im.y + im.height / 2;
+      return c < bandTop || c >= bandBottom;
+    });
+    // Typed text is a single continuous field (not page-split); only clear it
+    // when clearing page 1, where the text begins.
+    const clearsText = pageIdx === 0 && text.length > 0;
+    if (
+      remainingStrokes.length === strokes.length &&
+      remainingImages.length === images.length &&
+      !clearsText
+    ) {
+      return;
+    }
     Alert.alert(
       'Clear page',
-      'Remove all handwriting, images, and typed notes from this page? You can undo this.',
+      `Remove the handwriting, images${pageIdx === 0 ? ' and typed notes' : ''} on page ${pageIdx + 1}? You can undo this.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -2482,16 +2548,16 @@ export function NotebookCanvas({
           style: 'destructive',
           onPress: () => {
             recordHistory();
-            onStrokesChange([]);
-            onTextChange('');
-            onImagesChange([]);
+            if (remainingStrokes.length !== strokes.length) onStrokesChange(remainingStrokes);
+            if (remainingImages.length !== images.length) onImagesChange(remainingImages);
+            if (clearsText) onTextChange('');
             selectedIdsRef.current = new Set();
             setSelectedIds(new Set());
           },
         },
       ],
     );
-  }, [strokes.length, text.length, images.length, onStrokesChange, onTextChange, onImagesChange, recordHistory]);
+  }, [strokes, text, images, onStrokesChange, onTextChange, onImagesChange, recordHistory]);
 
   const deleteSelectedObjects = useCallback(() => {
     const ids = selectedIdsRef.current;
@@ -2546,6 +2612,7 @@ export function NotebookCanvas({
         clampImageGeometry(
           { ...img, id: newId, x: img.x + OFFSET, y: img.y + OFFSET, createdAt: new Date().toISOString() },
           containerSizeRef.current.width,
+          pageGeomRef.current.canvasHeight,
         ),
       );
     }
@@ -2613,6 +2680,39 @@ export function NotebookCanvas({
     return { x: minX - pad, y: minY - pad, w: maxX - minX + pad * 2, h: maxY - minY + pad * 2 };
   }, [selectedIds, strokes, images]);
 
+  const selectedImageForActions = useMemo(() => {
+    if (selectedIds.size !== 1) return null;
+    const selectedId = Array.from(selectedIds)[0];
+    return images.find((image) => image.id === selectedId) ?? null;
+  }, [images, selectedIds]);
+
+  // Floating Duplicate/Delete bar position (canvas coordinates) — sits directly
+  // above the selected image, horizontally centred over it. Rendered inside the
+  // scrolling paper so it tracks the object as it moves/resizes/scrolls. Clamped
+  // to the page width and visible canvas height; flips below only when the image
+  // is too close to the top edge to leave room above.
+  const imageActionBar = useMemo(() => {
+    if (!editable || !selectedImageForActions) return null;
+    const cw = containerSize.width;
+    const ch = pageGeomRef.current.canvasHeight;
+    if (cw <= 0 || ch <= 0) return null;
+    const leftWithOffset = selectedImageForActions.x + selectionMoveOffset.x;
+    const topWithOffset = selectedImageForActions.y + selectionMoveOffset.y;
+    const centerX = leftWithOffset + selectedImageForActions.width / 2;
+    const maxLeft = Math.max(IMAGE_ACTION_BAR_EDGE, cw - IMAGE_ACTION_BAR_WIDTH - IMAGE_ACTION_BAR_EDGE);
+    const left = clamp(
+      centerX - IMAGE_ACTION_BAR_WIDTH / 2,
+      IMAGE_ACTION_BAR_EDGE,
+      maxLeft,
+    );
+    const above = topWithOffset - IMAGE_ACTION_BAR_HEIGHT - IMAGE_ACTION_BAR_GAP;
+    const below = topWithOffset + selectedImageForActions.height + IMAGE_ACTION_BAR_GAP;
+    const preferredTop = above < IMAGE_ACTION_BAR_EDGE ? below : above;
+    const maxTop = Math.max(IMAGE_ACTION_BAR_EDGE, ch - IMAGE_ACTION_BAR_HEIGHT - IMAGE_ACTION_BAR_EDGE);
+    const top = clamp(preferredTop, IMAGE_ACTION_BAR_EDGE, maxTop);
+    return { left, top };
+  }, [editable, selectedImageForActions, selectionMoveOffset, containerSize.width]);
+
   // Committed strokes split into unselected (stable) and selected (rendered in a transform group).
   const { unselectedShapes, selectedShapes } = useMemo(
     () => {
@@ -2632,12 +2732,91 @@ export function NotebookCanvas({
     [strokes, erasedIds, selectedIds],
   );
 
-  const ruleLines = useMemo(() => {
-    const count = Math.ceil(PAGE_HEIGHT / LINE_GAP);
-    return Array.from({ length: count }).map((_, i) => (
-      <View key={i} style={styles.ruleLine} />
-    ));
+  // ---- Page geometry (continuous canvas divided into A4-like sheets) ----
+  const pageWidth = containerSize.width;
+  const pageHeight = pageWidth > 0 ? Math.round(pageWidth * PAGE_ASPECT) : PAGE_HEIGHT;
+  const pageStride = pageHeight + PAGE_GAP;
+  /**
+   * Lowest y actually reached by content, used to derive the page count.
+   *
+   * Strokes and images contribute their real positions. Typed text is ONE
+   * global string with no reliable per-line geometry, so it is counted as
+   * page-1 content only (a tiny positive y) — never its measured/layer height.
+   * Using the TextInput's content/frame height here caused a feedback loop
+   * (taller canvas -> taller input -> larger reported height -> more pages)
+   * that ran the count up to absurd values like 1 / 112 from a single keystroke.
+   */
+  const contentBottomY = useMemo(() => {
+    let m = 0;
+    for (const s of strokes) for (const p of s.points) if (p.y > m) m = p.y;
+    for (const im of images) {
+      const b = im.y + im.height;
+      if (b > m) m = b;
+    }
+    if (text.length > 0) m = Math.max(m, 1);
+    return m;
+  }, [strokes, images, text]);
+  // Sheets that contain content, plus exactly one trailing blank sheet. A blank
+  // notebook is a single page; the moment content reaches the last sheet, the
+  // derived count grows by one, so a fresh blank page appears automatically.
+  // The min(..., MAX) is a defensive safety net only — normal use never hits it.
+  const MAX_NOTEBOOK_PAGES = 999;
+  const contentPages = contentBottomY > 0 ? Math.floor(contentBottomY / pageStride) + 1 : 0;
+  const totalPages = Math.min(contentPages === 0 ? 1 : contentPages + 1, MAX_NOTEBOOK_PAGES);
+  const canvasHeight = totalPages * pageHeight + (totalPages - 1) * PAGE_GAP;
+  pageGeomRef.current = { pageHeight, pageStride, totalPages, canvasHeight };
+
+  const sheetLineCount = pageHeight > 52 ? Math.floor((pageHeight - 52) / LINE_GAP) : 0;
+  const pageSheets = useMemo(
+    () =>
+      Array.from({ length: totalPages }).map((_, i) => (
+        <View
+          key={`sheet_${i}`}
+          style={[styles.pageSheet, { top: i * pageStride, height: pageHeight }]}
+          pointerEvents="none"
+        >
+          <View style={styles.sheetRuled} pointerEvents="none">
+            {Array.from({ length: sheetLineCount }).map((_, j) => (
+              <View key={j} style={styles.ruleLine} />
+            ))}
+          </View>
+          <View style={styles.sheetMargin} pointerEvents="none" />
+        </View>
+      )),
+    [totalPages, pageStride, pageHeight, sheetLineCount],
+  );
+
+  // ---- Scroll-time page indicator (bottom-right capsule, auto-hides) ----
+  const [pageBadge, setPageBadge] = useState({ visible: false, page: 1 });
+  const pageBadgeOpacity = useRef(new Animated.Value(0)).current;
+  const pageBadgeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showPageBadge = useCallback(
+    (page: number) => {
+      setPageBadge({ visible: true, page });
+      Animated.timing(pageBadgeOpacity, { toValue: 1, duration: 120, useNativeDriver: true }).start();
+      if (pageBadgeTimerRef.current) clearTimeout(pageBadgeTimerRef.current);
+      pageBadgeTimerRef.current = setTimeout(() => {
+        Animated.timing(pageBadgeOpacity, { toValue: 0, duration: 320, useNativeDriver: true }).start(
+          ({ finished }) => {
+            if (finished) setPageBadge((b) => ({ ...b, visible: false }));
+          },
+        );
+      }, 1100);
+    },
+    [pageBadgeOpacity],
+  );
+  const pageForScroll = useCallback((scrollY: number) => {
+    const { pageStride: stride, totalPages: tp } = pageGeomRef.current;
+    const viewportH = containerSizeRef.current.height || 0;
+    const centerY = scrollY + viewportH / 2;
+    return clamp(Math.floor(centerY / Math.max(stride, 1)) + 1, 1, tp);
   }, []);
+  useEffect(
+    () => () => {
+      if (pageBadgeTimerRef.current) clearTimeout(pageBadgeTimerRef.current);
+    },
+    [],
+  );
 
   const isEmpty = strokes.length === 0 && currentPoints.length === 0 && text.length === 0 && images.length === 0;
 
@@ -2666,7 +2845,8 @@ export function NotebookCanvas({
     styles.vActiveIndicator,
     toolbarOnRight ? styles.vActiveIndicatorRight : styles.vActiveIndicatorLeft,
   ];
-  const verticalHasContext = toolbarHasContext && mode !== 'type';
+  // toolbarHasContext already excludes scroll + type.
+  const verticalHasContext = toolbarHasContext;
   const verticalContextWidth =
     mode === 'insert'
       ? TOOLBAR_VERTICAL_CONTEXT_WIDE
@@ -2935,40 +3115,6 @@ export function NotebookCanvas({
         <NavySurface />
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Undo last action"
-          accessibilityState={{ disabled: !canUndo }}
-          onPress={() => runToolbarPress(undo)}
-          disabled={!canUndo}
-          hitSlop={TOOLBAR_ICON_HIT_SLOP}
-          {...toolbarDragResponder.panHandlers}
-          {...toolbarDragTouchHandlers}
-          style={({ pressed }) => [
-            styles.vRailIconButton,
-            !canUndo && styles.iconToolButtonDisabled,
-            pressed && canUndo && styles.toolbarPressed,
-          ]}
-        >
-          <ToolbarGlyph name="undo" color={canUndo ? TOOLBAR_ICON_IDLE : TOOLBAR_ICON_DISABLED} />
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Redo last undone action"
-          accessibilityState={{ disabled: !canRedo }}
-          onPress={() => runToolbarPress(redo)}
-          disabled={!canRedo}
-          hitSlop={TOOLBAR_ICON_HIT_SLOP}
-          {...toolbarDragResponder.panHandlers}
-          {...toolbarDragTouchHandlers}
-          style={({ pressed }) => [
-            styles.vRailIconButton,
-            !canRedo && styles.iconToolButtonDisabled,
-            pressed && canRedo && styles.toolbarPressed,
-          ]}
-        >
-          <ToolbarGlyph name="redo" color={canRedo ? TOOLBAR_ICON_IDLE : TOOLBAR_ICON_DISABLED} />
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
           accessibilityLabel={hasSelection ? 'Delete selected' : 'Clear page'}
           accessibilityState={{ disabled: !canClear }}
           onPress={() => runToolbarPress(handleTrashPress)}
@@ -2986,27 +3132,8 @@ export function NotebookCanvas({
         </Pressable>
       </View>
 
-      {/* Selection action capsule — separate, contextual (never replaces Undo/Redo) */}
-      {hasSelection ? (
-        <View
-          style={[styles.toolbarSurface, styles.vActionCapsule]}
-          {...toolbarDragResponder.panHandlers}
-          {...toolbarDragTouchHandlers}
-        >
-          <NavySurface />
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Duplicate selected"
-            onPress={() => runToolbarPress(duplicateSelected)}
-            hitSlop={TOOLBAR_ICON_HIT_SLOP}
-            {...toolbarDragResponder.panHandlers}
-            {...toolbarDragTouchHandlers}
-            style={({ pressed }) => [styles.vRailIconButton, pressed && styles.toolbarPressed]}
-          >
-            <ToolbarGlyph name="duplicate" color={TOOLBAR_ICON_IDLE} />
-          </Pressable>
-        </View>
-      ) : null}
+      {/* Selection Duplicate/Delete is NOT a toolbar pill — it floats above the
+          selected image (see imageActionBar below), so nothing is added here. */}
     </View>
   );
 
@@ -3022,18 +3149,20 @@ export function NotebookCanvas({
           keyboardShouldPersistTaps="handled"
           scrollEnabled={!stylusStrokeActive && !imageManipulationActive}
           scrollEventThrottle={16}
+          onScrollBeginDrag={() => showPageBadge(pageForScroll(scrollOffsetYRef.current))}
           onScroll={(event) => {
-            scrollOffsetYRef.current = event.nativeEvent.contentOffset.y;
+            const y = event.nativeEvent.contentOffset.y;
+            scrollOffsetYRef.current = y;
+            showPageBadge(pageForScroll(y));
           }}
         >
-          <View style={styles.paper}>
-          {/* Ruled lines + margin */}
-          <View style={styles.ruled} pointerEvents="none">
-            {ruleLines}
-          </View>
-          <View style={styles.marginLine} pointerEvents="none" />
+          <View style={[styles.paper, { height: canvasHeight }]}>
+          {/* Stacked A4-like paper sheets (each its own ruled lines + margin),
+              separated by a gap so the notebook reads as paper, not one canvas. */}
+          {pageSheets}
 
-          {/* Typed-notes layer */}
+          {/* Typed-notes layer. Fills the paper via absolute-fill (no explicit
+              height) so its frame never feeds back into the page-count math. */}
           <TextInput
             style={styles.textLayer}
             value={text}
@@ -3067,7 +3196,7 @@ export function NotebookCanvas({
 
           {/* Handwriting + selection overlay (never captures touches) */}
           <View style={StyleSheet.absoluteFill} pointerEvents="none">
-            <Svg width="100%" height={PAGE_HEIGHT}>
+            <Svg width="100%" height={canvasHeight}>
               {unselectedShapes}
               {/* Selected strokes rendered inside a translate group during move. */}
               <G translateX={selectionMoveOffset.x} translateY={selectionMoveOffset.y}>
@@ -3141,6 +3270,36 @@ export function NotebookCanvas({
             </Svg>
           </View>
 
+          {/* Floating action bar for the selected object (e.g. an image) — a compact
+              dark capsule pinned directly above the selection, like Apple Notes /
+              GoodNotes. It lives in the scrolling paper so it follows the object as it
+              moves, resizes and scrolls. Not part of the draggable toolbar. */}
+          {imageActionBar ? (
+            <View
+              style={[styles.imageActionBar, { left: imageActionBar.left, top: imageActionBar.top }]}
+            >
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Duplicate selected image"
+                onPress={duplicateSelected}
+                hitSlop={TOOLBAR_ICON_HIT_SLOP}
+                style={({ pressed }) => [styles.imageActionButton, pressed && styles.toolbarPressed]}
+              >
+                <ToolbarGlyph name="duplicate" color={TOOLBAR_ICON_IDLE} />
+              </Pressable>
+              <View style={styles.imageActionDivider} />
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Delete selected image"
+                onPress={deleteSelectedObjects}
+                hitSlop={TOOLBAR_ICON_HIT_SLOP}
+                style={({ pressed }) => [styles.imageActionButton, pressed && styles.toolbarPressed]}
+              >
+                <ToolbarGlyph name="trash" color={TOOLBAR_DELETE_RED} />
+              </Pressable>
+            </View>
+          ) : null}
+
           {/* Empty-state hint */}
           {editable && isEmpty ? (
             <View style={styles.emptyHint} pointerEvents="none">
@@ -3160,6 +3319,15 @@ export function NotebookCanvas({
           </View>
         </GestureScrollView>
       </GestureDetector>
+
+      {/* Scroll-time page indicator — bottom-right, compact, auto-hides. */}
+      {pageBadge.visible ? (
+        <Animated.View style={[styles.pageBadge, { opacity: pageBadgeOpacity }]} pointerEvents="none">
+          <Text style={styles.pageBadgeText}>
+            {pageBadge.page} / {totalPages}
+          </Text>
+        </Animated.View>
+      ) : null}
 
       {editable ? (
         <GestureDetector gesture={toolbarVertical ? disabledToolbarPanGesture : toolbarPanGesture}>
@@ -3453,16 +3621,34 @@ export function NotebookCanvas({
                     </>
                   ) : null}
 
-                  {mode === 'type' ? (
-                    <Text style={styles.contextHint}>Body · 17 pt · tap the page to add a text box</Text>
-                  ) : null}
-
                   {mode === 'select' ? (
-                    <Text style={styles.contextHint}>
-                      {hasSelection
-                        ? 'Drag to move · duplicate from the right bar'
-                        : 'Circle objects to select · drag to move · duplicate from the right bar'}
-                    </Text>
+                    <View style={styles.hSelectShapePanel}>
+                      {(['lasso', 'rect'] as SelectionShape[]).map((shape) => {
+                        const active = selectionShape === shape;
+                        return (
+                          <Pressable
+                            key={shape}
+                            accessibilityRole="button"
+                            accessibilityLabel={shape === 'rect' ? 'Rectangular selection' : 'Freeform lasso selection'}
+                            accessibilityState={{ selected: active }}
+                            onPress={() => runToolbarPress(() => setSelectionShape(shape))}
+                            hitSlop={TOOLBAR_ICON_HIT_SLOP}
+                            {...toolbarDragResponder.panHandlers}
+                            {...toolbarDragTouchHandlers}
+                            style={({ pressed }) => [
+                              styles.vShapeButton,
+                              active && styles.vShapeButtonActive,
+                              pressed && styles.toolbarPressed,
+                            ]}
+                          >
+                            <SelectionShapeIcon
+                              shape={shape}
+                              color={active ? TOOLBAR_SELECTED : TOOLBAR_ICON_IDLE}
+                            />
+                          </Pressable>
+                        );
+                      })}
+                    </View>
                   ) : null}
 
                   {mode === 'insert' ? (
@@ -3509,40 +3695,6 @@ export function NotebookCanvas({
                 />
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel="Undo last action"
-                  accessibilityState={{ disabled: !canUndo }}
-                  onPress={() => runToolbarPress(undo)}
-                  disabled={!canUndo}
-                  hitSlop={TOOLBAR_ICON_HIT_SLOP}
-                  {...toolbarDragResponder.panHandlers}
-                  {...toolbarDragTouchHandlers}
-                  style={({ pressed }) => [
-                    styles.iconToolButton,
-                    !canUndo && styles.iconToolButtonDisabled,
-                    pressed && canUndo && styles.toolbarPressed,
-                  ]}
-                >
-                  <ToolbarGlyph name="undo" color={canUndo ? TOOLBAR_ICON_IDLE : TOOLBAR_ICON_DISABLED} />
-                </Pressable>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="Redo last undone action"
-                  accessibilityState={{ disabled: !canRedo }}
-                  onPress={() => runToolbarPress(redo)}
-                  disabled={!canRedo}
-                  hitSlop={TOOLBAR_ICON_HIT_SLOP}
-                  {...toolbarDragResponder.panHandlers}
-                  {...toolbarDragTouchHandlers}
-                  style={({ pressed }) => [
-                    styles.iconToolButton,
-                    !canRedo && styles.iconToolButtonDisabled,
-                    pressed && canRedo && styles.toolbarPressed,
-                  ]}
-                >
-                  <ToolbarGlyph name="redo" color={canRedo ? TOOLBAR_ICON_IDLE : TOOLBAR_ICON_DISABLED} />
-                </Pressable>
-                <Pressable
-                  accessibilityRole="button"
                   accessibilityLabel={hasSelection ? 'Delete selected' : 'Clear page'}
                   accessibilityState={{ disabled: !canClear }}
                   onPress={() => runToolbarPress(handleTrashPress)}
@@ -3559,33 +3711,8 @@ export function NotebookCanvas({
                   <ToolbarGlyph name="more" color={canClear ? TOOLBAR_ICON_IDLE : TOOLBAR_ICON_DISABLED} />
                 </Pressable>
               </View>
-              {hasSelection ? (
-                <View
-                  style={[
-                    styles.toolbarSurface,
-                    styles.selectionPill,
-                    toolbarVertical && styles.selectionPillVertical,
-                  ]}
-                  {...toolbarDragResponder.panHandlers}
-                  {...toolbarDragTouchHandlers}
-                >
-                  <NavySurface
-                    width={toolbarVertical ? TOOLBAR_VERTICAL_ACTION_WIDTH : TOOLBAR_SELECTION_PILL_WIDTH}
-                    height={toolbarVertical ? TOOLBAR_SELECTION_PILL_WIDTH : 60}
-                  />
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel="Duplicate selected"
-                    onPress={() => runToolbarPress(duplicateSelected)}
-                    hitSlop={TOOLBAR_ICON_HIT_SLOP}
-                    {...toolbarDragResponder.panHandlers}
-                    {...toolbarDragTouchHandlers}
-                    style={({ pressed }) => [styles.iconToolButton, pressed && styles.toolbarPressed]}
-                  >
-                    <ToolbarGlyph name="duplicate" color={TOOLBAR_ICON_IDLE} />
-                  </Pressable>
-                </View>
-              ) : null}
+              {/* Selection Duplicate/Delete is NOT a toolbar pill — it floats above
+                  the selected image (see imageActionBar below). */}
             </>
           )}
             </>
@@ -3612,6 +3739,44 @@ export function NotebookCanvas({
               {toolToast === 'erase' ? 'Eraser' : toolToast === 'highlight' ? 'Highlighter' : 'Pen'}
             </Text>
           </View>
+        </View>
+      ) : null}
+
+      {/* Fixed Undo/Redo — top-right, parallel to the screen's nav controls.
+          Rendered LAST (and with a high zIndex) so it always stays above the
+          draggable toolbar, the page indicator and the canvas — it is icon-only
+          and NOT part of the draggable toolbar, so it never moves or hides. */}
+      {editable && showFixedHistory ? (
+        <View style={styles.fixedHistory} pointerEvents="box-none">
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Undo last action"
+            accessibilityState={{ disabled: !canUndo }}
+            onPress={undo}
+            disabled={!canUndo}
+            hitSlop={TOOLBAR_ICON_HIT_SLOP}
+            style={({ pressed }) => [
+              styles.fixedHistoryButton,
+              pressed && canUndo && styles.toolbarPressed,
+            ]}
+          >
+            <ToolbarGlyph name="undo" color={canUndo ? TOOLBAR_ICON_IDLE : TOOLBAR_ICON_DISABLED} />
+          </Pressable>
+          <View style={styles.fixedHistoryDivider} />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Redo last undone action"
+            accessibilityState={{ disabled: !canRedo }}
+            onPress={redo}
+            disabled={!canRedo}
+            hitSlop={TOOLBAR_ICON_HIT_SLOP}
+            style={({ pressed }) => [
+              styles.fixedHistoryButton,
+              pressed && canRedo && styles.toolbarPressed,
+            ]}
+          >
+            <ToolbarGlyph name="redo" color={canRedo ? TOOLBAR_ICON_IDLE : TOOLBAR_ICON_DISABLED} />
+          </Pressable>
         </View>
       ) : null}
     </View>
@@ -3956,6 +4121,11 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     color: 'rgba(255,255,255,0.46)',
   },
+  hSelectShapePanel: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
   insertRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -4256,12 +4426,40 @@ const styles = StyleSheet.create({
   // ---- Paper ----
   scroll: {
     flex: 1,
-    backgroundColor: colors.paper,
+    // Gap colour shown between stacked sheets (and on over-scroll).
+    backgroundColor: colors.background,
   },
   paper: {
     width: '100%',
-    height: PAGE_HEIGHT,
+    // Height is set dynamically (total of all sheets + gaps). The background is
+    // the gap colour so the spacing between sheets reads as separation.
+    backgroundColor: colors.background,
+  },
+  // One paper sheet in the stack. Absolutely positioned by its page index.
+  pageSheet: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
     backgroundColor: colors.paper,
+    borderRadius: 6,
+    shadowColor: 'rgba(11,31,58,0.18)',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 1,
+    shadowRadius: 10,
+    elevation: 2,
+    overflow: 'hidden',
+  },
+  sheetRuled: {
+    ...StyleSheet.absoluteFillObject,
+    paddingTop: 52,
+  },
+  sheetMargin: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    left: MARGIN_X,
+    width: 2,
+    backgroundColor: colors.noteMargin,
   },
   ruled: {
     ...StyleSheet.absoluteFillObject,
@@ -4279,6 +4477,64 @@ const styles = StyleSheet.create({
     left: MARGIN_X,
     width: 2,
     backgroundColor: colors.noteMargin,
+  },
+  // Compact scroll-time page indicator (bottom-right).
+  pageBadge: {
+    position: 'absolute',
+    right: 16,
+    bottom: 16,
+    minWidth: 52,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+    // Subtle translucent grey capsule (per the reference screenshot).
+    backgroundColor: 'rgba(60,64,72,0.66)',
+    shadowColor: 'rgba(8,16,34,0.25)',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 1,
+    shadowRadius: 10,
+    elevation: 4,
+  },
+  pageBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '600',
+    letterSpacing: 0.4,
+    fontVariant: ['tabular-nums'],
+  },
+  // Fixed Undo/Redo capsule — top-right, never moves (not the draggable toolbar).
+  fixedHistory: {
+    position: 'absolute',
+    top: 12,
+    right: 12,
+    zIndex: 50,
+    flexDirection: 'row',
+    alignItems: 'center',
+    height: 40,
+    paddingHorizontal: 4,
+    borderRadius: 14,
+    backgroundColor: TOOLBAR_NAVY_BOTTOM,
+    borderWidth: 1,
+    borderColor: TOOLBAR_BORDER_COLOR,
+    shadowColor: 'rgba(8,16,34,0.32)',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 1,
+    shadowRadius: 14,
+    elevation: 6,
+  },
+  fixedHistoryButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  fixedHistoryDivider: {
+    width: StyleSheet.hairlineWidth,
+    height: 22,
+    backgroundColor: TOOLBAR_DIVIDER_COLOR,
   },
   textLayer: {
     ...StyleSheet.absoluteFillObject,
@@ -4321,6 +4577,36 @@ const styles = StyleSheet.create({
     // White ring keeps the dot visible against both bright and dark images.
     borderWidth: 2,
     borderColor: colors.pearlWhite,
+  },
+  imageActionBar: {
+    position: 'absolute',
+    zIndex: 35,
+    width: IMAGE_ACTION_BAR_WIDTH,
+    height: IMAGE_ACTION_BAR_HEIGHT,
+    borderRadius: 15,
+    backgroundColor: TOOLBAR_NAVY_BOTTOM,
+    borderWidth: 1,
+    borderColor: TOOLBAR_BORDER_COLOR,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    shadowColor: 'rgba(8,16,34,0.32)',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 1,
+    shadowRadius: 14,
+    elevation: 7,
+  },
+  imageActionButton: {
+    width: 50,
+    height: IMAGE_ACTION_BAR_HEIGHT,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  imageActionDivider: {
+    width: StyleSheet.hairlineWidth,
+    height: 24,
+    backgroundColor: TOOLBAR_DIVIDER_COLOR,
   },
   emptyHint: {
     position: 'absolute',
