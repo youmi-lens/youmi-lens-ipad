@@ -12,7 +12,7 @@
  */
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { ComponentProps, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Animated,
@@ -29,6 +29,8 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { FloatingMiniCaption } from '@/components/FloatingMiniCaption';
+import { MaterialFloatingToolbar } from '@/components/MaterialFloatingToolbar';
+import { PageIndicatorBadge } from '@/components/PageIndicatorBadge';
 import { useLiveCaptions } from '@/lib/liveCaptions';
 import {
   MaterialAnnotationMode,
@@ -118,14 +120,15 @@ export default function LectureMaterialWorkspaceScreen() {
   // --- Native PDFKit annotation state (Phase 2) ---
   // Native overlay-only state; the legacy JS-overlay branch below does NOT use these.
   const [nativeAnnotationMode, setNativeAnnotationMode] = useState<NativePdfAnnotationMode>('scroll');
-  // Color + width *do* need setters — the previous cut destructured without
-  // them, which silently locked every stroke to the initial (deep navy /
-  // medium) values. The native view now picks these up on every change.
-  const [nativePenColor, setNativePenColor] = useState<string>(PEN_COLORS[0].value);
-  const [nativePenWidth, setNativePenWidth] = useState<number>(PEN_WIDTHS[1].value);
-  const [nativeHighlighterColor, setNativeHighlighterColor] = useState<string>(HIGHLIGHTER_COLORS[0].value);
-  const [nativeHighlighterWidth, setNativeHighlighterWidth] = useState<number>(HIGHLIGHTER_WIDTHS[1].value);
-  const [nativeEraserRadius, setNativeEraserRadius] = useState<number>(ERASER_SIZES[1].value);
+  // Ink colour / width / eraser size use the default presets. The reduced
+  // Course Material toolbar exposes Pen/Highlight/Eraser/Hand/Undo/Redo only
+  // (no colour/width pickers), so these are fixed and need no setters; the
+  // native view still reads them on every render.
+  const [nativePenColor] = useState<string>(PEN_COLORS[0].value);
+  const [nativePenWidth] = useState<number>(PEN_WIDTHS[1].value);
+  const [nativeHighlighterColor] = useState<string>(HIGHLIGHTER_COLORS[0].value);
+  const [nativeHighlighterWidth] = useState<number>(HIGHLIGHTER_WIDTHS[1].value);
+  const [nativeEraserRadius] = useState<number>(ERASER_SIZES[1].value);
   const [nativeTemporaryEraser, setNativeTemporaryEraser] = useState(false);
   const nativeAnnotationModeRef = useRef<NativePdfAnnotationMode>(nativeAnnotationMode);
   const nativePreviousDrawingToolRef = useRef<Extract<NativePdfAnnotationMode, 'pen' | 'highlighter'>>('pen');
@@ -165,15 +168,23 @@ export default function LectureMaterialWorkspaceScreen() {
   const [loadingPdf, setLoadingPdf] = useState(true);
   const [pdfError, setPdfError] = useState<string | null>(null);
   const [annotationMode, setAnnotationMode] = useState<MaterialAnnotationMode>('scroll');
-  const [penColor, setPenColor] = useState(PEN_COLORS[0].value);
-  const [penWidth, setPenWidth] = useState(PEN_WIDTHS[1].value);
-  const [highlighterColor, setHighlighterColor] = useState(HIGHLIGHTER_COLORS[0].value);
-  const [highlighterWidth, setHighlighterWidth] = useState(HIGHLIGHTER_WIDTHS[1].value);
-  const [eraserRadius, setEraserRadius] = useState(ERASER_SIZES[1].value);
+  // Fallback (JS overlay) ink presets — fixed, matching the reduced toolbar.
+  const [penColor] = useState(PEN_COLORS[0].value);
+  const [penWidth] = useState(PEN_WIDTHS[1].value);
+  const [highlighterColor] = useState(HIGHLIGHTER_COLORS[0].value);
+  const [highlighterWidth] = useState(HIGHLIGHTER_WIDTHS[1].value);
+  const [eraserRadius] = useState(ERASER_SIZES[1].value);
   const [annotationStrokeActive, setAnnotationStrokeActive] = useState(false);
   const [previousDrawingTool, setPreviousDrawingTool] = useState<MaterialDrawingMode>('pen');
   const previousDrawModeRef = useRef<MaterialDrawingMode>('pen');
   const doubleTapAvailable = useMemo(() => isPencilDoubleTapAvailable(), []);
+
+  // Per-page redo stacks for the toolbar's Redo action. Undo pushes the removed
+  // stroke here; Redo re-adds it. Stored in component state only — no annotation
+  // schema change. Cleared on page change and whenever a fresh stroke is drawn
+  // or erased (the standard "new action invalidates redo" rule).
+  const [nativeRedoStack, setNativeRedoStack] = useState<MaterialAnnotationStroke[]>([]);
+  const [redoStack, setRedoStack] = useState<MaterialAnnotationStroke[]>([]);
 
   // Capture the page we want the PDF to open at ONCE on mount. Passing
   // `material.lastOpenedPage` as the live `page` prop would cause the
@@ -184,6 +195,12 @@ export default function LectureMaterialWorkspaceScreen() {
   // writes new strokes to the current lecture id, but the viewer shows the
   // shared PDF history by default.
   const pageStrokes = annotationsForMaterialPage(material?.id ?? '', currentPage);
+
+  // Redo only applies to the page it was undone on — drop it on any page change.
+  useEffect(() => {
+    setNativeRedoStack([]);
+    setRedoStack([]);
+  }, [currentPage]);
 
   useEffect(() => {
     if (annotationMode === 'pen' || annotationMode === 'highlighter') {
@@ -471,6 +488,9 @@ export default function LectureMaterialWorkspaceScreen() {
         createdAt: native.createdAt,
       });
 
+      // A fresh native edit (draw or erase) invalidates the redo stack.
+      setNativeRedoStack([]);
+
       if (event.action === 'replacePage') {
         const nextStrokes = event.strokes.map(toStoreStroke);
         replaceMaterialPageAnnotationStrokesForMaterial(mid, page, nextStrokes, materialScopeLectureId(mid));
@@ -489,6 +509,8 @@ export default function LectureMaterialWorkspaceScreen() {
   const addPageStroke = useCallback(
     (stroke: MaterialAnnotationStroke) => {
       if (!lectureId || !material?.id) return;
+      // A fresh user stroke invalidates the redo stack.
+      setRedoStack([]);
       addAnnotationStroke(materialReviewMode ? materialScopeLectureId(material.id) : lectureId, material.id, currentPage, stroke);
     },
     [addAnnotationStroke, currentPage, lectureId, material?.id, materialReviewMode],
@@ -497,6 +519,7 @@ export default function LectureMaterialWorkspaceScreen() {
   const erasePageStrokeIds = useCallback(
     (ids: string[]) => {
       if (!lectureId || !material?.id || ids.length === 0) return;
+      setRedoStack([]);
       const idSet = new Set(ids);
       const next = pageStrokes.filter((stroke) => !idSet.has(stroke.id));
       replaceMaterialPageAnnotationStrokesForMaterial(material.id, currentPage, next, materialScopeLectureId(material.id));
@@ -505,10 +528,24 @@ export default function LectureMaterialWorkspaceScreen() {
   );
 
   const undoCurrentPage = useCallback(() => {
-    if (!lectureId || !material?.id) return;
+    if (!lectureId || !material?.id || pageStrokes.length === 0) return;
+    const removed = pageStrokes[pageStrokes.length - 1];
     const next = pageStrokes.slice(0, -1);
     replaceMaterialPageAnnotationStrokesForMaterial(material.id, currentPage, next, materialScopeLectureId(material.id));
+    setRedoStack((stack) => [...stack, removed]);
   }, [currentPage, lectureId, material?.id, pageStrokes, replaceMaterialPageAnnotationStrokesForMaterial]);
+
+  const redoCurrentPage = useCallback(() => {
+    if (!lectureId || !material?.id || redoStack.length === 0) return;
+    const restored = redoStack[redoStack.length - 1];
+    setRedoStack((stack) => stack.slice(0, -1));
+    addAnnotationStroke(
+      materialReviewMode ? materialScopeLectureId(material.id) : lectureId,
+      material.id,
+      currentPage,
+      restored,
+    );
+  }, [addAnnotationStroke, currentPage, lectureId, material?.id, materialReviewMode, redoStack]);
 
   const undoNativeCurrentPage = useCallback(() => {
     const lid = nativeLectureIdRef.current;
@@ -520,9 +557,21 @@ export default function LectureMaterialWorkspaceScreen() {
       .reverse()
       .find(({ stroke }) => stroke.coordSpace === 'pdfPage')?.index;
     if (removeIndex == null) return;
+    const removed = strokes[removeIndex];
     const next = strokes.filter((_, index) => index !== removeIndex);
     replaceMaterialPageAnnotationStrokesForMaterial(mid, page, next, materialScopeLectureId(mid));
+    setNativeRedoStack((stack) => [...stack, removed]);
   }, [annotationsForMaterialPage, replaceMaterialPageAnnotationStrokesForMaterial]);
+
+  const redoNativeCurrentPage = useCallback(() => {
+    const lid = nativeLectureIdRef.current;
+    const mid = nativeMaterialIdRef.current;
+    const page = nativeCurrentPageRef.current;
+    if (!lid || !mid || !Number.isFinite(page) || page <= 0 || nativeRedoStack.length === 0) return;
+    const restored = nativeRedoStack[nativeRedoStack.length - 1];
+    setNativeRedoStack((stack) => stack.slice(0, -1));
+    addAnnotationStroke(materialReviewMode ? materialScopeLectureId(mid) : lid, mid, page, restored);
+  }, [addAnnotationStroke, materialReviewMode, nativeRedoStack]);
 
   // ---- Empty / error states ----
   if (!material) {
@@ -623,24 +672,6 @@ export default function LectureMaterialWorkspaceScreen() {
               style={styles.pdf}
             />
           </MaterialAnnotationOverlay>
-
-          <AnnotationToolbar
-            mode={annotationMode}
-            onModeChange={setAnnotationMode}
-            penColor={penColor}
-            onPenColorChange={setPenColor}
-            penWidth={penWidth}
-            onPenWidthChange={setPenWidth}
-            highlighterColor={highlighterColor}
-            onHighlighterColorChange={setHighlighterColor}
-            highlighterWidth={highlighterWidth}
-            onHighlighterWidthChange={setHighlighterWidth}
-            eraserRadius={eraserRadius}
-            onEraserRadiusChange={setEraserRadius}
-            onUndo={undoCurrentPage}
-            canUndo={pageStrokes.length > 0}
-            doubleTapAvailable={doubleTapAvailable}
-          />
         </View>
       ) : null}
 
@@ -690,31 +721,6 @@ export default function LectureMaterialWorkspaceScreen() {
           </View>
         </View>
 
-        {/* Pen toolbar — top-right, respects safe area */}
-        {useNativePdfViewer ? (
-          <View
-            style={[styles.floatingToolbarWrap, { top: insets.top + spacing.md, right: spacing.md }]}
-            pointerEvents="box-none"
-          >
-            <NativePenToolbar
-              mode={nativeAnnotationMode}
-              onChangeMode={handleNativeModeChange}
-              color={nativePenColor}
-              onChangeColor={setNativePenColor}
-              width={nativePenWidth}
-              onChangeWidth={setNativePenWidth}
-              highlighterColor={nativeHighlighterColor}
-              onChangeHighlighterColor={setNativeHighlighterColor}
-              highlighterWidth={nativeHighlighterWidth}
-              onChangeHighlighterWidth={setNativeHighlighterWidth}
-              eraserRadius={nativeEraserRadius}
-              onChangeEraserRadius={setNativeEraserRadius}
-              onUndo={undoNativeCurrentPage}
-              canUndo={pageStrokes.some((stroke) => stroke.coordSpace === 'pdfPage')}
-            />
-          </View>
-        ) : null}
-
         {/* Page navigator — bottom-right, lifts over the captions strip
             when one is active. Tap the current-page number to open the
             Go-to-page modal. */}
@@ -731,6 +737,30 @@ export default function LectureMaterialWorkspaceScreen() {
           <FloatingMiniCaption topOffset={insets.top + 80} />
         ) : null}
       </View>
+
+      {/* Notebook-style draggable annotation toolbar — same board / drag / dock /
+          minimize model as the Notebook toolbar, reduced to the Course Material
+          tool set. Drives the native PDFKit overlay (or the JS fallback overlay)
+          without touching PDF annotation storage. */}
+      {useNativePdfViewer ? (
+        <MaterialFloatingToolbar
+          mode={nativeAnnotationMode}
+          onChangeMode={handleNativeModeChange}
+          onUndo={undoNativeCurrentPage}
+          canUndo={pageStrokes.some((stroke) => stroke.coordSpace === 'pdfPage')}
+          onRedo={redoNativeCurrentPage}
+          canRedo={nativeRedoStack.length > 0}
+        />
+      ) : Pdf ? (
+        <MaterialFloatingToolbar
+          mode={annotationMode}
+          onChangeMode={setAnnotationMode}
+          onUndo={undoCurrentPage}
+          canUndo={pageStrokes.length > 0}
+          onRedo={redoCurrentPage}
+          canRedo={redoStack.length > 0}
+        />
+      ) : null}
 
       <GoToPageModal
         visible={jumpModalVisible}
@@ -818,14 +848,11 @@ function FloatingPageNavigator({
 
   const showTotal = Number.isFinite(totalPages) && totalPages > 0;
 
+  // Same grey-capsule "current / total" style as the normal Notebook page
+  // indicator (shared PageIndicatorBadge), wrapped in a Pressable so the
+  // existing tap-to-jump-to-page behaviour is preserved.
   return (
-    <Animated.View
-      pointerEvents="box-none"
-      style={[
-        styles.pageNav,
-        { bottom, opacity },
-      ]}
-    >
+    <Animated.View pointerEvents="box-none" style={[styles.pageNav, { bottom, opacity }]}>
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={
@@ -835,409 +862,11 @@ function FloatingPageNavigator({
         }
         onPress={onTapCurrent}
         hitSlop={8}
-        style={({ pressed }) => [styles.pageNavCurrentWrap, pressed && styles.pageNavCurrentPressed]}
+        style={({ pressed }) => (pressed ? styles.pageNavPressed : null)}
       >
-        <Text style={styles.pageNavCurrent}>{currentPage}</Text>
+        <PageIndicatorBadge current={currentPage} total={showTotal ? totalPages : currentPage} />
       </Pressable>
-      {showTotal ? (
-        <>
-          <View style={styles.pageNavDivider} />
-          <Text style={styles.pageNavTotal}>{totalPages}</Text>
-        </>
-      ) : null}
     </Animated.View>
-  );
-}
-
-function NativePenToolbar({
-  mode,
-  onChangeMode,
-  color,
-  onChangeColor,
-  width,
-  onChangeWidth,
-  highlighterColor,
-  onChangeHighlighterColor,
-  highlighterWidth,
-  onChangeHighlighterWidth,
-  eraserRadius,
-  onChangeEraserRadius,
-  onUndo,
-  canUndo,
-}: {
-  mode: NativePdfAnnotationMode;
-  onChangeMode: (next: NativePdfAnnotationMode) => void;
-  color: string;
-  onChangeColor: (next: string) => void;
-  width: number;
-  onChangeWidth: (next: number) => void;
-  highlighterColor: string;
-  onChangeHighlighterColor: (next: string) => void;
-  highlighterWidth: number;
-  onChangeHighlighterWidth: (next: number) => void;
-  eraserRadius: number;
-  onChangeEraserRadius: (next: number) => void;
-  onUndo: () => void;
-  canUndo: boolean;
-}) {
-  const activeColor = mode === 'highlighter' ? highlighterColor : color;
-  const colorOptions = mode === 'highlighter' ? HIGHLIGHTER_COLORS : PEN_COLORS;
-  const widthOptions = mode === 'highlighter' ? HIGHLIGHTER_WIDTHS : PEN_WIDTHS;
-  const activeWidth = mode === 'highlighter' ? highlighterWidth : width;
-  const showInkOptions = mode === 'pen' || mode === 'highlighter';
-
-  return (
-    <View style={styles.nativeToolbar} pointerEvents="auto">
-      <View style={styles.nativeToolbarRow}>
-        <NativeToolbarButton
-          label="Scroll"
-          icon="hand-left-outline"
-          active={mode === 'scroll'}
-          onPress={() => onChangeMode('scroll')}
-        />
-        <NativeToolbarButton
-          label="Pen"
-          icon="pencil"
-          active={mode === 'pen'}
-          onPress={() => onChangeMode('pen')}
-        />
-        <NativeToolbarButton
-          label="Highlight"
-          icon="color-wand-outline"
-          active={mode === 'highlighter'}
-          onPress={() => onChangeMode('highlighter')}
-        />
-        <NativeToolbarButton
-          label="Erase"
-          icon="backspace-outline"
-          active={mode === 'eraser'}
-          onPress={() => onChangeMode('eraser')}
-        />
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Undo last annotation stroke"
-          disabled={!canUndo}
-          onPress={onUndo}
-          style={({ pressed }) => [
-            styles.nativeUndoButton,
-            !canUndo && styles.nativeUndoButtonDisabled,
-            pressed && canUndo && styles.pressed,
-          ]}
-        >
-          <Ionicons name="arrow-undo-outline" size={16} color={colors.deepNavy} />
-        </Pressable>
-      </View>
-
-      {showInkOptions ? (
-        <View style={styles.nativePenOptionsRow}>
-          <View style={styles.nativeColorRow}>
-            {colorOptions.map((option) => (
-              <Pressable
-                key={option.value}
-                accessibilityRole="button"
-                accessibilityState={{ selected: activeColor === option.value }}
-                accessibilityLabel={`${option.key} ${mode === 'highlighter' ? 'highlighter' : 'pen'} color`}
-                onPress={() => (
-                  mode === 'highlighter'
-                    ? onChangeHighlighterColor(option.value)
-                    : onChangeColor(option.value)
-                )}
-                style={({ pressed }) => [
-                  styles.nativeColorSwatch,
-                  { backgroundColor: option.value },
-                  activeColor === option.value && styles.nativeColorSwatchActive,
-                  pressed && styles.pressed,
-                ]}
-              />
-            ))}
-          </View>
-          <View style={styles.nativeToolbarVerticalDivider} />
-          <View style={styles.nativeWidthRow}>
-            {widthOptions.map((option) => {
-              // Visual size derived from value; capped so the dot fits the chip.
-              const dotSize = mode === 'highlighter'
-                ? Math.min(18, Math.max(8, Math.round(option.value / 1.8)))
-                : Math.min(14, Math.max(6, Math.round(option.value * 2)));
-              return (
-                <Pressable
-                  key={option.value}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected: activeWidth === option.value }}
-                  accessibilityLabel={`${option.key} stroke width`}
-                  onPress={() => (
-                    mode === 'highlighter'
-                      ? onChangeHighlighterWidth(option.value)
-                      : onChangeWidth(option.value)
-                  )}
-                  style={({ pressed }) => [
-                    styles.nativeWidthOption,
-                    activeWidth === option.value && styles.nativeWidthOptionActive,
-                    pressed && styles.pressed,
-                  ]}
-                >
-                  <View
-                    style={[
-                      styles.nativeWidthDot,
-                      {
-                        width: dotSize,
-                        height: dotSize,
-                        borderRadius: dotSize / 2,
-                      },
-                    ]}
-                  />
-                </Pressable>
-              );
-            })}
-          </View>
-        </View>
-      ) : mode === 'eraser' ? (
-        <View style={styles.nativePenOptionsRow}>
-          <View style={styles.nativeWidthRow}>
-            {ERASER_SIZES.map((option) => (
-              <Pressable
-                key={option.value}
-                accessibilityRole="button"
-                accessibilityState={{ selected: eraserRadius === option.value }}
-                accessibilityLabel={`${option.key} eraser size`}
-                onPress={() => onChangeEraserRadius(option.value)}
-                style={({ pressed }) => [
-                  styles.nativeEraserOption,
-                  eraserRadius === option.value && styles.nativeWidthOptionActive,
-                  pressed && styles.pressed,
-                ]}
-              >
-                <Text style={styles.nativeEraserOptionText}>{option.key}</Text>
-              </Pressable>
-            ))}
-          </View>
-        </View>
-      ) : null}
-    </View>
-  );
-}
-
-function NativeToolbarButton({
-  label,
-  icon,
-  active,
-  onPress,
-}: {
-  label: string;
-  icon: ComponentProps<typeof Ionicons>['name'];
-  active: boolean;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityState={{ selected: active }}
-      accessibilityLabel={`${label} annotation mode`}
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.nativeToolbarButton,
-        active && styles.nativeToolbarButtonActive,
-        pressed && styles.pressed,
-      ]}
-    >
-      <Ionicons name={icon} size={15} color={active ? colors.textOnNavy : colors.deepNavy} />
-      <Text style={[styles.nativeToolbarLabel, active && styles.nativeToolbarLabelActive]}>
-        {label}
-      </Text>
-    </Pressable>
-  );
-}
-
-function AnnotationToolbar({
-  mode,
-  onModeChange,
-  penColor,
-  onPenColorChange,
-  penWidth,
-  onPenWidthChange,
-  highlighterColor,
-  onHighlighterColorChange,
-  highlighterWidth,
-  onHighlighterWidthChange,
-  eraserRadius,
-  onEraserRadiusChange,
-  onUndo,
-  canUndo,
-  doubleTapAvailable,
-}: {
-  mode: MaterialAnnotationMode;
-  onModeChange: (mode: MaterialAnnotationMode) => void;
-  penColor: string;
-  onPenColorChange: (color: string) => void;
-  penWidth: number;
-  onPenWidthChange: (width: number) => void;
-  highlighterColor: string;
-  onHighlighterColorChange: (color: string) => void;
-  highlighterWidth: number;
-  onHighlighterWidthChange: (width: number) => void;
-  eraserRadius: number;
-  onEraserRadiusChange: (radius: number) => void;
-  onUndo: () => void;
-  canUndo: boolean;
-  doubleTapAvailable: boolean;
-}) {
-  const drawing = mode === 'pen' || mode === 'highlighter' || mode === 'eraser';
-  const colorOptions = mode === 'highlighter' ? HIGHLIGHTER_COLORS : PEN_COLORS;
-  const widthOptions = mode === 'highlighter' ? HIGHLIGHTER_WIDTHS : PEN_WIDTHS;
-  const selectedColor = mode === 'highlighter' ? highlighterColor : penColor;
-  const selectedWidth = mode === 'highlighter' ? highlighterWidth : penWidth;
-
-  return (
-    <View style={styles.annotationToolbar} pointerEvents="auto">
-      <View style={styles.annotationModeRow}>
-        <ToolButton
-          label="Scroll"
-          icon="hand-left-outline"
-          active={mode === 'scroll'}
-          onPress={() => onModeChange('scroll')}
-        />
-        <ToolButton
-          label="Pen"
-          icon="pencil"
-          active={mode === 'pen'}
-          onPress={() => onModeChange('pen')}
-        />
-        <ToolButton
-          label="Highlight"
-          icon="color-wand-outline"
-          active={mode === 'highlighter'}
-          onPress={() => onModeChange('highlighter')}
-        />
-        <ToolButton
-          label="Erase"
-          icon="backspace-outline"
-          active={mode === 'eraser'}
-          onPress={() => onModeChange('eraser')}
-        />
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Undo last annotation stroke"
-          disabled={!canUndo}
-          onPress={onUndo}
-          style={({ pressed }) => [
-            styles.annotationIconButton,
-            !canUndo && styles.annotationButtonDisabled,
-            pressed && canUndo && styles.pressed,
-          ]}
-        >
-          <Ionicons name="arrow-undo-outline" size={17} color={colors.deepNavy} />
-        </Pressable>
-      </View>
-
-      {drawing ? (
-        <View style={styles.annotationOptions}>
-          {mode === 'eraser' ? (
-            <View style={styles.widthOptions}>
-              {ERASER_SIZES.map((option) => (
-                <Pressable
-                  key={option.value}
-                  accessibilityRole="button"
-                  accessibilityLabel={`${option.key} eraser size`}
-                  onPress={() => onEraserRadiusChange(option.value)}
-                  style={({ pressed }) => [
-                    styles.eraserSizeOption,
-                    eraserRadius === option.value && styles.widthOptionActive,
-                    pressed && styles.pressed,
-                  ]}
-                >
-                  <Text style={styles.eraserSizeLabel}>{option.key}</Text>
-                </Pressable>
-              ))}
-            </View>
-          ) : (
-            <>
-              <View style={styles.annotationSwatches}>
-                {colorOptions.map((option) => (
-                  <Pressable
-                    key={option.value}
-                    accessibilityRole="button"
-                    accessibilityLabel={`${option.key} ${mode === 'highlighter' ? 'highlighter' : 'pen'} color`}
-                    onPress={() =>
-                      mode === 'highlighter'
-                        ? onHighlighterColorChange(option.value)
-                        : onPenColorChange(option.value)
-                    }
-                    style={({ pressed }) => [
-                      styles.colorSwatch,
-                      { backgroundColor: option.value },
-                      selectedColor === option.value && styles.colorSwatchActive,
-                      pressed && styles.pressed,
-                    ]}
-                  />
-                ))}
-              </View>
-              <View style={styles.widthOptions}>
-                {widthOptions.map((option) => (
-                  <Pressable
-                    key={option.value}
-                    accessibilityRole="button"
-                    accessibilityLabel={`${option.key} stroke width`}
-                    onPress={() =>
-                      mode === 'highlighter'
-                        ? onHighlighterWidthChange(option.value)
-                        : onPenWidthChange(option.value)
-                    }
-                    style={({ pressed }) => [
-                      styles.widthOption,
-                      selectedWidth === option.value && styles.widthOptionActive,
-                      pressed && styles.pressed,
-                    ]}
-                  >
-                    <View
-                      style={[
-                        styles.widthDot,
-                        {
-                          width: Math.max(6, option.value),
-                          height: Math.max(6, option.value),
-                          borderRadius: Math.max(3, option.value / 2),
-                        },
-                      ]}
-                    />
-                  </Pressable>
-                ))}
-              </View>
-            </>
-          )}
-          {doubleTapAvailable ? (
-            <Text style={styles.doubleTapHint}>Pencil double-tap toggles eraser</Text>
-          ) : null}
-        </View>
-      ) : null}
-    </View>
-  );
-}
-
-function ToolButton({
-  label,
-  icon,
-  active,
-  onPress,
-}: {
-  label: string;
-  icon: ComponentProps<typeof Ionicons>['name'];
-  active: boolean;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityState={{ selected: active }}
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.annotationToolButton,
-        active && styles.annotationToolButtonActive,
-        pressed && styles.pressed,
-      ]}
-    >
-      <Ionicons name={icon} size={15} color={active ? colors.textOnNavy : colors.deepNavy} />
-      <Text style={[styles.annotationToolLabel, active && styles.annotationToolLabelActive]}>
-        {label}
-      </Text>
-    </Pressable>
   );
 }
 
@@ -1518,56 +1147,16 @@ const styles = StyleSheet.create({
     zIndex: 2,
   },
   // ---- Floating page navigator (Notability-style) ----
-  // Bottom-right pill. The deep-navy fill is intentionally heavier than the
-  // glass overlays so the "current page" indicator stays unambiguous against
-  // the light canvas. `bottom` is supplied inline by the component so it can
-  // respect safe-area insets and lift over the captions strip.
+  // Bottom-right position wrapper for the shared PageIndicatorBadge (the actual
+  // grey "current / total" capsule, matching the normal Notebook indicator).
+  // `bottom` is supplied inline so it respects safe-area insets and lifts over
+  // the captions strip.
   pageNav: {
     position: 'absolute',
-    right: spacing.lg,
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.md,
-    minWidth: 64,
-    backgroundColor: 'rgba(10, 23, 40, 0.86)',
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.10)',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.18,
-    shadowRadius: 14,
-    elevation: 6,
+    right: 16,
+    alignItems: 'flex-end',
   },
-  pageNavCurrentWrap: {
-    paddingHorizontal: spacing.xs,
-    paddingVertical: 2,
-    borderRadius: radius.sm,
-  },
-  pageNavCurrentPressed: { backgroundColor: 'rgba(255,255,255,0.12)' },
-  pageNavCurrent: {
-    fontSize: fontSize.lg,
-    fontWeight: '800',
-    color: '#FFFFFF',
-    letterSpacing: 0.2,
-    lineHeight: fontSize.lg * 1.1,
-    textAlign: 'center',
-  },
-  pageNavDivider: {
-    width: 18,
-    height: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.34)',
-    marginVertical: 4,
-  },
-  pageNavTotal: {
-    fontSize: fontSize.sm,
-    fontWeight: '600',
-    color: 'rgba(255, 255, 255, 0.7)',
-    letterSpacing: 0.2,
-    lineHeight: fontSize.sm * 1.1,
-  },
+  pageNavPressed: { opacity: 0.7 },
 
   // ---- Native (Phase 2) Scroll/Pen toolbar ----
   // Outer pill is column-flex so the Pen options can sit below the Scroll/Pen
@@ -1599,12 +1188,11 @@ const styles = StyleSheet.create({
     maxWidth: 420,
   },
   nativeToolbarButton: {
-    minHeight: 32,
+    width: 32,
+    height: 32,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 4,
-    paddingHorizontal: spacing.sm,
     borderRadius: radius.pill,
     backgroundColor: 'transparent',
   },
@@ -1727,12 +1315,11 @@ const styles = StyleSheet.create({
     gap: spacing.xs,
   },
   annotationToolButton: {
-    minHeight: 36,
+    width: 36,
+    height: 36,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 4,
-    paddingHorizontal: spacing.sm,
     borderRadius: radius.pill,
     backgroundColor: colors.surfaceMuted,
   },
