@@ -19,7 +19,7 @@
         "ITSAppUsesNonExemptEncryption": false
       },
       "bundleIdentifier": "com.aydenz.youmilensipad",
-      "buildNumber": "20",
+      "buildNumber": "21",
       "usesAppleSignIn": true
     },
     "android": {
