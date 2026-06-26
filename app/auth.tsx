@@ -83,6 +83,7 @@ export default function AuthScreen() {
   const [focusedField, setFocusedField] = useState<string | null>(null);
   const entryTransition = useRef(new Animated.Value(1)).current;
   const showBrandPanel = width >= 900 && width > height;
+  const keepPasswordFormVisible = step === 'entry' && entryMode === 'signIn' && (busyAction === 'signin' || !!error);
 
   useEffect(() => {
     let mounted = true;
@@ -310,6 +311,10 @@ export default function AuthScreen() {
 
     setBusyAction('signin');
     setError(null);
+    setPersistentError(null);
+    setSuccessMessage(null);
+    setEntryMode('signIn');
+    setStep('entry');
     // Mirror the Apple/Google handler exactly: clear the busy state in `finally`
     // (so the card never freezes) and DO NOT navigate imperatively.
     // signInWithPassword hydrates the session via applySessionState; once `session`
@@ -321,11 +326,19 @@ export default function AuthScreen() {
     try {
       const { error: signInError } = await signInWithPassword(trimmedEmail, password);
       if (signInError) {
+        setEntryMode('signIn');
+        setStep('entry');
+        setPersistentError(null);
+        setSuccessMessage(null);
         setError(signInError);
         return;
       }
       setPersistentError(null);
     } catch {
+      setEntryMode('signIn');
+      setStep('entry');
+      setPersistentError(null);
+      setSuccessMessage(null);
       setError('Sign-in is temporarily unavailable. Please try again later.');
     } finally {
       setBusyAction(null);
@@ -648,8 +661,14 @@ export default function AuthScreen() {
                 style={[
                   styles.entryView,
                   {
-                    opacity: entryTransition,
-                    transform: [{ translateY: entryTransition.interpolate({ inputRange: [0, 1], outputRange: [6, 0] }) }],
+                    opacity: keepPasswordFormVisible ? 1 : entryTransition,
+                    transform: [
+                      {
+                        translateY: keepPasswordFormVisible
+                          ? 0
+                          : entryTransition.interpolate({ inputRange: [0, 1], outputRange: [6, 0] }),
+                      },
+                    ],
                   },
                 ]}
               >

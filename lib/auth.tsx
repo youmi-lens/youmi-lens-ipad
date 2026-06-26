@@ -34,6 +34,8 @@ const EMAIL_OTP_TYPES = new Set<EmailOtpType>([
   'email',
 ]);
 
+const INVALID_PASSWORD_MESSAGE = 'Invalid email or password.';
+
 type AuthResult = {
   error: string | null;
 };
@@ -536,10 +538,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     if (error.message.toLowerCase().includes('invalid login credentials')) {
-      return {
-        error:
-          'Invalid email or password. If you forgot your password or created your account without one, use an email verification code.',
-      };
+      return { error: INVALID_PASSWORD_MESSAGE };
     }
 
     return { error: error.message };
