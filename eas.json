@@ -26,5 +26,12 @@
         "EXPO_PUBLIC_USE_REAL_IAP": "true"
       }
     }
+  },
+  "submit": {
+    "production": {
+      "ios": {
+        "ascAppId": "6770884875"
+      }
+    }
   }
 }
