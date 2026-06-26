@@ -203,20 +203,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const metadataUsername =
       typeof nextUser.user_metadata?.username === 'string' ? nextUser.user_metadata.username : null;
 
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('username')
-      .eq('id', nextUser.id)
-      .maybeSingle();
+    let result: {
+      data: { username: string | null } | null;
+      error: { message: string } | null;
+    };
+    try {
+      result = await supabase
+        .from('profiles')
+        .select('username')
+        .eq('id', nextUser.id)
+        .maybeSingle();
+    } catch (error) {
+      result = {
+        data: null,
+        error: error instanceof Error ? error : new Error('Unable to load profile username'),
+      };
+    }
 
-    if (error) {
-      console.warn('[auth] unable to load profile username', error.message);
+    if (result.error) {
+      console.warn('[auth] unable to load profile username', result.error.message);
       setUsername(metadataUsername);
       setNeedsUsernameSetup(!metadataUsername);
       return;
     }
 
-    const nextUsername = data?.username ?? metadataUsername;
+    const nextUsername = result.data?.username ?? metadataUsername;
     setUsername(nextUsername);
     setNeedsUsernameSetup(!nextUsername);
   }, []);
@@ -510,6 +521,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
     if (!error) {
+      if (!data.session) {
+        return { error: 'Sign-in completed without a valid session. Please try again.' };
+      }
       // Hydrate session/user/username state synchronously before returning, exactly
       // like the email-code, signup and password-reset flows. Without this, the
       // password path relied solely on the async onAuthStateChange listener, so the
@@ -517,7 +531,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // navigator group) was ready — the REPLACE wasn't handled by any navigator and
       // the login card froze on a blank panel. Apple/Google never hit this because
       // they navigate from the reactive effect, after session state has settled.
-      if (data.session) await applySessionState(data.session);
+      await applySessionState(data.session);
       return { error: null };
     }
 

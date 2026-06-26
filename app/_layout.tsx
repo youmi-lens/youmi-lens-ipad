@@ -57,7 +57,7 @@ export default function RootLayout() {
  *  - A fully signed-in user is bounced off `auth` to `/` (the `(tabs)` anchor).
  */
 function AuthGate() {
-  const { session, loading, isResettingPassword, needsUsernameSetup, isGuest } = useAuth();
+  const { session, loading, isGuest } = useAuth();
 
   if (loading) {
     return (
@@ -67,9 +67,6 @@ function AuthGate() {
     );
   }
 
-  // A fully signed-in user (not mid-reset, not setting a username) belongs in the
-  // app. While either of those flows is active, the auth screen stays reachable.
-  const isFullyAuthenticated = !!session && !isResettingPassword && !needsUsernameSetup;
   const canUseApp = !!session || isGuest;
 
   return (
@@ -79,10 +76,8 @@ function AuthGate() {
         contentStyle: { backgroundColor: colors.background },
       }}
     >
-      <Stack.Protected guard={!isFullyAuthenticated}>
-        <Stack.Screen name="auth" />
-        <Stack.Screen name="auth/callback" />
-      </Stack.Protected>
+      <Stack.Screen name="auth" />
+      <Stack.Screen name="auth/callback" />
       <Stack.Protected guard={canUseApp}>
         <Stack.Screen name="(tabs)" />
         <Stack.Screen
