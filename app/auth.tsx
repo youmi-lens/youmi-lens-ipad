@@ -310,14 +310,26 @@ export default function AuthScreen() {
 
     setBusyAction('signin');
     setError(null);
-    const { error: signInError } = await signInWithPassword(trimmedEmail, password);
-    setBusyAction(null);
-    if (signInError) {
-      setError(signInError);
-      return;
+    // Mirror the Apple/Google handler exactly: clear the busy state in `finally`
+    // (so the card never freezes) and DO NOT navigate imperatively.
+    // signInWithPassword hydrates the session via applySessionState; once `session`
+    // is set, the reactive effect above (and the AuthGate guards) route into the
+    // app — the same post-auth path the working provider sign-ins use. Calling
+    // router.replace('/') here ran in the same tick before the navigator had the
+    // authenticated session mounted, so the REPLACE was dropped and the login card
+    // was left blank on release builds (build 22). Removing it fixes that.
+    try {
+      const { error: signInError } = await signInWithPassword(trimmedEmail, password);
+      if (signInError) {
+        setError(signInError);
+        return;
+      }
+      setPersistentError(null);
+    } catch {
+      setError('Sign-in is temporarily unavailable. Please try again later.');
+    } finally {
+      setBusyAction(null);
     }
-    setPersistentError(null);
-    router.replace('/');
   };
 
   const changeEmail = () => {
