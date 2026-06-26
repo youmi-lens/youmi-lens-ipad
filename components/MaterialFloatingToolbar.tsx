@@ -588,15 +588,11 @@ export function MaterialFloatingToolbar({
   }, []);
 
   // ---- Render helpers ----
-  const renderUnderline = () => (
-    <View
-      style={[
-        styles.toolUnderline,
-        vertical && styles.toolUnderlineVertical,
-        onRight && styles.toolUnderlineVerticalRight,
-      ]}
-    />
-  );
+  // Active-tool indicator: a soft background chip when docked vertically (matches
+  // the Notebook's vertical rail) and a short underline when horizontal (matches
+  // the Notebook's horizontal strip). Rendered behind the glyph for the chip.
+  const renderActiveChip = () => <View style={styles.activeChip} pointerEvents="none" />;
+  const renderUnderline = () => <View style={styles.toolUnderline} pointerEvents="none" />;
 
   const renderToolButton = (tool: { key: Exclude<MaterialToolMode, 'scroll'>; label: string }) => {
     const active = mode === tool.key;
@@ -611,8 +607,9 @@ export function MaterialFloatingToolbar({
         {...dragHandlers}
         style={({ pressed }) => [styles.toolButton, pressed && styles.pressed]}
       >
+        {active && vertical ? renderActiveChip() : null}
         <Glyph name={tool.key} color={active ? TOOLBAR_SELECTED : TOOLBAR_ICON_IDLE} size={25} />
-        {active ? renderUnderline() : null}
+        {active && !vertical ? renderUnderline() : null}
       </Pressable>
     );
   };
@@ -628,8 +625,9 @@ export function MaterialFloatingToolbar({
       {...dragHandlers}
       style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}
     >
+      {handActive && vertical ? renderActiveChip() : null}
       <Glyph name="hand" color={handActive ? TOOLBAR_SELECTED : TOOLBAR_ICON_IDLE} />
-      {handActive ? renderUnderline() : null}
+      {handActive && !vertical ? renderUnderline() : null}
     </Pressable>
   );
 
@@ -664,63 +662,78 @@ export function MaterialFloatingToolbar({
     </Pressable>
   );
 
-  // Colour context — a compact swatch strip that appears only while Pen or
-  // Highlight is the active tool, mirroring the Notebook's colour picker (fill +
-  // blue selected ring). It sits inside the same shell beneath the main strip, so
-  // the main strip itself is unchanged. The capsule re-measures and re-docks when
-  // it appears/disappears via the existing size-change effect.
+  // Colour context — appears only while Pen or Highlight is the active tool.
+  // Integrated INTO the toolbar like the Notebook: a side column beside the rail
+  // when docked vertically, or a compact row beneath the strip when horizontal —
+  // separated by a hairline and living inside the same navy pill (not a tail).
   const drawColorMode = mode === 'pen' || mode === 'highlighter';
   const colorPalette = mode === 'highlighter' ? highlighterColors : penColors;
   const activeColor = mode === 'highlighter' ? highlighterColor : penColor;
-  const colorStrip = drawColorMode ? (
-    <>
-      <View style={styles.colorDivider} />
-      <View style={[styles.colorStrip, vertical && styles.colorStripVertical]}>
-        {colorPalette.map((option) => {
-          const isActive = activeColor.toLowerCase() === option.value.toLowerCase();
-          return (
-            <Pressable
-              key={option.key}
-              accessibilityRole="button"
-              accessibilityLabel={`${mode === 'highlighter' ? 'Highlight' : 'Pen'} colour ${option.key}`}
-              accessibilityState={{ selected: isActive }}
-              onPress={() => runPress(() => onSelectColor(option.value))}
-              hitSlop={TOOLBAR_ICON_HIT_SLOP}
-              style={({ pressed }) => [styles.swatch, pressed && styles.pressed]}
-            >
-              <View style={[StyleSheet.absoluteFill, styles.swatchFill, { backgroundColor: option.value }]} />
-              {isActive ? <View style={styles.swatchRing} /> : null}
-            </Pressable>
-          );
-        })}
-      </View>
-    </>
+  const colorSwatches = colorPalette.map((option) => {
+    const isActive = activeColor.toLowerCase() === option.value.toLowerCase();
+    return (
+      <Pressable
+        key={option.key}
+        accessibilityRole="button"
+        accessibilityLabel={`${mode === 'highlighter' ? 'Highlight' : 'Pen'} colour ${option.key}`}
+        accessibilityState={{ selected: isActive }}
+        onPress={() => runPress(() => onSelectColor(option.value))}
+        hitSlop={TOOLBAR_ICON_HIT_SLOP}
+        style={({ pressed }) => [styles.swatch, pressed && styles.pressed]}
+      >
+        <View style={[StyleSheet.absoluteFill, styles.swatchFill, { backgroundColor: option.value }]} />
+        {isActive ? <View style={styles.swatchRing} /> : null}
+      </Pressable>
+    );
+  });
+  const colorContext = drawColorMode ? (
+    vertical ? (
+      <>
+        <View style={styles.colColumnDivider} />
+        <View style={styles.colContextColumn}>{colorSwatches}</View>
+      </>
+    ) : (
+      <>
+        <View style={styles.colRowDivider} />
+        <View style={styles.colContextRow}>{colorSwatches}</View>
+      </>
+    )
   ) : null;
 
-  // Single strip — horizontal row OR vertical column (pure stack, no sub-rows) —
-  // with the colour strip stacked beneath it when a draw tool is active.
-  const expandedCapsule = (
-    <View style={vertical ? styles.expandedWrapVertical : styles.expandedWrap}>
-      <View style={vertical ? styles.rail : styles.row}>
-        <View
-          accessibilityLabel="Move material tools"
-          accessibilityRole="adjustable"
-          style={[styles.dragHandle, vertical && styles.dragHandleVertical]}
-          {...dragHandlers}
-        >
-          <GripDots />
-        </View>
-        <View style={[styles.tools, vertical && styles.toolsVertical]}>
-          {PRIMARY_TOOLS.map(renderToolButton)}
-        </View>
-        <View style={[styles.divider, vertical && styles.dividerVertical]} />
-        {renderHand()}
-        <View style={[styles.divider, vertical && styles.dividerVertical]} />
-        {renderHistoryButton('undo', canUndo, onUndo, 'Undo last annotation stroke')}
-        {renderHistoryButton('redo', canRedo, onRedo, 'Redo annotation stroke')}
-        {renderMinimize()}
+  const mainStrip = (
+    <View style={vertical ? styles.rail : styles.row}>
+      <View
+        accessibilityLabel="Move material tools"
+        accessibilityRole="adjustable"
+        style={[styles.dragHandle, vertical && styles.dragHandleVertical]}
+        {...dragHandlers}
+      >
+        <GripDots />
       </View>
-      {colorStrip}
+      <View style={[styles.tools, vertical && styles.toolsVertical]}>
+        {PRIMARY_TOOLS.map(renderToolButton)}
+      </View>
+      <View style={[styles.divider, vertical && styles.dividerVertical]} />
+      {renderHand()}
+      <View style={[styles.divider, vertical && styles.dividerVertical]} />
+      {renderHistoryButton('undo', canUndo, onUndo, 'Undo last annotation stroke')}
+      {renderHistoryButton('redo', canRedo, onRedo, 'Redo annotation stroke')}
+      {renderMinimize()}
+    </View>
+  );
+
+  // Vertical: rail + side colour column (colours face inward — to the left when the
+  // rail is docked on the right edge). Horizontal: main row + colour row beneath.
+  const expandedCapsule = (
+    <View
+      style={
+        vertical
+          ? [styles.expandedVertical, onRight && styles.expandedVerticalRight]
+          : styles.expandedHorizontal
+      }
+    >
+      {mainStrip}
+      {colorContext}
     </View>
   );
 
@@ -869,16 +882,16 @@ const styles = StyleSheet.create({
     borderRadius: 3,
     backgroundColor: TOOLBAR_SELECTED,
   },
-  toolUnderlineVertical: {
-    top: 13,
-    right: 3,
-    bottom: undefined,
-    width: 3,
-    height: 20,
-  },
-  toolUnderlineVerticalRight: {
-    right: undefined,
-    left: 3,
+  // Soft selected chip behind the active tool icon when docked vertically —
+  // matches the Notebook's vertical rail (cleaner than a side bar).
+  activeChip: {
+    position: 'absolute',
+    top: 3,
+    left: 6,
+    right: 6,
+    bottom: 3,
+    borderRadius: TOOLBAR_CHIP_RADIUS,
+    backgroundColor: 'rgba(95,134,232,0.14)',
   },
   collapseButton: {
     width: 34,
@@ -948,47 +961,58 @@ const styles = StyleSheet.create({
     opacity: 0.7,
     transform: [{ scale: 0.92 }],
   },
-  // Wrappers stack the main strip and the colour strip in one column for both
-  // orientations (colours sit beneath the tools).
-  expandedWrap: {
+  // Expanded capsule wrappers. Horizontal: main row + colour row stacked (column).
+  // Vertical: rail + colour column side by side (row), colours facing inward via
+  // row-reverse when the rail is docked on the right edge.
+  expandedHorizontal: {
     flexDirection: 'column',
+    alignItems: 'stretch',
   },
-  expandedWrapVertical: {
-    flexDirection: 'column',
-    width: 56,
+  expandedVertical: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
   },
-  colorDivider: {
+  expandedVerticalRight: {
+    flexDirection: 'row-reverse',
+  },
+  // Colour row beneath the horizontal strip.
+  colRowDivider: {
     alignSelf: 'stretch',
     height: StyleSheet.hairlineWidth,
-    marginHorizontal: 10,
-    marginTop: 2,
-    marginBottom: 4,
+    marginHorizontal: 12,
     backgroundColor: TOOLBAR_DIVIDER_COLOR,
   },
-  colorStrip: {
+  colContextRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    flexWrap: 'wrap',
-    gap: 8,
+    gap: 10,
     paddingHorizontal: 12,
+    paddingTop: 5,
     paddingBottom: 8,
-    paddingTop: 2,
   },
-  colorStripVertical: {
+  // Colour column beside the vertical rail (full-height hairline between them).
+  colColumnDivider: {
+    width: StyleSheet.hairlineWidth,
+    marginVertical: 14,
+    backgroundColor: TOOLBAR_DIVIDER_COLOR,
+  },
+  colContextColumn: {
     flexDirection: 'column',
-    paddingHorizontal: 0,
-    paddingVertical: 8,
-    gap: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 12,
   },
   swatch: {
-    width: 26,
-    height: 26,
+    width: 24,
+    height: 24,
     alignItems: 'center',
     justifyContent: 'center',
   },
   swatchFill: {
-    borderRadius: 13,
+    borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: 'rgba(255,255,255,0.28)',
   },
@@ -998,7 +1022,7 @@ const styles = StyleSheet.create({
     left: -4,
     right: -4,
     bottom: -4,
-    borderRadius: 17,
+    borderRadius: 16,
     borderWidth: 2.5,
     borderColor: TOOLBAR_SELECTED,
   },
