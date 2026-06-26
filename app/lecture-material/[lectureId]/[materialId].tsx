@@ -120,13 +120,13 @@ export default function LectureMaterialWorkspaceScreen() {
   // --- Native PDFKit annotation state (Phase 2) ---
   // Native overlay-only state; the legacy JS-overlay branch below does NOT use these.
   const [nativeAnnotationMode, setNativeAnnotationMode] = useState<NativePdfAnnotationMode>('scroll');
-  // Ink colour / width / eraser size use the default presets. The reduced
-  // Course Material toolbar exposes Pen/Highlight/Eraser/Hand/Undo/Redo only
-  // (no colour/width pickers), so these are fixed and need no setters; the
-  // native view still reads them on every render.
-  const [nativePenColor] = useState<string>(PEN_COLORS[0].value);
+  // Pen/Highlight colour are user-selectable from the toolbar's colour strip;
+  // width and eraser size keep their default presets (no width picker). The
+  // native view reads these on every render, so changing the colour applies to
+  // the next stroke without touching committed annotations or PDF coordinates.
+  const [nativePenColor, setNativePenColor] = useState<string>(PEN_COLORS[0].value);
   const [nativePenWidth] = useState<number>(PEN_WIDTHS[1].value);
-  const [nativeHighlighterColor] = useState<string>(HIGHLIGHTER_COLORS[0].value);
+  const [nativeHighlighterColor, setNativeHighlighterColor] = useState<string>(HIGHLIGHTER_COLORS[0].value);
   const [nativeHighlighterWidth] = useState<number>(HIGHLIGHTER_WIDTHS[1].value);
   const [nativeEraserRadius] = useState<number>(ERASER_SIZES[1].value);
   const [nativeTemporaryEraser, setNativeTemporaryEraser] = useState(false);
@@ -168,10 +168,10 @@ export default function LectureMaterialWorkspaceScreen() {
   const [loadingPdf, setLoadingPdf] = useState(true);
   const [pdfError, setPdfError] = useState<string | null>(null);
   const [annotationMode, setAnnotationMode] = useState<MaterialAnnotationMode>('scroll');
-  // Fallback (JS overlay) ink presets — fixed, matching the reduced toolbar.
-  const [penColor] = useState(PEN_COLORS[0].value);
+  // Fallback (JS overlay) ink presets — colour is selectable, width fixed.
+  const [penColor, setPenColor] = useState(PEN_COLORS[0].value);
   const [penWidth] = useState(PEN_WIDTHS[1].value);
-  const [highlighterColor] = useState(HIGHLIGHTER_COLORS[0].value);
+  const [highlighterColor, setHighlighterColor] = useState(HIGHLIGHTER_COLORS[0].value);
   const [highlighterWidth] = useState(HIGHLIGHTER_WIDTHS[1].value);
   const [eraserRadius] = useState(ERASER_SIZES[1].value);
   const [annotationStrokeActive, setAnnotationStrokeActive] = useState(false);
@@ -459,6 +459,25 @@ export default function LectureMaterialWorkspaceScreen() {
 
     setNativeAnnotationMode(next);
   }, []);
+
+  // Colour selection from the toolbar strip — applies to whichever draw tool is
+  // active. Native (PDFKit) and JS-overlay paths each have their own colour state;
+  // the toolbar instance for each path calls its matching handler.
+  const handleSelectNativeColor = useCallback((color: string) => {
+    if (nativeAnnotationModeRef.current === 'highlighter') {
+      setNativeHighlighterColor(color);
+    } else {
+      setNativePenColor(color);
+    }
+  }, []);
+
+  const handleSelectColor = useCallback((color: string) => {
+    if (annotationMode === 'highlighter') {
+      setHighlighterColor(color);
+    } else {
+      setPenColor(color);
+    }
+  }, [annotationMode]);
 
   const restoreNativeTemporaryEraserIfNeeded = useCallback(() => {
     if (!nativeTemporaryEraserRef.current) return;
@@ -750,6 +769,11 @@ export default function LectureMaterialWorkspaceScreen() {
           canUndo={pageStrokes.some((stroke) => stroke.coordSpace === 'pdfPage')}
           onRedo={redoNativeCurrentPage}
           canRedo={nativeRedoStack.length > 0}
+          penColors={PEN_COLORS}
+          penColor={nativePenColor}
+          highlighterColors={HIGHLIGHTER_COLORS}
+          highlighterColor={nativeHighlighterColor}
+          onSelectColor={handleSelectNativeColor}
         />
       ) : Pdf ? (
         <MaterialFloatingToolbar
@@ -759,6 +783,11 @@ export default function LectureMaterialWorkspaceScreen() {
           canUndo={pageStrokes.length > 0}
           onRedo={redoCurrentPage}
           canRedo={redoStack.length > 0}
+          penColors={PEN_COLORS}
+          penColor={penColor}
+          highlighterColors={HIGHLIGHTER_COLORS}
+          highlighterColor={highlighterColor}
+          onSelectColor={handleSelectColor}
         />
       ) : null}
 

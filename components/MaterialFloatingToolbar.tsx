@@ -324,6 +324,8 @@ const PRIMARY_TOOLS: { key: Exclude<MaterialToolMode, 'scroll'>; label: string }
   { key: 'eraser', label: 'Eraser' },
 ];
 
+export type MaterialColorOption = { key: string; value: string };
+
 export type MaterialFloatingToolbarProps = {
   mode: MaterialToolMode;
   onChangeMode: (next: MaterialToolMode) => void;
@@ -331,6 +333,14 @@ export type MaterialFloatingToolbarProps = {
   canUndo: boolean;
   onRedo: () => void;
   canRedo: boolean;
+  /** Pen colour palette + current pen colour (shown when Pen is active). */
+  penColors: MaterialColorOption[];
+  penColor: string;
+  /** Highlighter colour palette + current colour (shown when Highlight is active). */
+  highlighterColors: MaterialColorOption[];
+  highlighterColor: string;
+  /** Apply a colour to the active draw tool (Pen or Highlight). */
+  onSelectColor: (color: string) => void;
 };
 
 export function MaterialFloatingToolbar({
@@ -340,6 +350,11 @@ export function MaterialFloatingToolbar({
   canUndo,
   onRedo,
   canRedo,
+  penColors,
+  penColor,
+  highlighterColors,
+  highlighterColor,
+  onSelectColor,
 }: MaterialFloatingToolbarProps) {
   const [dock, setDock] = useState<MaterialToolbarDock>(DEFAULT_PREFERENCES.dock);
   const [collapsed, setCollapsed] = useState(DEFAULT_PREFERENCES.collapsed);
@@ -649,26 +664,63 @@ export function MaterialFloatingToolbar({
     </Pressable>
   );
 
-  // Single strip — horizontal row OR vertical column (pure stack, no sub-rows).
+  // Colour context — a compact swatch strip that appears only while Pen or
+  // Highlight is the active tool, mirroring the Notebook's colour picker (fill +
+  // blue selected ring). It sits inside the same shell beneath the main strip, so
+  // the main strip itself is unchanged. The capsule re-measures and re-docks when
+  // it appears/disappears via the existing size-change effect.
+  const drawColorMode = mode === 'pen' || mode === 'highlighter';
+  const colorPalette = mode === 'highlighter' ? highlighterColors : penColors;
+  const activeColor = mode === 'highlighter' ? highlighterColor : penColor;
+  const colorStrip = drawColorMode ? (
+    <>
+      <View style={styles.colorDivider} />
+      <View style={[styles.colorStrip, vertical && styles.colorStripVertical]}>
+        {colorPalette.map((option) => {
+          const isActive = activeColor.toLowerCase() === option.value.toLowerCase();
+          return (
+            <Pressable
+              key={option.key}
+              accessibilityRole="button"
+              accessibilityLabel={`${mode === 'highlighter' ? 'Highlight' : 'Pen'} colour ${option.key}`}
+              accessibilityState={{ selected: isActive }}
+              onPress={() => runPress(() => onSelectColor(option.value))}
+              hitSlop={TOOLBAR_ICON_HIT_SLOP}
+              style={({ pressed }) => [styles.swatch, pressed && styles.pressed]}
+            >
+              <View style={[StyleSheet.absoluteFill, styles.swatchFill, { backgroundColor: option.value }]} />
+              {isActive ? <View style={styles.swatchRing} /> : null}
+            </Pressable>
+          );
+        })}
+      </View>
+    </>
+  ) : null;
+
+  // Single strip — horizontal row OR vertical column (pure stack, no sub-rows) —
+  // with the colour strip stacked beneath it when a draw tool is active.
   const expandedCapsule = (
-    <View style={vertical ? styles.rail : styles.row}>
-      <View
-        accessibilityLabel="Move material tools"
-        accessibilityRole="adjustable"
-        style={[styles.dragHandle, vertical && styles.dragHandleVertical]}
-        {...dragHandlers}
-      >
-        <GripDots />
+    <View style={vertical ? styles.expandedWrapVertical : styles.expandedWrap}>
+      <View style={vertical ? styles.rail : styles.row}>
+        <View
+          accessibilityLabel="Move material tools"
+          accessibilityRole="adjustable"
+          style={[styles.dragHandle, vertical && styles.dragHandleVertical]}
+          {...dragHandlers}
+        >
+          <GripDots />
+        </View>
+        <View style={[styles.tools, vertical && styles.toolsVertical]}>
+          {PRIMARY_TOOLS.map(renderToolButton)}
+        </View>
+        <View style={[styles.divider, vertical && styles.dividerVertical]} />
+        {renderHand()}
+        <View style={[styles.divider, vertical && styles.dividerVertical]} />
+        {renderHistoryButton('undo', canUndo, onUndo, 'Undo last annotation stroke')}
+        {renderHistoryButton('redo', canRedo, onRedo, 'Redo annotation stroke')}
+        {renderMinimize()}
       </View>
-      <View style={[styles.tools, vertical && styles.toolsVertical]}>
-        {PRIMARY_TOOLS.map(renderToolButton)}
-      </View>
-      <View style={[styles.divider, vertical && styles.dividerVertical]} />
-      {renderHand()}
-      <View style={[styles.divider, vertical && styles.dividerVertical]} />
-      {renderHistoryButton('undo', canUndo, onUndo, 'Undo last annotation stroke')}
-      {renderHistoryButton('redo', canRedo, onRedo, 'Redo annotation stroke')}
-      {renderMinimize()}
+      {colorStrip}
     </View>
   );
 
@@ -895,5 +947,59 @@ const styles = StyleSheet.create({
   pressed: {
     opacity: 0.7,
     transform: [{ scale: 0.92 }],
+  },
+  // Wrappers stack the main strip and the colour strip in one column for both
+  // orientations (colours sit beneath the tools).
+  expandedWrap: {
+    flexDirection: 'column',
+  },
+  expandedWrapVertical: {
+    flexDirection: 'column',
+    width: 56,
+  },
+  colorDivider: {
+    alignSelf: 'stretch',
+    height: StyleSheet.hairlineWidth,
+    marginHorizontal: 10,
+    marginTop: 2,
+    marginBottom: 4,
+    backgroundColor: TOOLBAR_DIVIDER_COLOR,
+  },
+  colorStrip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexWrap: 'wrap',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingBottom: 8,
+    paddingTop: 2,
+  },
+  colorStripVertical: {
+    flexDirection: 'column',
+    paddingHorizontal: 0,
+    paddingVertical: 8,
+    gap: 8,
+  },
+  swatch: {
+    width: 26,
+    height: 26,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  swatchFill: {
+    borderRadius: 13,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.28)',
+  },
+  swatchRing: {
+    position: 'absolute',
+    top: -4,
+    left: -4,
+    right: -4,
+    bottom: -4,
+    borderRadius: 17,
+    borderWidth: 2.5,
+    borderColor: TOOLBAR_SELECTED,
   },
 });
