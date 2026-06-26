@@ -325,6 +325,8 @@ const PRIMARY_TOOLS: { key: Exclude<MaterialToolMode, 'scroll'>; label: string }
 ];
 
 export type MaterialColorOption = { key: string; value: string };
+/** `dot` is the preview-dot diameter shown inside the nib; `value` is the width/radius. */
+export type MaterialSizeOption = { key: string; value: number; dot: number };
 
 export type MaterialFloatingToolbarProps = {
   mode: MaterialToolMode;
@@ -341,6 +343,19 @@ export type MaterialFloatingToolbarProps = {
   highlighterColor: string;
   /** Apply a colour to the active draw tool (Pen or Highlight). */
   onSelectColor: (color: string) => void;
+  /** Pen stroke-width presets + current width (shown when Pen is active). */
+  penWidths: MaterialSizeOption[];
+  penWidth: number;
+  /** Highlighter stroke-width presets + current width (shown when Highlight is active). */
+  highlighterWidths: MaterialSizeOption[];
+  highlighterWidth: number;
+  /** Apply a stroke width to the active draw tool (Pen or Highlight). */
+  onSelectWidth: (width: number) => void;
+  /** Eraser coverage presets + current radius (shown when Eraser is active). */
+  eraserSizes: MaterialSizeOption[];
+  eraserSize: number;
+  /** Apply an eraser coverage radius. */
+  onSelectEraserSize: (radius: number) => void;
 };
 
 export function MaterialFloatingToolbar({
@@ -355,6 +370,14 @@ export function MaterialFloatingToolbar({
   highlighterColors,
   highlighterColor,
   onSelectColor,
+  penWidths,
+  penWidth,
+  highlighterWidths,
+  highlighterWidth,
+  onSelectWidth,
+  eraserSizes,
+  eraserSize,
+  onSelectEraserSize,
 }: MaterialFloatingToolbarProps) {
   const [dock, setDock] = useState<MaterialToolbarDock>(DEFAULT_PREFERENCES.dock);
   const [collapsed, setCollapsed] = useState(DEFAULT_PREFERENCES.collapsed);
@@ -662,11 +685,15 @@ export function MaterialFloatingToolbar({
     </Pressable>
   );
 
-  // Colour context — appears only while Pen or Highlight is the active tool.
-  // Integrated INTO the toolbar like the Notebook: a side column beside the rail
-  // when docked vertically, or a compact row beneath the strip when horizontal —
-  // separated by a hairline and living inside the same navy pill (not a tail).
+  // Tool context — appears only for a draw/erase tool. Integrated INTO the toolbar
+  // like the Notebook: a side column beside the rail when docked vertically, or a
+  // compact row beneath the strip when horizontal, inside the same navy pill (not a
+  // tail). Pen/Highlight show [colour swatches | divider | width nibs]; Eraser shows
+  // [size nibs] only.
   const drawColorMode = mode === 'pen' || mode === 'highlighter';
+  const eraserContextMode = mode === 'eraser';
+  const hasContext = drawColorMode || eraserContextMode;
+
   const colorPalette = mode === 'highlighter' ? highlighterColors : penColors;
   const activeColor = mode === 'highlighter' ? highlighterColor : penColor;
   const colorSwatches = colorPalette.map((option) => {
@@ -686,16 +713,70 @@ export function MaterialFloatingToolbar({
       </Pressable>
     );
   });
-  const colorContext = drawColorMode ? (
+
+  // Width / eraser-size nibs: a circle that gains a blue ring when selected, with a
+  // white preview dot sized to represent the stroke width / eraser coverage.
+  const widthOptions = mode === 'highlighter' ? highlighterWidths : penWidths;
+  const activeWidth = mode === 'highlighter' ? highlighterWidth : penWidth;
+  const renderNib = (
+    key: string,
+    label: string,
+    dot: number,
+    active: boolean,
+    onPress: () => void,
+  ) => (
+    <Pressable
+      key={key}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityState={{ selected: active }}
+      onPress={() => runPress(onPress)}
+      hitSlop={TOOLBAR_ICON_HIT_SLOP}
+      style={({ pressed }) => [styles.nib, active && styles.nibActive, pressed && styles.pressed]}
+    >
+      <View style={{ width: dot, height: dot, borderRadius: dot / 2, backgroundColor: 'rgba(255,255,255,0.92)' }} />
+    </Pressable>
+  );
+  const widthNibs = widthOptions.map((option) =>
+    renderNib(
+      option.key,
+      `${mode === 'highlighter' ? 'Highlight' : 'Pen'} width ${option.key}`,
+      option.dot,
+      activeWidth === option.value,
+      () => onSelectWidth(option.value),
+    ),
+  );
+  const eraserNibs = eraserSizes.map((option) =>
+    renderNib(
+      option.key,
+      `${option.key} eraser`,
+      option.dot,
+      eraserSize === option.value,
+      () => onSelectEraserSize(option.value),
+    ),
+  );
+
+  // Context body: grouped colour + width (draw tools) or size only (eraser).
+  const contextBody = drawColorMode ? (
+    <>
+      <View style={vertical ? styles.groupColumn : styles.groupRow}>{colorSwatches}</View>
+      <View style={vertical ? styles.groupDividerH : styles.groupDividerV} />
+      <View style={vertical ? styles.groupColumn : styles.groupRow}>{widthNibs}</View>
+    </>
+  ) : (
+    <View style={vertical ? styles.groupColumn : styles.groupRow}>{eraserNibs}</View>
+  );
+
+  const colorContext = hasContext ? (
     vertical ? (
       <>
         <View style={styles.colColumnDivider} />
-        <View style={styles.colContextColumn}>{colorSwatches}</View>
+        <View style={styles.colContextColumn}>{contextBody}</View>
       </>
     ) : (
       <>
         <View style={styles.colRowDivider} />
-        <View style={styles.colContextRow}>{colorSwatches}</View>
+        <View style={styles.colContextRow}>{contextBody}</View>
       </>
     )
   ) : null;
@@ -1024,6 +1105,42 @@ const styles = StyleSheet.create({
     bottom: -4,
     borderRadius: 16,
     borderWidth: 2.5,
+    borderColor: TOOLBAR_SELECTED,
+  },
+  // Grouping inside the context (colour group, divider, width group). Row for the
+  // horizontal context; column for the vertical context.
+  groupRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  groupColumn: {
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: 8,
+  },
+  groupDividerV: {
+    width: StyleSheet.hairlineWidth,
+    height: 30,
+    backgroundColor: TOOLBAR_DIVIDER_COLOR,
+  },
+  groupDividerH: {
+    height: StyleSheet.hairlineWidth,
+    width: 30,
+    backgroundColor: TOOLBAR_DIVIDER_COLOR,
+  },
+  // Width / eraser-size nib — circle with a blue ring when selected (matches the
+  // Notebook nib visual language), holding a white preview dot.
+  nib: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: 'transparent',
+  },
+  nibActive: {
     borderColor: TOOLBAR_SELECTED,
   },
 });

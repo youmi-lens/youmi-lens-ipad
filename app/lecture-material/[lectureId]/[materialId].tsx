@@ -70,20 +70,22 @@ const HIGHLIGHTER_COLORS = [
   { key: 'Pink', value: '#FF9CCB' },
   { key: 'Green', value: '#9BE7A6' },
 ];
+// `dot` is the preview-dot diameter shown inside each width/size nib (matches the
+// Notebook's nib visual language); `value` is the actual stroke width / radius.
 const PEN_WIDTHS = [
-  { key: 'Thin', value: 2.4 },
-  { key: 'Medium', value: 4 },
-  { key: 'Thick', value: 6.5 },
+  { key: 'Thin', value: 2.4, dot: 7 },
+  { key: 'Medium', value: 4, dot: 11 },
+  { key: 'Thick', value: 6.5, dot: 16 },
 ];
 const HIGHLIGHTER_WIDTHS = [
-  { key: 'Narrow', value: 12 },
-  { key: 'Medium', value: 18 },
-  { key: 'Wide', value: 26 },
+  { key: 'Narrow', value: 12, dot: 8 },
+  { key: 'Medium', value: 18, dot: 12 },
+  { key: 'Wide', value: 26, dot: 17 },
 ];
 const ERASER_SIZES = [
-  { key: 'Small', value: 16 },
-  { key: 'Medium', value: 26 },
-  { key: 'Large', value: 40 },
+  { key: 'Small', value: 16, dot: 8 },
+  { key: 'Medium', value: 26, dot: 13 },
+  { key: 'Large', value: 40, dot: 19 },
 ];
 const MATERIAL_REVIEW_LECTURE_ID = '__material_review__';
 
@@ -125,10 +127,10 @@ export default function LectureMaterialWorkspaceScreen() {
   // native view reads these on every render, so changing the colour applies to
   // the next stroke without touching committed annotations or PDF coordinates.
   const [nativePenColor, setNativePenColor] = useState<string>(PEN_COLORS[0].value);
-  const [nativePenWidth] = useState<number>(PEN_WIDTHS[1].value);
+  const [nativePenWidth, setNativePenWidth] = useState<number>(PEN_WIDTHS[1].value);
   const [nativeHighlighterColor, setNativeHighlighterColor] = useState<string>(HIGHLIGHTER_COLORS[0].value);
-  const [nativeHighlighterWidth] = useState<number>(HIGHLIGHTER_WIDTHS[1].value);
-  const [nativeEraserRadius] = useState<number>(ERASER_SIZES[1].value);
+  const [nativeHighlighterWidth, setNativeHighlighterWidth] = useState<number>(HIGHLIGHTER_WIDTHS[1].value);
+  const [nativeEraserRadius, setNativeEraserRadius] = useState<number>(ERASER_SIZES[1].value);
   const [nativeTemporaryEraser, setNativeTemporaryEraser] = useState(false);
   const nativeAnnotationModeRef = useRef<NativePdfAnnotationMode>(nativeAnnotationMode);
   const nativePreviousDrawingToolRef = useRef<Extract<NativePdfAnnotationMode, 'pen' | 'highlighter'>>('pen');
@@ -168,12 +170,12 @@ export default function LectureMaterialWorkspaceScreen() {
   const [loadingPdf, setLoadingPdf] = useState(true);
   const [pdfError, setPdfError] = useState<string | null>(null);
   const [annotationMode, setAnnotationMode] = useState<MaterialAnnotationMode>('scroll');
-  // Fallback (JS overlay) ink presets — colour is selectable, width fixed.
+  // Fallback (JS overlay) ink presets — colour, width and eraser size selectable.
   const [penColor, setPenColor] = useState(PEN_COLORS[0].value);
-  const [penWidth] = useState(PEN_WIDTHS[1].value);
+  const [penWidth, setPenWidth] = useState(PEN_WIDTHS[1].value);
   const [highlighterColor, setHighlighterColor] = useState(HIGHLIGHTER_COLORS[0].value);
-  const [highlighterWidth] = useState(HIGHLIGHTER_WIDTHS[1].value);
-  const [eraserRadius] = useState(ERASER_SIZES[1].value);
+  const [highlighterWidth, setHighlighterWidth] = useState(HIGHLIGHTER_WIDTHS[1].value);
+  const [eraserRadius, setEraserRadius] = useState(ERASER_SIZES[1].value);
   const [annotationStrokeActive, setAnnotationStrokeActive] = useState(false);
   const [previousDrawingTool, setPreviousDrawingTool] = useState<MaterialDrawingMode>('pen');
   const previousDrawModeRef = useRef<MaterialDrawingMode>('pen');
@@ -479,6 +481,32 @@ export default function LectureMaterialWorkspaceScreen() {
     }
   }, [annotationMode]);
 
+  // Stroke-width selection — applies to the active draw tool. Width feeds the PDF
+  // view as a prop and only affects future strokes (no coordinate/storage change).
+  const handleSelectNativeWidth = useCallback((width: number) => {
+    if (nativeAnnotationModeRef.current === 'highlighter') {
+      setNativeHighlighterWidth(width);
+    } else {
+      setNativePenWidth(width);
+    }
+  }, []);
+
+  const handleSelectWidth = useCallback((width: number) => {
+    if (annotationMode === 'highlighter') {
+      setHighlighterWidth(width);
+    } else {
+      setPenWidth(width);
+    }
+  }, [annotationMode]);
+
+  // Eraser coverage — wired to the native eraserRadius prop (and the JS overlay).
+  const handleSelectNativeEraserSize = useCallback((radius: number) => {
+    setNativeEraserRadius(radius);
+  }, []);
+  const handleSelectEraserSize = useCallback((radius: number) => {
+    setEraserRadius(radius);
+  }, []);
+
   const restoreNativeTemporaryEraserIfNeeded = useCallback(() => {
     if (!nativeTemporaryEraserRef.current) return;
     const restored = nativePreviousDrawingToolRef.current ?? 'pen';
@@ -774,6 +802,14 @@ export default function LectureMaterialWorkspaceScreen() {
           highlighterColors={HIGHLIGHTER_COLORS}
           highlighterColor={nativeHighlighterColor}
           onSelectColor={handleSelectNativeColor}
+          penWidths={PEN_WIDTHS}
+          penWidth={nativePenWidth}
+          highlighterWidths={HIGHLIGHTER_WIDTHS}
+          highlighterWidth={nativeHighlighterWidth}
+          onSelectWidth={handleSelectNativeWidth}
+          eraserSizes={ERASER_SIZES}
+          eraserSize={nativeEraserRadius}
+          onSelectEraserSize={handleSelectNativeEraserSize}
         />
       ) : Pdf ? (
         <MaterialFloatingToolbar
@@ -788,6 +824,14 @@ export default function LectureMaterialWorkspaceScreen() {
           highlighterColors={HIGHLIGHTER_COLORS}
           highlighterColor={highlighterColor}
           onSelectColor={handleSelectColor}
+          penWidths={PEN_WIDTHS}
+          penWidth={penWidth}
+          highlighterWidths={HIGHLIGHTER_WIDTHS}
+          highlighterWidth={highlighterWidth}
+          onSelectWidth={handleSelectWidth}
+          eraserSizes={ERASER_SIZES}
+          eraserSize={eraserRadius}
+          onSelectEraserSize={handleSelectEraserSize}
         />
       ) : null}
 
