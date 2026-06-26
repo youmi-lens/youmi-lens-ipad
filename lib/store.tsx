@@ -688,8 +688,39 @@ export function DataProvider({ children }: { children: ReactNode }) {
   const renameCourse = useCallback((courseId: string, newName: string) => {
     const trimmed = newName.trim();
     if (!trimmed) return;
+
+    // Update the local course name immediately (also persisted to the per-user
+    // AsyncStorage cache via the effect that watches `courses`).
     setCourses((prev) => prev.map((c) => (c.id === courseId ? { ...c, name: trimmed } : c)));
-  }, []);
+
+    // Persist to the backend. A course is NOT its own table — its name lives on the
+    // `course` column of each recording, and the cloud merge rebuilds courses by
+    // grouping recordings by that name on every hydrate (sign-in / launch) and
+    // foreground refresh. Without this push a rename only changes local state, so
+    // signing out and back in (which reloads from the backend) reverts the course to
+    // its stale remote name. Update every cloud-backed lecture in this course; RLS
+    // plus an explicit user_id filter scope the write to the current user. Fire-and-
+    // forget, mirroring renameLecture: a failure is logged and the local name stands.
+    const remoteIds = lecturesRef.current
+      .filter((l) => l.courseId === courseId && l.remoteRecordingId)
+      .map((l) => l.remoteRecordingId as string);
+    if (remoteIds.length > 0 && currentUserId) {
+      const now = new Date().toISOString();
+      void supabase
+        .from('recordings')
+        .update({ course: trimmed, updated_at: now })
+        .in('id', remoteIds)
+        .eq('user_id', currentUserId)
+        .then(({ error }) => {
+          if (error) {
+            console.warn('[store] remote course rename failed (kept local)', {
+              courseId,
+              message: error.message,
+            });
+          }
+        });
+    }
+  }, [currentUserId]);
 
   const renameLecture = useCallback((lectureId: string, newTitle: string) => {
     const trimmed = newTitle.trim();

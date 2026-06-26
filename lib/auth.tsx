@@ -508,8 +508,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signInWithPassword = useCallback(async (email: string, password: string): Promise<AuthResult> => {
     if (supabaseConfigError) return { error: supabaseConfigError };
 
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (!error) return { error: null };
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (!error) {
+      // Hydrate session/user/username state synchronously before returning, exactly
+      // like the email-code, signup and password-reset flows. Without this, the
+      // password path relied solely on the async onAuthStateChange listener, so the
+      // caller navigated to the app shell before `session` (and the authenticated
+      // navigator group) was ready — the REPLACE wasn't handled by any navigator and
+      // the login card froze on a blank panel. Apple/Google never hit this because
+      // they navigate from the reactive effect, after session state has settled.
+      if (data.session) await applySessionState(data.session);
+      return { error: null };
+    }
 
     if (error.message.toLowerCase().includes('invalid login credentials')) {
       return {
@@ -519,7 +529,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     return { error: error.message };
-  }, []);
+  }, [applySessionState]);
 
   /**
    * Forgot Password, step 1: ask Supabase to send a verification code by email.
