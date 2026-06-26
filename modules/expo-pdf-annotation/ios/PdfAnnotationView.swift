@@ -58,6 +58,11 @@ public final class PdfAnnotationView: ExpoView {
   /// Default pan-gesture touch-type list, captured before we ever restrict it.
   /// Used to restore scroll-mode behaviour without guessing.
   private var defaultPanAllowedTouchTypes: [NSNumber]?
+  /// PDFKit owns private gesture recognizers for text selection/copy. In
+  /// annotation modes those recognizers must not see Apple Pencil touches, or
+  /// dragging over PDF text opens the native Copy / Select / Look Up menu.
+  /// Store their original touch filters so Hand/scroll mode can restore PDFKit.
+  private var defaultAllowedTouchTypesByRecognizer: [ObjectIdentifier: [NSNumber]] = [:]
   /// Tracks the bounds size we last applied scale settings for, so we only
   /// recompute min/max on actual orientation/splitview changes — never per
   /// layout pass (which would yank user pinch state mid-gesture).
@@ -198,6 +203,7 @@ public final class PdfAnnotationView: ExpoView {
       applyScaleSettings(forceFit: false)
     }
     applyWorkspaceCanvasColors()
+    applyPdfGestureTouchPolicy()
     bringSubviewToFront(annotationOverlay)
     annotationOverlay.setNeedsDisplay()
   }
@@ -292,6 +298,7 @@ public final class PdfAnnotationView: ExpoView {
       // PDFView's internal scrollView only exists after the document loads,
       // so apply the gesture mode here (which writes to its panGestureRecognizer).
       self.updateGestureMode()
+      self.applyPdfGestureTouchPolicy()
       self.annotationOverlay.setNeedsDisplay()
       self.onLoadComplete(["totalPages": pdfDocument.pageCount])
       self.emitCurrentPage()
@@ -318,6 +325,7 @@ public final class PdfAnnotationView: ExpoView {
   private func updateGestureMode() {
     let isAnnotationTool = annotationMode == "pen" || annotationMode == "highlighter" || annotationMode == "eraser"
     pencilGesture.isEnabled = isAnnotationTool
+    applyPdfGestureTouchPolicy()
 
     guard let scrollView = observedScrollView ?? findInnerScrollView(in: pdfView) else {
       // Document may not be loaded yet — we'll re-apply after load. Until
@@ -465,6 +473,36 @@ public final class PdfAnnotationView: ExpoView {
       if let found = findInnerScrollView(in: sub) { return found }
     }
     return nil
+  }
+
+  private func allGestureRecognizers(in view: UIView) -> [UIGestureRecognizer] {
+    var recognizers = view.gestureRecognizers ?? []
+    for subview in view.subviews {
+      recognizers.append(contentsOf: allGestureRecognizers(in: subview))
+    }
+    return recognizers
+  }
+
+  private func applyPdfGestureTouchPolicy() {
+    let isAnnotationTool = annotationMode == "pen" || annotationMode == "highlighter" || annotationMode == "eraser"
+    let fingerTouchTypes = [
+      NSNumber(value: UITouch.TouchType.direct.rawValue),
+      NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)
+    ]
+
+    for recognizer in allGestureRecognizers(in: pdfView) {
+      if recognizer === pencilGesture { continue }
+      let key = ObjectIdentifier(recognizer)
+      if defaultAllowedTouchTypesByRecognizer[key] == nil {
+        defaultAllowedTouchTypesByRecognizer[key] = recognizer.allowedTouchTypes as? [NSNumber] ?? []
+      }
+
+      if isAnnotationTool {
+        recognizer.allowedTouchTypes = fingerTouchTypes
+      } else {
+        recognizer.allowedTouchTypes = defaultAllowedTouchTypesByRecognizer[key] ?? []
+      }
+    }
   }
 
   /// PDFKit owns several private inner views. Setting only `PDFView.backgroundColor`
