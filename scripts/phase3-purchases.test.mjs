@@ -80,12 +80,14 @@ assert.match(purchases, /name === ErrorCode\.UserCancelled/);
 assert.match(plans, /finally \{\s*purchaseLockRef\.current = false;\s*setBusy\(null\);/);
 
 // 8-10. StoreKit success is verified first; only a verified grant refreshes and confirms active quotas.
-const requestIndex = purchases.indexOf('await requestPurchase({');
+const requestIndex = purchases.indexOf('await this.requestPurchaseWithTimeout()');
 const verifyIndex = purchases.indexOf('return await this.verifyPurchaseWithBackend(purchase, accessToken!)');
 const backendGrantIndex = purchases.indexOf('status >= 200 && status < 300 && payload?.ok && payload.granted');
 const serviceSuccessIndex = purchases.indexOf("code: 'success'", backendGrantIndex);
 assert.ok(requestIndex > 0 && requestIndex < verifyIndex);
 assert.ok(verifyIndex < backendGrantIndex && backendGrantIndex < serviceSuccessIndex);
+// The timeout-wrapped request still invokes the StoreKit purchase for the SKU.
+assert.match(purchases, /requestPurchase\(\{\s*type: PRODUCT_QUERY_TYPE,\s*request: \{ apple: \{ sku: STUDENT_PASS_PRODUCT_ID \} \}/);
 assert.match(plans, /if \(!result\.ok\) \{[\s\S]*Purchase not completed[\s\S]*return;/);
 assert.match(plans, /const refreshedStatus = await loadStatus\(\);/);
 assert.match(plans, /refreshedStatus && confirmsStudentBasicGrant\(refreshedStatus\)/);
@@ -109,8 +111,28 @@ assert.doesNotMatch(purchases, /AsyncStorage/);
 
 // 13. Consumable access refresh never promises an Apple restore.
 assert.doesNotMatch(`${plans}\n${settings}`, /Restore Purchases/i);
-assert.doesNotMatch(purchases, /getAvailablePurchases|getActiveSubscriptions|discoverStudentPassTransactions/);
+// The restore/refresh path stays backend-entitlement based (no subscription or
+// custom StoreKit-history discovery). getAvailablePurchases is allowed because
+// purchase-time recovery uses it to finish a stuck transaction (see section 15).
+assert.doesNotMatch(purchases, /getActiveSubscriptions|discoverStudentPassTransactions/);
 assert.match(purchases, /Consumable purchases are not restored from App Store history\./);
+
+// 15. Stuck-before-Apple-sheet hardening: bounded StoreKit wait, queue recovery,
+//     and a guaranteed loading/guard reset so the UI can never spin forever.
+assert.match(purchases, /const PURCHASE_EVENT_TIMEOUT_MS =/);
+assert.match(purchases, /requestPurchaseWithTimeout\(\): Promise<Purchase>/);
+assert.match(purchases, /setTimeout\(/);
+assert.match(purchases, /clearTimeout\(timer\)/);
+// Recover an unfinished transaction before requesting a new sheet.
+assert.match(purchases, /recoverPendingPurchase\(accessToken!\)/);
+assert.match(purchases, /const available = .*getAvailablePurchases\(\)|await getAvailablePurchases\(\)/);
+// finally always clears the in-flight guard and pending state (no infinite spin).
+assert.match(
+  purchases,
+  /finally \{[\s\S]*this\.pendingPurchase = null;[\s\S]*this\.purchaseInFlight = false;[\s\S]*\}/,
+);
+// In-progress state is in-memory only — never persisted across an app relaunch.
+assert.doesNotMatch(purchases, /AsyncStorage[\s\S]*purchaseInFlight|purchaseInFlight[\s\S]*AsyncStorage/);
 
 // 14. Required product language is present and prohibited paywall language is absent.
 assert.match(plans, /30 days of premium lecture support/);

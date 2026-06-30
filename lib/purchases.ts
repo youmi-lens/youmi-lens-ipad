@@ -3,6 +3,7 @@ import {
   endConnection,
   fetchProducts,
   finishTransaction,
+  getAvailablePurchases,
   initConnection,
   purchaseErrorListener,
   purchaseUpdatedListener,
@@ -13,6 +14,7 @@ import {
 import { Platform } from 'react-native';
 
 import { API_BASE_URL } from './config';
+import { logIap } from './iapLog';
 import type { PlanStatus } from './planStatus';
 
 export const STUDENT_PASS_PRODUCT_ID = 'com.aydenz.youmilensipad.studentbasic30d';
@@ -331,6 +333,12 @@ function hasConnectionPrereqs(accessToken: string | null | undefined): PurchaseR
   return null;
 }
 
+// StoreKit may never present the sheet or emit a purchase/error event (e.g. a
+// prior unfinished consumable transaction blocking the queue). Without a bound,
+// the purchase promise hangs forever and the UI spins. Generous enough for the
+// Apple sheet + Face ID + processing, short enough to recover the UI.
+const PURCHASE_EVENT_TIMEOUT_MS = 120_000;
+
 class RealPurchaseService implements PurchaseService {
   private connected = false;
   private productCache: StudentPassProduct | null = null;
@@ -351,11 +359,16 @@ class RealPurchaseService implements PurchaseService {
     this.connected = true;
     this.purchaseSubscription = purchaseUpdatedListener((purchase) => {
       if (!isStudentPassPurchase(purchase)) return;
+      logIap('purchaseUpdatedListener fired');
       const pending = this.pendingPurchase;
       this.pendingPurchase = null;
+      // A transaction can arrive with no purchase in flight (e.g. an unfinished
+      // transaction re-delivered on launch). It is left in the queue and
+      // recovered on the next purchase attempt via recoverPendingPurchase().
       pending?.resolve(purchase);
     });
     this.errorSubscription = purchaseErrorListener((error) => {
+      logIap('purchaseErrorListener fired', String(error?.code ?? ''));
       const pending = this.pendingPurchase;
       this.pendingPurchase = null;
       const message = error?.message || 'The App Store purchase could not be completed.';
@@ -415,7 +428,10 @@ class RealPurchaseService implements PurchaseService {
   async purchaseStudentPass(accessToken: string | null | undefined): Promise<PurchaseResult> {
     const prereq = hasConnectionPrereqs(accessToken);
     if (prereq) return prereq;
+    // In-memory only (singleton lives for the JS runtime). Never persisted, so a
+    // relaunch always starts clean and can never be permanently "in progress".
     if (this.purchaseInFlight) {
+      logIap('purchaseInProgress before request: true — rejecting duplicate tap');
       return {
         ok: false,
         code: 'purchase_in_progress',
@@ -423,10 +439,22 @@ class RealPurchaseService implements PurchaseService {
       };
     }
 
+    logIap('button pressed; user id present:', Boolean(accessToken));
     this.purchaseInFlight = true;
     try {
       await this.ensureConnection();
+
+      // Recover any unfinished Student Basic transaction left in the StoreKit
+      // queue before starting a new one. A stuck transaction (e.g. from a prior
+      // failed verify) can stop StoreKit from presenting a fresh purchase sheet.
+      const recovered = await this.recoverPendingPurchase(accessToken!);
+      if (recovered) {
+        logIap('recovered a pending transaction before requesting a new purchase');
+        return recovered;
+      }
+
       const product = this.productCache ?? (await this.getStudentPassProduct());
+      logIap('product loaded:', Boolean(product?.available), product?.productId ?? null);
       if (!product?.available) {
         return {
           ok: false,
@@ -435,18 +463,9 @@ class RealPurchaseService implements PurchaseService {
         };
       }
 
-      const purchase = await new Promise<Purchase>(async (resolve, reject) => {
-        this.pendingPurchase = { resolve, reject };
-        try {
-          await requestPurchase({
-            type: PRODUCT_QUERY_TYPE,
-            request: { apple: { sku: STUDENT_PASS_PRODUCT_ID } },
-          });
-        } catch (error) {
-          this.pendingPurchase = null;
-          reject(error instanceof Error ? error : new Error(String(error)));
-        }
-      });
+      logIap('calling requestPurchase');
+      const purchase = await this.requestPurchaseWithTimeout();
+      logIap('requestPurchase resolved with a purchase');
 
       if (purchase.purchaseState === 'pending') {
         return { ok: false, code: 'pending', message: purchaseMessageForCode('pending') };
@@ -454,39 +473,120 @@ class RealPurchaseService implements PurchaseService {
 
       return await this.verifyPurchaseWithBackend(purchase, accessToken!);
     } catch (error) {
-      const name = error instanceof Error ? error.name.toLowerCase() : '';
-      const message = error instanceof Error ? error.message : undefined;
-      if (
-        name === ErrorCode.UserCancelled ||
-        name.includes('cancel') ||
-        message?.toLowerCase().includes('cancel')
-      ) {
-        return { ok: false, code: 'cancelled', message: purchaseMessageForCode('cancelled') };
-      }
-      if (
-        name === ErrorCode.NetworkError ||
-        name === ErrorCode.RemoteError ||
-        name === ErrorCode.ServiceError ||
-        name === ErrorCode.ServiceDisconnected ||
-        name === ErrorCode.ServiceTimeout
-      ) {
-        return { ok: false, code: 'offline', message: purchaseMessageForCode('offline') };
-      }
-      if (
-        name === ErrorCode.AlreadyOwned ||
-        name === ErrorCode.DuplicatePurchase ||
-        /already (purchased|owned)|duplicate purchase/i.test(message ?? '')
-      ) {
-        return {
-          ok: false,
-          code: 'apple_account_already_purchased',
-          message: purchaseMessageForCode('apple_account_already_purchased'),
-        };
-      }
-      return { ok: false, code: 'storekit_error', message: purchaseMessageForCode('storekit_error') };
+      return this.mapPurchaseError(error);
     } finally {
+      // Always clear loading/guards, even if StoreKit never presented a sheet or
+      // requestPurchase hung — the timeout guarantees this finally runs.
+      this.pendingPurchase = null;
       this.purchaseInFlight = false;
+      logIap('clearing loading');
     }
+  }
+
+  /**
+   * Await the StoreKit purchase event with a hard timeout. The purchase resolves
+   * from the listeners (set in ensureConnection) or directly from requestPurchase;
+   * if neither fires within PURCHASE_EVENT_TIMEOUT_MS, reject so the UI recovers.
+   */
+  private requestPurchaseWithTimeout(): Promise<Purchase> {
+    return new Promise<Purchase>((resolve, reject) => {
+      let settled = false;
+      const finish = (action: 'resolve' | 'reject', value: Purchase | Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.pendingPurchase = null;
+        if (action === 'resolve') resolve(value as Purchase);
+        else reject(value as Error);
+      };
+
+      const timer = setTimeout(() => {
+        logIap('timeout clearing stale pending — no StoreKit event');
+        const timeoutError = new Error('The App Store did not respond. Please try again.');
+        timeoutError.name = 'storekit_timeout';
+        finish('reject', timeoutError);
+      }, PURCHASE_EVENT_TIMEOUT_MS);
+
+      this.pendingPurchase = {
+        resolve: (purchase) => finish('resolve', purchase),
+        reject: (error) => finish('reject', error),
+      };
+
+      requestPurchase({
+        type: PRODUCT_QUERY_TYPE,
+        request: { apple: { sku: STUDENT_PASS_PRODUCT_ID } },
+      })
+        .then((maybe) => {
+          // Some expo-iap paths resolve the purchase directly instead of (or in
+          // addition to) the event listener. Resolve from whichever arrives first.
+          const list = Array.isArray(maybe) ? maybe : maybe ? [maybe] : [];
+          const direct = list.find((item) => isStudentPassPurchase(item as Purchase));
+          if (direct) finish('resolve', direct as Purchase);
+        })
+        .catch((error) => finish('reject', error instanceof Error ? error : new Error(String(error))));
+    });
+  }
+
+  /**
+   * If an unfinished Student Basic transaction is sitting in the StoreKit queue,
+   * route it through backend verification (which finishes it on a definitive
+   * outcome). Returns a granted result when the already-paid purchase is
+   * recovered; otherwise null so the caller proceeds with a fresh purchase.
+   */
+  private async recoverPendingPurchase(accessToken: string): Promise<PurchaseResult | null> {
+    let available: Purchase[];
+    try {
+      available = ((await getAvailablePurchases()) as Purchase[] | null) ?? [];
+    } catch {
+      // Best-effort: never block a new purchase because recovery lookup failed.
+      return null;
+    }
+    const stuck = available.find((p) => isStudentPassPurchase(p) && Boolean(signedPayloadFor(p)));
+    if (!stuck) return null;
+
+    logIap('found unfinished transaction — attempting recovery');
+    const result = await this.verifyPurchaseWithBackend(stuck, accessToken);
+    // Only short-circuit when the paid purchase was actually recovered as active.
+    // Otherwise fall through; verifyPurchaseWithBackend already finishes the
+    // transaction on any definitive (non-transient) backend outcome.
+    return result.ok ? result : null;
+  }
+
+  private mapPurchaseError(error: unknown): PurchaseResult {
+    const name = error instanceof Error ? error.name.toLowerCase() : '';
+    const message = error instanceof Error ? error.message : undefined;
+    if (name === 'storekit_timeout') {
+      logIap('requestPurchase timed out');
+      return { ok: false, code: 'storekit_error', message: purchaseMessageForCode('storekit_error') };
+    }
+    if (
+      name === ErrorCode.UserCancelled ||
+      name.includes('cancel') ||
+      message?.toLowerCase().includes('cancel')
+    ) {
+      return { ok: false, code: 'cancelled', message: purchaseMessageForCode('cancelled') };
+    }
+    if (
+      name === ErrorCode.NetworkError ||
+      name === ErrorCode.RemoteError ||
+      name === ErrorCode.ServiceError ||
+      name === ErrorCode.ServiceDisconnected ||
+      name === ErrorCode.ServiceTimeout
+    ) {
+      return { ok: false, code: 'offline', message: purchaseMessageForCode('offline') };
+    }
+    if (
+      name === ErrorCode.AlreadyOwned ||
+      name === ErrorCode.DuplicatePurchase ||
+      /already (purchased|owned)|duplicate purchase/i.test(message ?? '')
+    ) {
+      return {
+        ok: false,
+        code: 'apple_account_already_purchased',
+        message: purchaseMessageForCode('apple_account_already_purchased'),
+      };
+    }
+    return { ok: false, code: 'storekit_error', message: purchaseMessageForCode('storekit_error') };
   }
 
   async restoreStudentPass(accessToken: string | null | undefined): Promise<RestoreResult> {
