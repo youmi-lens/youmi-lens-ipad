@@ -528,28 +528,51 @@ class RealPurchaseService implements PurchaseService {
   }
 
   /**
-   * If an unfinished Student Basic transaction is sitting in the StoreKit queue,
-   * route it through backend verification (which finishes it on a definitive
-   * outcome). Returns a granted result when the already-paid purchase is
-   * recovered; otherwise null so the caller proceeds with a fresh purchase.
+   * Unfinished Student Basic transactions still held by StoreKit — e.g. a
+   * payment that succeeded but whose first backend verify failed, so it was
+   * never finished. For a consumable these remain available until finished.
+   */
+  private async getUnfinishedStudentPassPurchases(): Promise<Purchase[]> {
+    try {
+      await this.ensureConnection();
+      const available = ((await getAvailablePurchases()) as Purchase[] | null) ?? [];
+      return available.filter((p) => isStudentPassPurchase(p) && Boolean(signedPayloadFor(p)));
+    } catch {
+      // Best-effort: never block purchase/restore because the lookup failed.
+      return [];
+    }
+  }
+
+  /**
+   * Re-verify every unfinished Student Basic transaction through the backend.
+   * Verification is idempotent by transactionId, so a re-send of an already
+   * paid (but unverified) transaction grants the entitlement and finishes the
+   * transaction (verifyPurchaseWithBackend finishes on any definitive outcome).
+   */
+  private async recoverUnfinishedPurchases(accessToken: string): Promise<{
+    granted: PurchaseResult | null;
+    processedCount: number;
+  }> {
+    const pending = await this.getUnfinishedStudentPassPurchases();
+    let granted: PurchaseResult | null = null;
+    for (const purchase of pending) {
+      logIap('recovering unfinished transaction', transactionIdFor(purchase) ? 'txn-id:yes' : 'txn-id:no');
+      const result = await this.verifyPurchaseWithBackend(purchase, accessToken);
+      // ok covers a fresh grant and an idempotent re-grant of the same txn.
+      if (result.ok && !granted) granted = result;
+    }
+    return { granted, processedCount: pending.length };
+  }
+
+  /**
+   * Purchase-flow recovery: clear/recover any stuck transaction before
+   * requesting a new sheet. Returns a granted result when an already-paid
+   * purchase is recovered; otherwise null so the caller proceeds with a fresh
+   * purchase (verifyPurchaseWithBackend already finished non-grantable ones).
    */
   private async recoverPendingPurchase(accessToken: string): Promise<PurchaseResult | null> {
-    let available: Purchase[];
-    try {
-      available = ((await getAvailablePurchases()) as Purchase[] | null) ?? [];
-    } catch {
-      // Best-effort: never block a new purchase because recovery lookup failed.
-      return null;
-    }
-    const stuck = available.find((p) => isStudentPassPurchase(p) && Boolean(signedPayloadFor(p)));
-    if (!stuck) return null;
-
-    logIap('found unfinished transaction — attempting recovery');
-    const result = await this.verifyPurchaseWithBackend(stuck, accessToken);
-    // Only short-circuit when the paid purchase was actually recovered as active.
-    // Otherwise fall through; verifyPurchaseWithBackend already finishes the
-    // transaction on any definitive (non-transient) backend outcome.
-    return result.ok ? result : null;
+    const { granted } = await this.recoverUnfinishedPurchases(accessToken);
+    return granted;
   }
 
   private mapPurchaseError(error: unknown): PurchaseResult {
@@ -616,6 +639,26 @@ class RealPurchaseService implements PurchaseService {
     const initialResult = entitlementRestoreResult(initial.entitlement, initial.quotaStatus ?? null);
     if (initialResult) return initialResult;
 
+    // No active entitlement on the backend. Before giving up, recover any
+    // unfinished Apple transaction (e.g. a successful payment whose first
+    // verify failed) by re-verifying it, then re-read the backend entitlement.
+    const recovery = await this.recoverUnfinishedPurchases(accessToken);
+    if (recovery.processedCount > 0) {
+      logIap('refresh access recovered transactions:', recovery.processedCount);
+      let refreshed: EntitlementResponse;
+      try {
+        refreshed = await this.getBackendEntitlement(accessToken);
+      } catch {
+        refreshed = initial;
+      }
+      const recoveredResult = entitlementRestoreResult(refreshed.entitlement, refreshed.quotaStatus ?? null);
+      if (recoveredResult) {
+        return { ...recoveredResult, recoveredTransactionCount: recovery.processedCount, usedStoreKitRecovery: true };
+      }
+      // Recovery ran but the entitlement is still not active (e.g. backend
+      // temporarily rejected). Fall through to a clear, retryable result below.
+    }
+
     const code: RestoreResultCode =
       initial.entitlement.status === 'none' || !initial.entitlement.status
         ? 'no_eligible_purchase'
@@ -626,7 +669,8 @@ class RealPurchaseService implements PurchaseService {
       message: restoreMessageForCode(code),
       entitlement: initial.entitlement,
       quotaStatus: initial.quotaStatus ?? null,
-      usedStoreKitRecovery: false,
+      recoveredTransactionCount: recovery.processedCount,
+      usedStoreKitRecovery: recovery.processedCount > 0,
     };
   }
 

@@ -134,6 +134,18 @@ assert.match(
 // In-progress state is in-memory only — never persisted across an app relaunch.
 assert.doesNotMatch(purchases, /AsyncStorage[\s\S]*purchaseInFlight|purchaseInFlight[\s\S]*AsyncStorage/);
 
+// 16. Refresh Access recovers a successful Apple payment whose first verify
+//     failed: it re-verifies unfinished StoreKit transactions before giving up.
+assert.match(purchases, /recoverUnfinishedPurchases\(accessToken\)/);
+const restoreStart = purchases.indexOf('async restoreStudentPass(');
+const restoreEnd = purchases.indexOf('cleanup()', restoreStart);
+const restoreBody = purchases.slice(restoreStart, restoreEnd);
+assert.ok(restoreBody.includes('recoverUnfinishedPurchases(accessToken)'));
+assert.ok(restoreBody.includes('usedStoreKitRecovery: true'));
+// Recovery re-verifies through the same idempotent backend verify endpoint.
+assert.match(purchases, /getUnfinishedStudentPassPurchases\(\)/);
+assert.match(purchases, /verifyPurchaseWithBackend\(purchase, accessToken\)/);
+
 // 14. Required product language is present and prohibited paywall language is absent.
 assert.match(plans, /30 days of premium lecture support/);
 assert.match(plans, /One-time payment\. Does not renew automatically\./);
