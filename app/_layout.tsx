@@ -57,7 +57,7 @@ export default function RootLayout() {
  *  - A fully signed-in user is bounced off `auth` to `/` (the `(tabs)` anchor).
  */
 function AuthGate() {
-  const { session, loading, isGuest } = useAuth();
+  const { session, loading, isGuest, needsUsernameSetup, isResettingPassword } = useAuth();
 
   if (loading) {
     return (
@@ -67,7 +67,14 @@ function AuthGate() {
     );
   }
 
-  const canUseApp = !!session || isGuest;
+  // A signed-in user who still needs username setup (or is mid password-reset)
+  // must stay on `auth`. Gating the authenticated group on those flags — rather
+  // than on session alone — keeps the whole `(tabs)` navigator (and its anchor)
+  // from mounting over the still-active onboarding screen, which otherwise
+  // steals the text-input responder and leaves the "Choose your username" field
+  // rendered but unfocusable/untypeable. auth.tsx already keeps the route on
+  // `auth` in these states, so this changes nothing the user sees.
+  const canUseApp = isGuest || (!!session && !needsUsernameSetup && !isResettingPassword);
 
   return (
     <Stack
