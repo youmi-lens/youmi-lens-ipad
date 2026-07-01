@@ -78,7 +78,7 @@ export default function AuthScreen() {
   const [createPasswordVisible, setCreatePasswordVisible] = useState(false);
   const [resetPasswordVisible, setResetPasswordVisible] = useState(false);
   const [resetConfirmPasswordVisible, setResetConfirmPasswordVisible] = useState(false);
-  const [busyAction, setBusyAction] = useState<'send' | 'verify' | 'signin' | 'resend' | 'updatePassword' | 'provider' | 'username' | null>(null);
+  const [busyAction, setBusyAction] = useState<'send' | 'verify' | 'signin' | 'resend' | 'updatePassword' | 'provider' | 'username' | 'signout' | null>(null);
   const [reduceMotion, setReduceMotion] = useState(false);
   const [focusedField, setFocusedField] = useState<string | null>(null);
   const entryTransition = useRef(new Animated.Value(1)).current;
@@ -256,6 +256,34 @@ export default function AuthScreen() {
     setResetPassword('');
     setResetConfirmPassword('');
     setSuccessMessage(null);
+  };
+
+  // Escape hatch for the session-gated onboarding states — "Choose your username"
+  // and the password-recovery "new password" screen. Both require a live session,
+  // so the only safe way back to the sign-in options (including Apple/Google/guest)
+  // is to sign out. No account content exists yet here, so no scary confirmation
+  // is needed. Loading always clears in finally so the card never gets stuck.
+  const exitToSignIn = async () => {
+    if (busyAction !== null) return;
+    setBusyAction('signout');
+    setError(null);
+    try {
+      const { error: signOutError } = await signOut();
+      if (signOutError) {
+        setError(signOutError);
+        return;
+      }
+      setUsername('');
+      setCode('');
+      setPassword('');
+      setResetPassword('');
+      setResetConfirmPassword('');
+      setSuccessMessage(null);
+      setStep('entry');
+      setEntryMode('signIn');
+    } finally {
+      setBusyAction(null);
+    }
   };
 
   const handleSendSignInCode = async () => {
@@ -487,6 +515,10 @@ export default function AuthScreen() {
                   <TextInput
                     autoCapitalize="none"
                     autoCorrect={false}
+                    autoComplete="username"
+                    textContentType="username"
+                    returnKeyType="done"
+                    onSubmitEditing={handleUsernameSetup}
                     placeholder="yourname"
                     placeholderTextColor="#A8B3C2"
                     onBlur={() => setFocusedField(null)}
@@ -507,6 +539,14 @@ export default function AuthScreen() {
                   disabled={busyAction !== null}
                   style={styles.primaryAction}
                 />
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={exitToSignIn}
+                  disabled={busyAction !== null}
+                  style={styles.textButton}
+                >
+                  <Text style={styles.textButtonLabel}>Back to sign in</Text>
+                </Pressable>
               </View>
             ) : step === 'signupCode' ? (
               <View style={styles.codeWrap}>
@@ -519,6 +559,8 @@ export default function AuthScreen() {
                   <TextInput
                     keyboardType="number-pad"
                     maxLength={8}
+                    autoComplete="one-time-code"
+                    textContentType="oneTimeCode"
                     placeholder="Verification code"
                     placeholderTextColor={colors.textTertiary}
                     style={[styles.input, styles.codeInput]}
@@ -562,6 +604,8 @@ export default function AuthScreen() {
                   <TextInput
                     keyboardType="number-pad"
                     maxLength={8}
+                    autoComplete="one-time-code"
+                    textContentType="oneTimeCode"
                     placeholder="Verification code"
                     placeholderTextColor={colors.textTertiary}
                     style={[styles.input, styles.codeInput]}
@@ -614,6 +658,9 @@ export default function AuthScreen() {
                 </View>
                 {error ? <Text style={styles.error}>{error}</Text> : null}
                 <PrimaryButton label="Update password" onPress={handleUpdatePassword} loading={busyAction === 'updatePassword'} disabled={busyAction !== null} />
+                <Pressable accessibilityRole="button" onPress={exitToSignIn} disabled={busyAction !== null} style={styles.textButton}>
+                  <Text style={styles.textButtonLabel}>Cancel</Text>
+                </Pressable>
               </View>
             ) : step === 'signInCodeEmail' ? (
               <View style={styles.codeWrap}>
@@ -642,6 +689,8 @@ export default function AuthScreen() {
                   <TextInput
                     keyboardType="number-pad"
                     maxLength={8}
+                    autoComplete="one-time-code"
+                    textContentType="oneTimeCode"
                     placeholder="Verification code"
                     placeholderTextColor={colors.textTertiary}
                     style={[styles.input, styles.codeInput]}
