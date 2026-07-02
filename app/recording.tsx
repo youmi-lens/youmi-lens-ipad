@@ -31,6 +31,7 @@ import { getLiveMicStreamStatus, startMicStream, stopMicStream } from '@/lib/liv
 import { useRecordingNotes } from '@/lib/recordingNotes';
 import { useData } from '@/lib/store';
 import { useLectureRecorder } from '@/lib/useLectureRecorder';
+import { resolveCaptionAreaState, recordingControlsEnabled } from '@/lib/lectureStartupState.mjs';
 
 /** Calm, user-facing line shown when live captions cannot run. Diagnostics stay in the console. */
 const LIVE_CAPTIONS_UNAVAILABLE_MESSAGE = 'Live captions unavailable. Audio recording is still active.';
@@ -91,6 +92,7 @@ export default function RecordingScreen() {
   } = useLiveCaptions();
 
   const [micStreamError, setMicStreamError] = useState<string | null>(null);
+  const [startFailed, setStartFailed] = useState(false);
   const [finishing, setFinishing] = useState(false);
   const [materialPickerVisible, setMaterialPickerVisible] = useState(false);
   const [importingMaterial, setImportingMaterial] = useState(false);
@@ -107,9 +109,22 @@ export default function RecordingScreen() {
   const granted = permissionStatus === 'granted';
   const seconds = Math.floor(durationMillis / 1000);
   const recordingSessionActive = isRecording || isPaused || durationMillis > 0;
+  // Reliable "audio is genuinely capturing" signal — the recorder's own state,
+  // not just permission. Controls and caption copy derive from this so the UI
+  // never claims recording is active when startup failed.
+  const audioActive = isRecording || isPaused;
+  const controlsEnabled = recordingControlsEnabled(audioActive);
   const latestFinalEnglish = latestFinalLine?.text ?? captionLines[captionLines.length - 1]?.text ?? '';
   const visibleEnglishCaption = partialCaption || latestFinalEnglish || latestCaption;
   const visibleChineseCaption = partialTranslationZh || latestFinalLine?.translationZh || '';
+  const captionAreaState = resolveCaptionAreaState({
+    audioActive,
+    startFailed,
+    micStreamError: Boolean(micStreamError),
+    hasCaptionContent:
+      liveCaptionStatus === 'active' || liveCaptionStatus === 'listening' || Boolean(visibleEnglishCaption),
+    captionsConnecting: liveCaptionStatus === 'connecting',
+  });
   const courseMaterials = course ? materialsForCourse(course.id) : [];
 
   useEffect(() => {
@@ -207,6 +222,7 @@ export default function RecordingScreen() {
     autoStarted.current = true;
     void startRecording().then((started) => {
       if (__DEV__) console.info('[recording] automatic local recording result', { started });
+      setStartFailed(!started);
       // Guests record locally only — no live caption WebSocket / backend calls.
       if (started && !isGuest) void startCaptionPipeline();
     });
@@ -242,6 +258,18 @@ export default function RecordingScreen() {
     autoStarted.current = true;
     const started = await startRecording();
     if (__DEV__) console.info('[recording] permission CTA recording result', { started });
+    setStartFailed(!started);
+    if (started && !isGuest) await startCaptionPipeline();
+  };
+
+  // Retry a failed lecture start (audio never began). Distinct from "Retry
+  // captions", which only re-attaches the caption mic stream over live audio.
+  const retryStart = async () => {
+    setMicStreamError(null);
+    setStartFailed(false);
+    const started = await startRecording();
+    if (__DEV__) console.info('[recording] retry start recording result', { started });
+    setStartFailed(!started);
     if (started && !isGuest) await startCaptionPipeline();
   };
 
@@ -509,17 +537,22 @@ export default function RecordingScreen() {
                 </GlassCard>
               ) : (
               <View style={styles.captionStage}>
-                {micStreamError ? (
+                {captionAreaState === 'failed_start' ? (
+                  // Audio never started: ONE coherent failed-start state. No
+                  // "audio still active" copy, no "retry captions" — retry the
+                  // whole start, or use Finish to leave cleanly.
                   <View style={styles.captionFallback}>
-                    <Text style={styles.stateBody}>{micStreamError}</Text>
+                    <Text style={styles.stateBody}>
+                      {error ?? 'Could not start the recording. Please try again.'}
+                    </Text>
                     <SecondaryButton
-                      label="Retry captions"
+                      label="Retry Start Lecture"
                       icon="refresh-outline"
-                      onPress={() => void startCaptionPipeline()}
+                      onPress={() => void retryStart()}
                       style={styles.retryCaptionsButton}
                     />
                   </View>
-                ) : liveCaptionStatus === 'active' || liveCaptionStatus === 'listening' || visibleEnglishCaption ? (
+                ) : captionAreaState === 'captions_visible' ? (
                   <View style={styles.captionBody}>
                     <View style={styles.captionHistory}>
                       {captionLines.slice(-3, -1).map((line, index) => (
@@ -543,9 +576,10 @@ export default function RecordingScreen() {
                       </View>
                     ) : null}
                   </View>
-                ) : liveCaptionStatus === 'connecting' ? (
+                ) : captionAreaState === 'captions_connecting' ? (
                   <Text style={styles.stateBody}>Connecting live captions…</Text>
-                ) : (
+                ) : captionAreaState === 'captions_unavailable' ? (
+                  // Only reachable while audio is active — the copy is accurate.
                   <View style={styles.captionFallback}>
                     <Text style={styles.stateBody}>
                       {micStreamError ?? liveCaptionError ?? LIVE_CAPTIONS_UNAVAILABLE_MESSAGE}
@@ -557,9 +591,13 @@ export default function RecordingScreen() {
                       style={styles.retryCaptionsButton}
                     />
                   </View>
+                ) : (
+                  <Text style={styles.stateBody}>Preparing microphone…</Text>
                 )}
                 {marks.length > 0 ? <Text style={styles.markHint}>{marks.length} important moment{marks.length > 1 ? 's' : ''} marked</Text> : null}
-                {error ? <Text style={styles.errorText}>{error}</Text> : null}
+                {/* The start error owns the failed_start block above; only show
+                    other recorder errors (pause/resume/finish) alongside a live session. */}
+                {error && audioActive ? <Text style={styles.errorText}>{error}</Text> : null}
               </View>
               )}
             </View>
@@ -571,14 +609,17 @@ export default function RecordingScreen() {
               label="Mark Important"
               icon="star"
               onPress={markImportant}
+              disabled={!controlsEnabled}
               style={styles.sideAction}
             />
 
             <Pressable
               accessibilityRole="button"
               accessibilityLabel={isPaused ? 'Resume recording' : 'Pause recording'}
+              accessibilityState={{ disabled: !controlsEnabled }}
+              disabled={!controlsEnabled}
               onPress={togglePause}
-              style={({ pressed }) => [styles.roundBtn, pressed && styles.pressed]}
+              style={({ pressed }) => [styles.roundBtn, !controlsEnabled && styles.disabled, pressed && styles.pressed]}
             >
               <Ionicons
                 name={isPaused ? 'play' : 'pause'}
