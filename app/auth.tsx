@@ -153,6 +153,35 @@ export default function AuthScreen() {
     setSuccessMessage(null);
   };
 
+  // Supabase resend rate-limit responses ("For security purposes, you can only
+  // request this after N seconds", "Email rate limit exceeded"). They mean the
+  // email is still unconfirmed — the previously emailed code remains valid.
+  const RESEND_RATE_LIMIT_PATTERN = /only request this|rate limit|too many|security purposes/i;
+
+  /**
+   * Resume a PENDING (unconfirmed) signup for this email: resend the signup
+   * code and open the verification screen. Supabase only resends a signup code
+   * while the email is unconfirmed, so success — or a rate-limit response —
+   * proves this is an incomplete registration, not a completed account.
+   * Returns false without touching visible state when this email is NOT a
+   * pending signup (e.g. a completed account), so callers decide the message.
+   */
+  const tryResumePendingVerification = async (trimmedEmail: string): Promise<boolean> => {
+    const { error: resendError } = await resendSignupCode(trimmedEmail);
+    if (resendError && !RESEND_RATE_LIMIT_PATTERN.test(resendError)) return false;
+    setPendingEmail(trimmedEmail);
+    setCode('');
+    setError(null);
+    setPersistentError(null);
+    setSuccessMessage(
+      resendError
+        ? 'Enter the verification code we already emailed you. You can resend a new one in a moment.'
+        : 'We sent a new verification code. Please check your email.',
+    );
+    setStep('signupCode');
+    return true;
+  };
+
   // ── Create Profile: step 1 — Supabase signUp, which emails the code ─────────
   const handleCreateProfile = async () => {
     const trimmedEmail = email.trim();
@@ -165,6 +194,7 @@ export default function AuthScreen() {
     setBusyAction('send');
     setError(null);
     setPersistentError(null);
+    setSuccessMessage(null);
 
     // One email = one account. Check BEFORE signUp: with email enumeration
     // protection on, Supabase signUp returns a fake success for an existing
@@ -176,7 +206,13 @@ export default function AuthScreen() {
       return;
     }
     if (emailCheck.exists) {
+      // "Exists" covers two very different cases: a completed account, or a
+      // PENDING signup whose code was never entered (signUp creates the
+      // unconfirmed auth user immediately). Never dead-end the pending case
+      // with "already exists" — resume its verification instead.
+      const resumed = await tryResumePendingVerification(trimmedEmail);
       setBusyAction(null);
+      if (resumed) return;
       setEntryMode('signIn');
       setStep('entry');
       setPersistentError(EXISTING_ACCOUNT_MESSAGE);
@@ -262,9 +298,14 @@ export default function AuthScreen() {
   const handleResendSignupCode = async () => {
     setBusyAction('resend');
     setError(null);
+    setSuccessMessage(null);
     const { error: resendError } = await resendSignupCode(email.trim());
     setBusyAction(null);
-    if (resendError) setError(resendError);
+    if (resendError) {
+      setError(resendError);
+      return;
+    }
+    setSuccessMessage('We sent a new verification code. Please check your email.');
   };
 
   const backToCreateProfile = () => {
@@ -372,6 +413,14 @@ export default function AuthScreen() {
     try {
       const { error: signInError } = await signInWithPassword(trimmedEmail, password);
       if (signInError) {
+        // Pending signup: the account exists but its email was never verified.
+        // Route to the verification screen instead of a dead-end error.
+        if (/not confirmed/i.test(signInError)) {
+          const resumed = await tryResumePendingVerification(trimmedEmail);
+          if (resumed) return;
+          setError('This email hasn’t been verified yet. Tap "Create an account" to resend the verification code.');
+          return;
+        }
         setEntryMode('signIn');
         setStep('entry');
         setPersistentError(null);
@@ -572,6 +621,7 @@ export default function AuthScreen() {
                   <Text style={styles.cardTitle}>Verify your email</Text>
                   <Text style={styles.cardSubtitle}>Enter the verification code we sent to your email.</Text>
                 </View>
+                {successMessage ? <Text style={styles.success}>{successMessage}</Text> : null}
                 <View style={styles.fieldGroup}>
                   <Text style={styles.label}>Verification code</Text>
                   <TextInput
