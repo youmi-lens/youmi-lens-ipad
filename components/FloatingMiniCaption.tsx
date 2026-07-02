@@ -351,8 +351,12 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
           transform: pan.getTranslateTransform(),
         },
       ]}
-      {...dragResponder.panHandlers}
     >
+      {/* Drag zone: the header (grip + status row) is the ONLY area that moves
+          the panel. Attaching the drag PanResponder here — instead of the whole
+          panel — lets vertical swipes inside the caption ScrollView scroll the
+          subtitle history instead of dragging the popup. */}
+      <View style={{ gap: scaled.panelGap }} {...dragResponder.panHandlers}>
       <View
         style={[
           styles.grip,
@@ -360,7 +364,7 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
         ]}
       />
 
-      <View style={[styles.statusRow, { gap: Math.max(6, Math.round(8 * panelScale)) }]}> 
+      <View style={[styles.statusRow, { gap: Math.max(6, Math.round(8 * panelScale)) }]}>
         <View
           style={[
             styles.recDot,
@@ -388,6 +392,7 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
         >
           <Ionicons name="close" size={scaled.close} color={colors.textOnNavyMuted} />
         </Pressable>
+      </View>
       </View>
 
       <View
