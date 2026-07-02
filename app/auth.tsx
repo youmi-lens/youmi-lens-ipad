@@ -97,9 +97,21 @@ export default function AuthScreen() {
     };
   }, []);
 
+  // Entry-card crossfade. The whole entry card renders inside an Animated.View
+  // whose opacity is this value, so the transition must be fail-VISIBLE: if the
+  // native-driver animation ever fails to run (seen intermittently on the first
+  // landscape mode switch, before the native animated node is attached — a
+  // rotation re-attaches it, which is why rotating "fixed" the blank card), the
+  // card would otherwise be stuck at opacity 0 with no form and no way back.
+  const prevEntryModeRef = useRef(entryMode);
   useEffect(() => {
+    const modeChanged = prevEntryModeRef.current !== entryMode;
+    prevEntryModeRef.current = entryMode;
+
     entryTransition.stopAnimation();
-    if (reduceMotion) {
+    // First render (no mode change) and reduce-motion: show immediately —
+    // never hide the card unless a real transition is about to reveal it.
+    if (reduceMotion || !modeChanged) {
       entryTransition.setValue(1);
       return;
     }
@@ -109,7 +121,13 @@ export default function AuthScreen() {
       duration: 250,
       easing: Easing.inOut(Easing.ease),
       useNativeDriver: true,
-    }).start();
+    }).start(({ finished }) => {
+      if (!finished) entryTransition.setValue(1);
+    });
+    // Fail-safe: whatever happens to the animation, the card must be visible.
+    // setValue(1) is a no-op when the fade already completed.
+    const failSafe = setTimeout(() => entryTransition.setValue(1), 450);
+    return () => clearTimeout(failSafe);
   }, [entryMode, entryTransition, reduceMotion]);
 
   useEffect(() => {
