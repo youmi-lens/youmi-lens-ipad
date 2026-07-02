@@ -27,6 +27,8 @@ export type LectureRecorder = {
   /** Local file URI of the finished recording (available after stop). */
   recordingUri: string | null;
   error: string | null;
+  /** Raw native reason for the last start failure (diagnostics), or null. */
+  errorDetail: string | null;
   requestPermission: () => Promise<boolean>;
   startRecording: () => Promise<boolean>;
   pauseRecording: () => void;
@@ -49,6 +51,8 @@ export function useLectureRecorder(): LectureRecorder {
   const [isPaused, setIsPaused] = useState(false);
   const [recordingUri, setRecordingUri] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** Raw native reason for the last start failure — surfaced for diagnostics. */
+  const [errorDetail, setErrorDetail] = useState<string | null>(null);
 
   /** True while a recording session is live, used for unmount cleanup. */
   const activeRef = useRef(false);
@@ -95,6 +99,7 @@ export function useLectureRecorder(): LectureRecorder {
   const startRecording = useCallback(async () => {
     try {
       setError(null);
+      setErrorDetail(null);
 
       let granted = (await getRecordingPermissionsAsync()).granted;
       if (!granted) {
@@ -108,6 +113,15 @@ export function useLectureRecorder(): LectureRecorder {
       if (__DEV__) console.info('[recorder] microphone permission checked', { granted });
       if (!granted) return false;
 
+      // Defensive cleanup: a previous session (or a failed prior start) can
+      // leave the recorder / AVAudioSession active, which makes the next
+      // prepareToRecordAsync throw. Release it first so Retry does a clean
+      // start. No-op on a fresh session.
+      if (activeRef.current) {
+        await recorder.stop().catch(() => {});
+        activeRef.current = false;
+      }
+
       await setAudioModeAsync({ playsInSilentMode: true, allowsRecording: true });
       await recorder.prepareToRecordAsync();
       recorder.record();
@@ -118,12 +132,29 @@ export function useLectureRecorder(): LectureRecorder {
       setRecordingUri(null);
       return true;
     } catch (startError) {
-      if (__DEV__) {
-        console.warn('[recorder] local recording start failed', {
-          message: startError instanceof Error ? startError.message : 'unknown',
-        });
-      }
-      setError('Could not start the recording. Please try again.');
+      const detail = startError instanceof Error ? startError.message : String(startError);
+      if (__DEV__) console.warn('[recorder] local recording start failed', { message: detail });
+      // Surface the real native reason (an audio-session/recording error — safe,
+      // no secrets) so the failure is diagnosable instead of a generic message.
+      const base = detail.trim()
+        ? `Could not start the recording. ${detail}`
+        : 'Could not start the recording. Please try again.';
+      // Dev-only hint. "Failed to prepare recorder" in dev usually means the
+      // dev-client binary is STALE (built before native modules were added, so
+      // Metro is serving current JS into a mismatched native runtime) — rebuild
+      // with `npx expo run:ios`. It can also be the iOS Simulator having no
+      // capture route. Neither is a production/device failure; real iPads record
+      // fine. Only shown in dev so production users never see it.
+      const devHint =
+        __DEV__ && /prepare/i.test(detail)
+          ? '\n\n(Dev only) If this is a Simulator or an old dev build, rebuild the dev client (npx expo run:ios) and/or test on a physical iPad — real devices record normally.'
+          : '';
+      setError(`${base}${devHint}`);
+      setErrorDetail(detail.trim() || null);
+      // Leave nothing half-started so the next Retry begins clean.
+      activeRef.current = false;
+      await recorder.stop().catch(() => {});
+      await setAudioModeAsync({ allowsRecording: false }).catch(() => {});
       return false;
     }
   }, [recorder]);
@@ -178,6 +209,7 @@ export function useLectureRecorder(): LectureRecorder {
     durationMillis: recorderState.durationMillis,
     recordingUri,
     error,
+    errorDetail,
     requestPermission,
     startRecording,
     pauseRecording,
