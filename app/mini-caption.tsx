@@ -492,8 +492,13 @@ export default function MiniCaptionScreen() {
             transform: pan.getTranslateTransform(),
           },
         ]}
-        {...dragResponder.panHandlers}
       >
+        {/* Drag zone: only the header (grip + status row) moves the panel, so a
+            vertical swipe inside the caption ScrollView scrolls the subtitle
+            history instead of dragging the whole popup. Mirrors the shared
+            FloatingMiniCaption fix (e8f37d0), which this Notebook workspace
+            panel never received. */}
+        <View style={{ gap: scaled.panelGap }} {...dragResponder.panHandlers}>
         <View
           style={[
             styles.grip,
@@ -541,6 +546,7 @@ export default function MiniCaptionScreen() {
           >
             <Ionicons name="close" size={scaled.close} color={colors.textOnNavyMuted} />
           </Pressable>
+        </View>
         </View>
 
         <View
