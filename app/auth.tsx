@@ -39,7 +39,10 @@ type AuthStep =
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const EXISTING_ACCOUNT_MESSAGE =
-  'This email already has a Youmi Lens account. Please sign in or use an email verification code.';
+  'This email already has an account. Please sign in.';
+const RESEND_COOLDOWN_MS = 60_000;
+const RESEND_WAIT_MESSAGE = 'Please wait before requesting another code.';
+const RESEND_RATE_LIMIT_PATTERN = /only request this|rate limit|too many|security purposes/i;
 
 export default function AuthScreen() {
   const router = useRouter();
@@ -79,11 +82,18 @@ export default function AuthScreen() {
   const [resetPasswordVisible, setResetPasswordVisible] = useState(false);
   const [resetConfirmPasswordVisible, setResetConfirmPasswordVisible] = useState(false);
   const [busyAction, setBusyAction] = useState<'send' | 'verify' | 'signin' | 'resend' | 'updatePassword' | 'provider' | 'username' | 'signout' | null>(null);
+  const [resendCooldownUntil, setResendCooldownUntil] = useState(0);
+  const [now, setNow] = useState(() => Date.now());
   const [reduceMotion, setReduceMotion] = useState(false);
   const [focusedField, setFocusedField] = useState<string | null>(null);
   const entryTransition = useRef(new Animated.Value(1)).current;
   const showBrandPanel = width >= 900 && width > height;
   const keepPasswordFormVisible = step === 'entry' && entryMode === 'signIn' && (busyAction === 'signin' || !!error);
+  const resendCooldownRemainingMs = Math.max(0, resendCooldownUntil - now);
+  const resendCooldownSeconds = Math.ceil(resendCooldownRemainingMs / 1000);
+  const signupResendDisabled = busyAction !== null || resendCooldownRemainingMs > 0;
+  const signupResendLabel =
+    resendCooldownSeconds > 0 ? `Resend code (${resendCooldownSeconds}s)` : 'Resend code';
 
   useEffect(() => {
     let mounted = true;
@@ -136,6 +146,19 @@ export default function AuthScreen() {
     }
   }, [isResettingPassword, needsUsernameSetup, router, session, step]);
 
+  useEffect(() => {
+    if (resendCooldownUntil <= Date.now()) {
+      setNow(Date.now());
+      return;
+    }
+    const timer = setInterval(() => {
+      const nextNow = Date.now();
+      setNow(nextNow);
+      if (nextNow >= resendCooldownUntil) clearInterval(timer);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [resendCooldownUntil]);
+
   const validateEmail = (value: string) => {
     if (!value.trim()) return 'Please enter your email.';
     if (!EMAIL_PATTERN.test(value.trim())) return 'Please enter a valid email address.';
@@ -153,26 +176,35 @@ export default function AuthScreen() {
     setSuccessMessage(null);
   };
 
-  // Supabase resend rate-limit responses ("For security purposes, you can only
-  // request this after N seconds", "Email rate limit exceeded"). They mean the
-  // email is still unconfirmed — the previously emailed code remains valid.
-  const RESEND_RATE_LIMIT_PATTERN = /only request this|rate limit|too many|security purposes/i;
+  const startResendCooldown = () => {
+    const nextCooldownUntil = Date.now() + RESEND_COOLDOWN_MS;
+    setNow(Date.now());
+    setResendCooldownUntil(nextCooldownUntil);
+  };
+
+  const mapSignupResendError = (message: string) =>
+    RESEND_RATE_LIMIT_PATTERN.test(message) ? RESEND_WAIT_MESSAGE : message;
 
   /**
-   * Resume a PENDING (unconfirmed) signup for this email: resend the signup
-   * code and open the verification screen. Supabase only resends a signup code
-   * while the email is unconfirmed, so success — or a rate-limit response —
-   * proves this is an incomplete registration, not a completed account.
-   * Returns false without touching visible state when this email is NOT a
-   * pending signup (e.g. a completed account), so callers decide the message.
+   * Resume a known PENDING (unconfirmed) signup for this email. Call this only
+   * after a trusted signal, such as the backend status or password sign-in's
+   * "Email not confirmed" response; Supabase resend itself is enumeration-safe
+   * and cannot classify completed vs pending accounts reliably.
    */
-  const tryResumePendingVerification = async (trimmedEmail: string): Promise<boolean> => {
+  const resumePendingVerification = async (trimmedEmail: string): Promise<boolean> => {
     const { error: resendError } = await resendSignupCode(trimmedEmail);
-    if (resendError && !RESEND_RATE_LIMIT_PATTERN.test(resendError)) return false;
     setPendingEmail(trimmedEmail);
     setCode('');
     setError(null);
     setPersistentError(null);
+    startResendCooldown();
+    if (resendError && !RESEND_RATE_LIMIT_PATTERN.test(resendError)) {
+      setSuccessMessage(null);
+      setError(resendError);
+      setStep('signupCode');
+      return true;
+    }
+    if (resendError) setError(RESEND_WAIT_MESSAGE);
     setSuccessMessage(
       resendError
         ? 'Enter the verification code we already emailed you. You can resend a new one in a moment.'
@@ -206,13 +238,21 @@ export default function AuthScreen() {
       return;
     }
     if (emailCheck.exists) {
-      // "Exists" covers two very different cases: a completed account, or a
-      // PENDING signup whose code was never entered (signUp creates the
-      // unconfirmed auth user immediately). Never dead-end the pending case
-      // with "already exists" — resume its verification instead.
-      const resumed = await tryResumePendingVerification(trimmedEmail);
+      if (pendingEmail && pendingEmail.trim().toLowerCase() === trimmedEmail.toLowerCase()) {
+        setBusyAction(null);
+        setCode('');
+        setError(null);
+        setPersistentError(null);
+        setSuccessMessage('Enter the verification code we already emailed you.');
+        setStep('signupCode');
+        return;
+      }
+      if (emailCheck.status === 'pending') {
+        await resumePendingVerification(trimmedEmail);
+        setBusyAction(null);
+        return;
+      }
       setBusyAction(null);
-      if (resumed) return;
       setEntryMode('signIn');
       setStep('entry');
       setPersistentError(EXISTING_ACCOUNT_MESSAGE);
@@ -241,6 +281,7 @@ export default function AuthScreen() {
     // Email confirmation enabled → verify the emailed code next.
     setPendingEmail(trimmedEmail);
     setCode('');
+    startResendCooldown();
     setStep('signupCode');
   };
 
@@ -296,15 +337,23 @@ export default function AuthScreen() {
   };
 
   const handleResendSignupCode = async () => {
+    if (resendCooldownUntil > Date.now()) {
+      setError(RESEND_WAIT_MESSAGE);
+      setSuccessMessage(null);
+      return;
+    }
+    const resendEmail = pendingEmail || email.trim();
     setBusyAction('resend');
     setError(null);
     setSuccessMessage(null);
-    const { error: resendError } = await resendSignupCode(email.trim());
+    const { error: resendError } = await resendSignupCode(resendEmail);
     setBusyAction(null);
     if (resendError) {
-      setError(resendError);
+      if (RESEND_RATE_LIMIT_PATTERN.test(resendError)) startResendCooldown();
+      setError(mapSignupResendError(resendError));
       return;
     }
+    startResendCooldown();
     setSuccessMessage('We sent a new verification code. Please check your email.');
   };
 
@@ -416,7 +465,7 @@ export default function AuthScreen() {
         // Pending signup: the account exists but its email was never verified.
         // Route to the verification screen instead of a dead-end error.
         if (/not confirmed/i.test(signInError)) {
-          const resumed = await tryResumePendingVerification(trimmedEmail);
+          const resumed = await resumePendingVerification(trimmedEmail);
           if (resumed) return;
           setError('This email hasn’t been verified yet. Tap "Create an account" to resend the verification code.');
           return;
@@ -638,7 +687,7 @@ export default function AuthScreen() {
                 </View>
                 {error ? <Text style={styles.error}>{error}</Text> : null}
                 <PrimaryButton label="Verify and create account" onPress={handleVerifyAndCreate} loading={busyAction === 'verify'} disabled={busyAction !== null} />
-                <SecondaryButton label="Resend code" tone="ice" onPress={handleResendSignupCode} disabled={busyAction !== null} />
+                <SecondaryButton label={signupResendLabel} tone="ice" onPress={handleResendSignupCode} disabled={signupResendDisabled} />
                 <Pressable accessibilityRole="button" onPress={backToCreateProfile} style={styles.textButton}>
                   <Text style={styles.textButtonLabel}>Back to create profile</Text>
                 </Pressable>

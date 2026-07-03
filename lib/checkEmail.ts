@@ -10,7 +10,7 @@ import { API_BASE_URL } from './config';
  * email, so the pre-check is what reliably blocks duplicate accounts.
  */
 export type CheckEmailResult =
-  | { ok: true; exists: boolean }
+  | { ok: true; exists: boolean; status?: 'registered' | 'pending' }
   | { ok: false; message: string };
 
 const CHECK_FAILED_MESSAGE =
@@ -37,9 +37,13 @@ async function requestEmailCheck(email: string): Promise<CheckEmailResult> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email }),
   });
-  const payload = (await response.json().catch(() => null)) as { exists?: boolean } | null;
+  const payload = (await response.json().catch(() => null)) as {
+    exists?: boolean;
+    status?: string;
+  } | null;
   if (response.ok && payload && typeof payload.exists === 'boolean') {
-    return { ok: true, exists: payload.exists };
+    const status = payload.status === 'registered' || payload.status === 'pending' ? payload.status : undefined;
+    return { ok: true, exists: payload.exists, status };
   }
   return { ok: false, message: CHECK_FAILED_MESSAGE };
 }
