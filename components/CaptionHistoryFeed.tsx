@@ -1,8 +1,6 @@
-import { Ionicons } from '@expo/vector-icons';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   FlatList,
-  Pressable,
   StyleSheet,
   Text,
   View,
@@ -10,7 +8,7 @@ import {
   type NativeSyntheticEvent,
 } from 'react-native';
 
-import { colors, spacing } from '@/constants/theme';
+import { colors } from '@/constants/theme';
 import { isNearBottom } from '@/lib/captionFeed.mjs';
 import type { LiveCaptionLine } from '@/lib/liveCaptions';
 
@@ -26,19 +24,20 @@ export type CaptionHistoryFeedProps = {
 };
 
 /**
- * CaptionHistoryFeed — the main recording screen's scrollable live transcript.
+ * CaptionHistoryFeed — the main recording screen's live caption area, enriched
+ * with scrollable history rather than only the newest sentence.
  *
- * Each finalized block shows the Chinese translation (prominent) above the
- * original English (lighter), so the student can review the flow of the lecture,
- * not just the newest sentence. The current sentence renders as a brighter live
- * block pinned at the end. The feed auto-follows new captions while the user is
- * at the bottom; once they scroll up to read earlier content, auto-follow pauses
- * and a "Back to live" control appears. Caption text is selectable, enabling the
- * iOS Copy / Look Up / Translate menu for unfamiliar words (Phase 1 of the
- * vocabulary feature — no storage yet).
+ * The current sentence stays the focus at the bottom: English on top (large and
+ * bright), its Chinese translation just below. Earlier captions stack in the
+ * space above in the same English-then-Chinese order but smaller and fainter, so
+ * the screen still reads as one live caption area — not a separate transcript
+ * page. The user can scroll up to review earlier content; new captions keep
+ * flowing while they are at/near the bottom and stop tugging once they scroll up
+ * (no jump-to-latest button). Caption text is selectable, enabling the iOS Copy /
+ * Look Up / Translate menu for unfamiliar words.
  *
- * It only renders the existing in-memory caption window (bounded upstream), so a
- * long lecture stays performant via FlatList virtualization.
+ * It renders the existing in-memory caption window (bounded upstream), so a long
+ * lecture stays performant via FlatList virtualization.
  */
 export function CaptionHistoryFeed({
   lines,
@@ -47,7 +46,6 @@ export function CaptionHistoryFeed({
   translatingPending,
 }: CaptionHistoryFeedProps) {
   const listRef = useRef<FlatList<LiveCaptionLine>>(null);
-  const layoutHeightRef = useRef(0);
   const [autoFollow, setAutoFollow] = useState(true);
 
   const hasLive = partialEnglish.trim().length > 0;
@@ -56,7 +54,8 @@ export function CaptionHistoryFeed({
     listRef.current?.scrollToEnd({ animated });
   }, []);
 
-  // Stick to the live edge as new captions arrive — but only while following.
+  // Keep the newest caption in view as content arrives — but only while the user
+  // is following along at the bottom. If they've scrolled up to read, leave them.
   useEffect(() => {
     if (!autoFollow) return;
     const id = requestAnimationFrame(() => scrollToLatest(true));
@@ -71,43 +70,39 @@ export function CaptionHistoryFeed({
 
   const renderItem = useCallback(
     ({ item, index }: { item: LiveCaptionLine; index: number }) => {
-      const isNewestFinal = index === lines.length - 1 && !hasLive;
+      // The newest finalized line is the current caption only when nothing is
+      // actively being spoken (otherwise the live footer is the current one).
+      const isCurrent = index === lines.length - 1 && !hasLive;
       return (
         <View style={styles.block}>
+          <Text selectable style={[styles.en, isCurrent && styles.enCurrent]}>
+            {item.text}
+          </Text>
           {item.translationZh ? (
-            <Text selectable style={[styles.zh, isNewestFinal && styles.zhLatest]}>
+            <Text selectable style={[styles.zh, isCurrent && styles.zhCurrent]}>
               {item.translationZh}
             </Text>
           ) : null}
-          <Text
-            selectable
-            style={[
-              styles.en,
-              item.translationZh ? styles.enUnderZh : styles.enSolo,
-              isNewestFinal && styles.enLatest,
-            ]}
-          >
-            {item.text}
-          </Text>
         </View>
       );
     },
     [lines.length, hasLive],
   );
 
+  // The sentence currently being spoken — always the primary focus at the bottom.
   const liveFooter = hasLive ? (
-    <View style={[styles.block, styles.liveBlock]}>
+    <View style={styles.block}>
+      <Text selectable style={[styles.en, styles.enCurrent]}>
+        {partialEnglish}
+        <Text style={styles.caret}>│</Text>
+      </Text>
       {partialTranslationZh ? (
-        <Text selectable style={[styles.zh, styles.zhLatest]}>
+        <Text selectable style={[styles.zh, styles.zhCurrent]}>
           {partialTranslationZh}
         </Text>
       ) : translatingPending ? (
         <Text style={styles.translating}>Translating…</Text>
       ) : null}
-      <Text selectable style={[styles.en, styles.enLatest]}>
-        {partialEnglish}
-        <Text style={styles.caret}>│</Text>
-      </Text>
     </View>
   ) : null;
 
@@ -119,12 +114,9 @@ export function CaptionHistoryFeed({
         keyExtractor={(item) => item.id}
         renderItem={renderItem}
         contentContainerStyle={styles.content}
-        showsVerticalScrollIndicator
+        showsVerticalScrollIndicator={false}
         scrollEventThrottle={16}
         onScroll={handleScroll}
-        onLayout={(event) => {
-          layoutHeightRef.current = event.nativeEvent.layout.height;
-        }}
         onContentSizeChange={() => {
           if (autoFollow) scrollToLatest(false);
         }}
@@ -136,20 +128,6 @@ export function CaptionHistoryFeed({
         maxToRenderPerBatch={12}
         windowSize={11}
       />
-      {!autoFollow ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Back to live"
-          onPress={() => {
-            setAutoFollow(true);
-            scrollToLatest(true);
-          }}
-          style={({ pressed }) => [styles.backToLive, pressed && styles.backToLivePressed]}
-        >
-          <Ionicons name="arrow-down" size={15} color={colors.pearlWhite} />
-          <Text style={styles.backToLiveText}>Back to live</Text>
-        </Pressable>
-      ) : null}
     </View>
   );
 }
@@ -160,60 +138,49 @@ const styles = StyleSheet.create({
     minHeight: 0,
   },
   content: {
+    // Anchor to the bottom so the current caption sits low (near the controls)
+    // with earlier history filling the space above — the original caption feel.
     flexGrow: 1,
     justifyContent: 'flex-end',
     paddingHorizontal: 72,
     paddingTop: 24,
     paddingBottom: 20,
-    gap: 18,
+    gap: 16,
   },
   block: {
     maxWidth: 900,
     gap: 3,
   },
-  liveBlock: {
-    borderLeftWidth: 3,
-    borderLeftColor: colors.accent,
-    paddingLeft: 14,
-    marginLeft: -17,
-  },
-  // Chinese translation — prominent and readable (the review-friendly line).
-  zh: {
-    fontSize: 22,
-    lineHeight: 32,
-    color: colors.textPrimary,
-    fontWeight: '600',
-  },
-  zhLatest: {
-    fontSize: 26,
-    lineHeight: 37,
-    fontWeight: '700',
-  },
-  // Original English — lighter and smaller, sitting under the translation.
+  // ---- Previous captions: English first, small & faint; Chinese below, fainter.
   en: {
     fontSize: 16,
     lineHeight: 24,
-    color: colors.textTertiary,
+    color: 'rgba(71, 85, 105, 0.55)',
     fontWeight: '500',
   },
-  enUnderZh: {
-    marginTop: 1,
+  zh: {
+    fontSize: 15,
+    lineHeight: 23,
+    color: 'rgba(71, 85, 105, 0.40)',
+    fontWeight: '500',
   },
-  enSolo: {
-    // A finalized line still awaiting translation: keep English readable on its own.
-    fontSize: 18,
-    lineHeight: 27,
-    color: colors.textSecondary,
+  // ---- Current caption: English primary (large, bright); Chinese in accent below.
+  enCurrent: {
+    fontSize: 29,
+    lineHeight: 40,
+    color: colors.textPrimary,
+    fontWeight: '700',
+    letterSpacing: -0.3,
   },
-  enLatest: {
-    fontSize: 18,
-    lineHeight: 27,
-    color: colors.textSecondary,
+  zhCurrent: {
+    fontSize: 19,
+    lineHeight: 29,
+    color: colors.accent,
     fontWeight: '600',
   },
   caret: { color: colors.accent, fontWeight: '400' },
   translating: {
-    fontSize: 13,
+    fontSize: 14,
     color: colors.textTertiary,
     fontWeight: '600',
   },
@@ -223,23 +190,5 @@ const styles = StyleSheet.create({
     color: colors.textTertiary,
     fontWeight: '500',
     paddingHorizontal: 72,
-  },
-  backToLive: {
-    position: 'absolute',
-    bottom: spacing.md,
-    alignSelf: 'center',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderRadius: 999,
-    backgroundColor: colors.accentBright,
-  },
-  backToLivePressed: { opacity: 0.85 },
-  backToLiveText: {
-    color: colors.pearlWhite,
-    fontSize: 13,
-    fontWeight: '700',
   },
 });
