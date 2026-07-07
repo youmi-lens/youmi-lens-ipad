@@ -9,7 +9,7 @@ import {
 } from 'react-native';
 
 import { colors } from '@/constants/theme';
-import { isNearBottom } from '@/lib/captionFeed.mjs';
+import { historyLineCount, isNearBottom } from '@/lib/captionFeed.mjs';
 import type { LiveCaptionLine } from '@/lib/liveCaptions';
 
 export type CaptionHistoryFeedProps = {
@@ -24,20 +24,20 @@ export type CaptionHistoryFeedProps = {
 };
 
 /**
- * CaptionHistoryFeed — the main recording screen's live caption area, enriched
- * with scrollable history rather than only the newest sentence.
+ * CaptionHistoryFeed — the main recording screen's live caption area, split into
+ * two independent regions:
  *
- * The current sentence stays the focus at the bottom: English on top (large and
- * bright), its Chinese translation just below. Earlier captions stack in the
- * space above in the same English-then-Chinese order but smaller and fainter, so
- * the screen still reads as one live caption area — not a separate transcript
- * page. The user can scroll up to review earlier content; new captions keep
- * flowing while they are at/near the bottom and stop tugging once they scroll up
- * (no jump-to-latest button). Caption text is selectable, enabling the iOS Copy /
- * Look Up / Translate menu for unfamiliar words.
+ *   • a SCROLLABLE history list (top) of earlier finalized captions — English on
+ *     top, Chinese below, small and faint; the student can scroll it to review
+ *     earlier content, and scrolling it never moves the current caption;
+ *   • a FIXED current caption (bottom) — the sentence being spoken now (or the
+ *     newest finalized line between sentences) — English on top, Chinese below,
+ *     large and dark. It lives OUTSIDE the scroll list, so it stays put and keeps
+ *     updating live even while the student scrolls the history above.
  *
- * It renders the existing in-memory caption window (bounded upstream), so a long
- * lecture stays performant via FlatList virtualization.
+ * History auto-follows new lines only while the user is at/near the bottom; once
+ * they scroll up it stays where they left it (no jump-to-latest button). Caption
+ * text is selectable for the iOS Copy / Look Up / Translate menu.
  */
 export function CaptionHistoryFeed({
   lines,
@@ -50,17 +50,25 @@ export function CaptionHistoryFeed({
 
   const hasLive = partialEnglish.trim().length > 0;
 
-  const scrollToLatest = useCallback((animated: boolean) => {
+  // The current caption is rendered as a fixed block, so keep it out of history.
+  const historyLines = lines.slice(0, historyLineCount(lines.length, hasLive));
+  const currentFinal = !hasLive && lines.length > 0 ? lines[lines.length - 1] : null;
+
+  const currentEnglish = hasLive ? partialEnglish : (currentFinal?.text ?? '');
+  const currentZh = hasLive ? partialTranslationZh : (currentFinal?.translationZh ?? '');
+  const hasCurrent = currentEnglish.trim().length > 0;
+
+  const scrollHistoryToEnd = useCallback((animated: boolean) => {
     listRef.current?.scrollToEnd({ animated });
   }, []);
 
-  // Keep the newest caption in view as content arrives — but only while the user
-  // is following along at the bottom. If they've scrolled up to read, leave them.
+  // Keep the newest history line in view as content moves up into the list — but
+  // only while the user is following at the bottom of the history area.
   useEffect(() => {
     if (!autoFollow) return;
-    const id = requestAnimationFrame(() => scrollToLatest(true));
+    const id = requestAnimationFrame(() => scrollHistoryToEnd(true));
     return () => cancelAnimationFrame(id);
-  }, [autoFollow, lines, partialEnglish, partialTranslationZh, scrollToLatest]);
+  }, [autoFollow, historyLines.length, scrollHistoryToEnd]);
 
   const handleScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
@@ -68,66 +76,60 @@ export function CaptionHistoryFeed({
     setAutoFollow(isNearBottom(distanceFromBottom));
   }, []);
 
-  const renderItem = useCallback(
-    ({ item, index }: { item: LiveCaptionLine; index: number }) => {
-      // The newest finalized line is the current caption only when nothing is
-      // actively being spoken (otherwise the live footer is the current one).
-      const isCurrent = index === lines.length - 1 && !hasLive;
-      return (
-        <View style={styles.block}>
-          <Text selectable style={[styles.en, isCurrent && styles.enCurrent]}>
-            {item.text}
-          </Text>
-          {item.translationZh ? (
-            <Text selectable style={[styles.zh, isCurrent && styles.zhCurrent]}>
-              {item.translationZh}
-            </Text>
-          ) : null}
-        </View>
-      );
-    },
-    [lines.length, hasLive],
-  );
-
-  // The sentence currently being spoken — always the primary focus at the bottom.
-  const liveFooter = hasLive ? (
-    <View style={styles.block}>
-      <Text selectable style={[styles.en, styles.enCurrent]}>
-        {partialEnglish}
-        <Text style={styles.caret}>│</Text>
+  const renderItem = useCallback(({ item }: { item: LiveCaptionLine }) => (
+    <View style={styles.historyBlock}>
+      <Text selectable style={styles.enHistory}>
+        {item.text}
       </Text>
-      {partialTranslationZh ? (
-        <Text selectable style={[styles.zh, styles.zhCurrent]}>
-          {partialTranslationZh}
+      {item.translationZh ? (
+        <Text selectable style={styles.zhHistory}>
+          {item.translationZh}
         </Text>
-      ) : translatingPending ? (
-        <Text style={styles.translating}>Translating…</Text>
       ) : null}
     </View>
-  ) : null;
+  ), []);
 
   return (
     <View style={styles.wrap}>
+      {/* Scrollable history — previous captions only, never the current one. */}
       <FlatList
         ref={listRef}
-        data={lines}
+        style={styles.historyList}
+        data={historyLines}
         keyExtractor={(item) => item.id}
         renderItem={renderItem}
-        contentContainerStyle={styles.content}
+        contentContainerStyle={styles.historyContent}
         showsVerticalScrollIndicator={false}
         scrollEventThrottle={16}
         onScroll={handleScroll}
         onContentSizeChange={() => {
-          if (autoFollow) scrollToLatest(false);
+          if (autoFollow) scrollHistoryToEnd(false);
         }}
-        ListFooterComponent={liveFooter}
-        ListEmptyComponent={
-          hasLive ? null : <Text style={styles.listening}>Listening for speech…</Text>
-        }
         initialNumToRender={12}
         maxToRenderPerBatch={12}
         windowSize={11}
       />
+
+      {/* Fixed current caption — stays put and updates live while history scrolls. */}
+      <View style={styles.currentBlock}>
+        {hasCurrent ? (
+          <>
+            <Text selectable style={styles.enCurrent}>
+              {currentEnglish}
+              {hasLive ? <Text style={styles.caret}>│</Text> : null}
+            </Text>
+            {currentZh ? (
+              <Text selectable style={styles.zhCurrent}>
+                {currentZh}
+              </Text>
+            ) : translatingPending ? (
+              <Text style={styles.translating}>Translating…</Text>
+            ) : null}
+          </>
+        ) : (
+          <Text style={styles.listening}>Listening for speech…</Text>
+        )}
+      </View>
     </View>
   );
 }
@@ -137,34 +139,46 @@ const styles = StyleSheet.create({
     flex: 1,
     minHeight: 0,
   },
-  content: {
-    // Anchor to the bottom so the current caption sits low (near the controls)
-    // with earlier history filling the space above — the original caption feel.
+  // History fills the space above the fixed current caption and scrolls on its own.
+  historyList: {
+    flex: 1,
+    minHeight: 0,
+  },
+  historyContent: {
+    // Bottom-anchored so the most recent history sits just above the current
+    // caption, with older lines and empty space filling upward.
     flexGrow: 1,
     justifyContent: 'flex-end',
     paddingHorizontal: 72,
     paddingTop: 24,
-    paddingBottom: 20,
-    gap: 16,
+    paddingBottom: 8,
+    gap: 14,
   },
-  block: {
+  historyBlock: {
     maxWidth: 900,
-    gap: 3,
+    gap: 2,
   },
-  // ---- Previous captions: English first, small & faint; Chinese below, fainter.
-  en: {
+  // Previous captions: English first, small & faint; Chinese below, fainter.
+  enHistory: {
     fontSize: 16,
     lineHeight: 24,
     color: 'rgba(71, 85, 105, 0.55)',
     fontWeight: '500',
   },
-  zh: {
+  zhHistory: {
     fontSize: 15,
     lineHeight: 23,
     color: 'rgba(71, 85, 105, 0.40)',
     fontWeight: '500',
   },
-  // ---- Current caption: English primary (large, bright); Chinese in accent below.
+  // Fixed current caption: English primary (large, dark); Chinese in accent below.
+  currentBlock: {
+    maxWidth: 900,
+    paddingHorizontal: 72,
+    paddingTop: 12,
+    paddingBottom: 20,
+    gap: 3,
+  },
   enCurrent: {
     fontSize: 29,
     lineHeight: 40,
@@ -189,6 +203,5 @@ const styles = StyleSheet.create({
     lineHeight: 27,
     color: colors.textTertiary,
     fontWeight: '500',
-    paddingHorizontal: 72,
   },
 });
