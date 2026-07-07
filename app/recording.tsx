@@ -17,6 +17,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { GlassCard } from '@/components/GlassCard';
+import { CaptionHistoryFeed } from '@/components/CaptionHistoryFeed';
 import { PrimaryButton } from '@/components/PrimaryButton';
 import { SecondaryButton } from '@/components/SecondaryButton';
 import { StatusPill } from '@/components/StatusPill';
@@ -116,7 +117,6 @@ export default function RecordingScreen() {
   const controlsEnabled = recordingControlsEnabled(audioActive);
   const latestFinalEnglish = latestFinalLine?.text ?? captionLines[captionLines.length - 1]?.text ?? '';
   const visibleEnglishCaption = partialCaption || latestFinalEnglish || latestCaption;
-  const visibleChineseCaption = partialTranslationZh || latestFinalLine?.translationZh || '';
   const captionAreaState = resolveCaptionAreaState({
     audioActive,
     startFailed,
@@ -504,6 +504,31 @@ export default function RecordingScreen() {
             </Text>
           </Animated.View>
 
+          {!isGuest && captionAreaState === 'captions_visible' ? (
+            // Live transcript: a scrollable history of paired Chinese/English
+            // caption blocks (not just the newest sentence). Kept OUTSIDE the
+            // page ScrollView so the feed owns its own vertical scroll.
+            <View style={styles.feedRegion}>
+              <CaptionHistoryFeed
+                lines={captionLines}
+                partialEnglish={partialCaption}
+                partialTranslationZh={partialTranslationZh}
+                translatingPending={Boolean(
+                  latestFinalLine && !latestFinalLine.translationZh && !partialCaption,
+                )}
+              />
+              {marks.length > 0 || (error && audioActive) ? (
+                <View style={styles.feedInfoBar}>
+                  {marks.length > 0 ? (
+                    <Text style={styles.markHint}>
+                      {marks.length} important moment{marks.length > 1 ? 's' : ''} marked
+                    </Text>
+                  ) : null}
+                  {error && audioActive ? <Text style={styles.errorText}>{error}</Text> : null}
+                </View>
+              ) : null}
+            </View>
+          ) : (
           <ScrollView
             contentContainerStyle={styles.scroll}
             showsVerticalScrollIndicator={false}
@@ -552,30 +577,6 @@ export default function RecordingScreen() {
                       style={styles.retryCaptionsButton}
                     />
                   </View>
-                ) : captionAreaState === 'captions_visible' ? (
-                  <View style={styles.captionBody}>
-                    <View style={styles.captionHistory}>
-                      {captionLines.slice(-3, -1).map((line, index) => (
-                        <Text key={`${line.text}-${index}`} style={styles.historyLine}>{line.text}</Text>
-                      ))}
-                    </View>
-                    {/* English — primary live caption: large, bold */}
-                    <View style={styles.captionSection}>
-                      <Text style={styles.captionPrimary}>{visibleEnglishCaption || 'Listening for speech…'}<Text style={styles.caret}>│</Text></Text>
-                    </View>
-                    {/* Chinese — translation support: smaller, lighter. Shown
-                        when it has text, or briefly while a finalised English
-                        line is still being translated. */}
-                    {visibleChineseCaption ? (
-                      <View style={styles.captionSection}>
-                        <Text style={styles.captionSecondary}>{visibleChineseCaption}</Text>
-                      </View>
-                    ) : latestFinalLine && !partialCaption ? (
-                      <View style={styles.captionSection}>
-                        <Text style={styles.captionTranslating}>Translating…</Text>
-                      </View>
-                    ) : null}
-                  </View>
                 ) : captionAreaState === 'captions_connecting' ? (
                   <Text style={styles.stateBody}>Connecting live captions…</Text>
                 ) : captionAreaState === 'captions_unavailable' ? (
@@ -602,6 +603,7 @@ export default function RecordingScreen() {
               )}
             </View>
           </ScrollView>
+          )}
 
           {/* Actions — Mark Important · Pause/Resume · Finish */}
           <View style={styles.actions}>
@@ -902,6 +904,8 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   captionStage: { minHeight: 360, justifyContent: 'flex-end', paddingBottom: 6 },
+  feedRegion: { flex: 1, minHeight: 0 },
+  feedInfoBar: { paddingHorizontal: 72, paddingBottom: 8, gap: 4 },
   captionHistory: { gap: 8, marginBottom: 18, maxWidth: 880 },
   historyLine: { color: 'rgba(71,85,105,0.40)', fontSize: 17, lineHeight: 26 },
   captionSection: {

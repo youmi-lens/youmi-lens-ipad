@@ -52,7 +52,10 @@ const LiveCaptionsContext = createContext<LiveCaptionsContextValue | null>(null)
 const EXPO_GO_LIMITATION = 'Live captions require the Youmi Lens development build. Recording still works.';
 /** The single calm, user-facing message for any real Live Caption failure. */
 const CAPTIONS_UNAVAILABLE_MESSAGE = 'Live captions unavailable. Recording is still active.';
-const RECENT_FINAL_CAPTION_LIMIT = 8;
+// History window kept in memory for the scrollable transcript feed. Bounded so a
+// long lecture can't grow an unbounded list; the main screen renders these in a
+// virtualized FlatList and the compact caption popups scroll the same window.
+const RECENT_FINAL_CAPTION_LIMIT = 200;
 
 // ── WebSocket recovery tuning ──────────────────────────────────────────────────
 /** Consecutive failed reconnects before giving up. Reset to 0 once stream_ready arrives. */
