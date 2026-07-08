@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Animated,
@@ -27,23 +27,31 @@ import { formatClock } from '@/lib/format';
 import { GUEST_MAX_RECORDING_SECONDS, incrementGuestRecordingsUsed } from '@/lib/guest';
 import { pickAndImportPdf } from '@/lib/importMaterial';
 import { logLiveCaptionEvent, logLiveCaptionUnavailable } from '@/lib/liveCaptionDiagnostics';
+import type { PersistedCaptionLine } from '@/lib/models';
 import { useLiveCaptions } from '@/lib/liveCaptions';
 import { getLiveMicStreamStatus, startMicStream, stopMicStream } from '@/lib/liveMicStream';
 import { useRecordingNotes } from '@/lib/recordingNotes';
 import { useData } from '@/lib/store';
 import { useLectureRecorder } from '@/lib/useLectureRecorder';
 import { resolveCaptionAreaState, recordingControlsEnabled } from '@/lib/lectureStartupState.mjs';
+import {
+  captionsToTranscript,
+  hasMeaningfulRecordingContent,
+} from '@/lib/recordingPersistence.mjs';
 
 /** Calm, user-facing line shown when live captions cannot run. Diagnostics stay in the console. */
 const LIVE_CAPTIONS_UNAVAILABLE_MESSAGE = 'Live captions unavailable. Audio recording is still active.';
 
 export default function RecordingScreen() {
   const router = useRouter();
-  const params = useLocalSearchParams<{ courseId?: string; lectureTitle?: string }>();
+  const params = useLocalSearchParams<{ courseId?: string; lectureTitle?: string; lectureId?: string }>();
   const { isGuest, exitGuest } = useAuth();
   const {
     getCourse,
     createLecture,
+    saveInProgressLecture,
+    updateLecture,
+    getLecture,
     currentUserId,
     lectures,
     materialsForCourse,
@@ -61,7 +69,14 @@ export default function RecordingScreen() {
     setCurrentDurationMillis,
     resetDraft,
   } = useRecordingNotes();
-  const course = getCourse(params.courseId);
+  // Resume mode: reopening an in-progress lecture reuses its id + saved history.
+  // Snapshot it once so course/title/prior-content come from the lecture, not
+  // just the launch params. `getLecture` reflects live store updates, but we
+  // only read identity/course/title here; the mount snapshot is held in refs.
+  const resumeLectureId = (params.lectureId ?? '').trim() || null;
+  const resumeLecture = resumeLectureId ? getLecture(resumeLectureId) : undefined;
+  const isResume = Boolean(resumeLecture);
+  const course = getCourse(resumeLecture?.courseId ?? params.courseId);
   const courseName = course?.name ?? 'Lecture';
 
   const {
@@ -85,7 +100,6 @@ export default function RecordingScreen() {
     partialTranslationZh,
     captionLines,
     latestFinalLine,
-    finalCaptions,
     startLiveCaptions,
     stopLiveCaptions,
     resetCaptions,
@@ -97,7 +111,15 @@ export default function RecordingScreen() {
   const [finishing, setFinishing] = useState(false);
   const [materialPickerVisible, setMaterialPickerVisible] = useState(false);
   const [importingMaterial, setImportingMaterial] = useState(false);
-  const [pendingLectureId] = useState(() => reserveLectureId());
+  // New content APPENDS to the resumed lecture's id (no duplicate); a fresh
+  // recording reserves a new id. Prior caption history / marks / audio are
+  // snapshotted once at mount so we can merge new content onto them.
+  const [pendingLectureId] = useState(() => resumeLecture?.id ?? reserveLectureId());
+  const priorCaptionLinesRef = useRef<PersistedCaptionLine[]>(resumeLecture?.liveCaptionLines ?? []);
+  const priorMarksRef = useRef<number[]>(resumeLecture?.markedTimestamps ?? []);
+  const priorAudioUriRef = useRef<string | null>(resumeLecture?.localAudioUri ?? null);
+  const progressCreatedRef = useRef(isResume);
+  const lastProgressSaveRef = useRef(0);
   const toast = useRef(new Animated.Value(0)).current;
   const autoStarted = useRef(false);
   const isRecordingRef = useRef(false);
@@ -126,6 +148,104 @@ export default function RecordingScreen() {
     captionsConnecting: liveCaptionStatus === 'connecting',
   });
   const courseMaterials = course ? materialsForCourse(course.id) : [];
+
+  // ---- Resumable persistence: prior history + live session merged together ----
+  // The caption feed and every save read the SAME merged source, so reopening a
+  // lecture shows old + new content and continuing appends to one lecture.
+  const priorFinalizedAsLive = priorCaptionLinesRef.current.map((line) => ({
+    id: line.id,
+    text: line.text,
+    translationZh: line.translationZh,
+    isFinal: true,
+    createdAt: '',
+  }));
+  const priorIds = new Set(priorFinalizedAsLive.map((line) => line.id));
+  const feedLines = [...priorFinalizedAsLive, ...captionLines.filter((line) => !priorIds.has(line.id))];
+
+  // Session-stable identity/labels + fresh refs so save callbacks never read
+  // stale closures.
+  const sessionCourseIdRef = useRef(resumeLecture?.courseId ?? params.courseId ?? '');
+  const sessionTitleRef = useRef(
+    (resumeLecture?.title ?? (params.lectureTitle ?? '').trim()) || 'Untitled Lecture',
+  );
+  const feedLinesRef = useRef(feedLines);
+  feedLinesRef.current = feedLines;
+  const marksRef = useRef(marks);
+  marksRef.current = marks;
+  const durationRef = useRef(durationMillis);
+  durationRef.current = durationMillis;
+
+  // Persist (create-or-update) the in-progress lecture from current content.
+  // Returns true when something was saved. Signed-in only — guest recordings
+  // keep their existing local-only, save-on-finish flow.
+  const persistProgress = useCallback(
+    (audioUri?: string | null): boolean => {
+      if (isGuest) return false;
+      const lines: PersistedCaptionLine[] = feedLinesRef.current.map((line) => ({
+        id: line.id,
+        text: line.text,
+        translationZh: line.translationZh,
+      }));
+      const { en, zh } = captionsToTranscript(lines);
+      const mergedMarks = [
+        ...priorMarksRef.current,
+        ...marksRef.current.map((mark) => mark.timestampMillis),
+      ];
+      const nextAudio = audioUri ?? priorAudioUriRef.current;
+      const meaningful = hasMeaningfulRecordingContent({
+        durationMillis: durationRef.current,
+        hasAudio: Boolean(nextAudio),
+        captionCount: lines.length,
+        markCount: mergedMarks.length,
+        transcriptLength: en.length,
+      });
+      if (!meaningful) return false;
+      saveInProgressLecture({
+        id: pendingLectureId,
+        courseId: sessionCourseIdRef.current,
+        title: sessionTitleRef.current,
+        durationMillis: durationRef.current,
+        localAudioUri: nextAudio,
+        markedTimestamps: mergedMarks,
+        liveTranscript: en,
+        liveTranscriptZh: zh,
+        liveCaptionLines: lines,
+      });
+      if (nextAudio) priorAudioUriRef.current = nextAudio;
+      progressCreatedRef.current = true;
+      lastProgressSaveRef.current = Date.now();
+      return true;
+    },
+    [isGuest, pendingLectureId, saveInProgressLecture],
+  );
+  const persistProgressRef = useRef(persistProgress);
+  persistProgressRef.current = persistProgress;
+
+  // Autosave: create the lecture as soon as meaningful content appears (so it
+  // survives an app kill), then refresh it at most every 5s while recording.
+  useEffect(() => {
+    if (isGuest || finishedRef.current) return;
+    if (
+      !hasMeaningfulRecordingContent({
+        durationMillis,
+        captionCount: feedLines.length,
+        markCount: marks.length,
+      })
+    ) {
+      return;
+    }
+    if (!progressCreatedRef.current || Date.now() - lastProgressSaveRef.current > 5000) {
+      persistProgress();
+    }
+  }, [captionLines.length, marks.length, durationMillis, feedLines.length, isGuest, persistProgress]);
+
+  // Never lose work when the screen is torn down (Back gesture, navigation away).
+  useEffect(
+    () => () => {
+      if (!finishedRef.current) persistProgressRef.current();
+    },
+    [],
+  );
 
   useEffect(() => {
     lecturesRef.current = lectures;
@@ -250,6 +370,10 @@ export default function RecordingScreen() {
   useEffect(() => {
     const sub = AppState.addEventListener('change', (next) => {
       if (next === 'active') recoverCaptionsRef.current();
+      // Persist before the app is suspended so a background kill can't lose work.
+      if (next === 'background' || next === 'inactive') {
+        if (!finishedRef.current) persistProgressRef.current();
+      }
     });
     return () => sub.remove();
   }, []);
@@ -281,7 +405,28 @@ export default function RecordingScreen() {
       pauseRecording();
       stopMicStream();
       stopLiveCaptions();
+      // Pausing keeps the session — persist so it survives a later exit.
+      if (!isGuest && !finishedRef.current) persistProgress();
     }
+  };
+
+  // Leaving via Back keeps an in-progress lecture (no "Recording not saved" for
+  // meaningful content). Finalize the current audio segment so it is retained,
+  // then persist and exit. Empty sessions are simply discarded (nothing to keep).
+  const handleBack = async () => {
+    if (finishing) return;
+    if (!isGuest && !finishedRef.current) {
+      stopMicStream();
+      stopLiveCaptions();
+      let uri: string | null = null;
+      try {
+        uri = await stopRecording();
+      } catch {
+        uri = null;
+      }
+      persistProgress(uri);
+    }
+    router.back();
   };
 
   const markImportant = () => {
@@ -316,41 +461,34 @@ export default function RecordingScreen() {
       });
     }
 
-    // Finish only saves when real audio was captured. If the recorder never
-    // engaged (e.g. a permission/hardware edge), do NOT save an empty lecture
-    // or count it against the guest cap — surface a clear error and return so
-    // the user can record again. The valid-recording paths below (guest local
-    // save and signed-in upload/process) are unchanged.
-    if (!uri || finalDuration <= 0) {
-      finishedRef.current = false;
-      guestAutoStopped.current = false;
-      setFinishing(false);
-      router.back();
-      Alert.alert(
-        'Recording not saved',
-        'We couldn’t capture any audio for this recording. Please check microphone access and try again.',
-      );
-      return;
-    }
-
-    const lecture = createLecture({
-      id: pendingLectureId,
-      courseId: params.courseId ?? '',
-      title: (params.lectureTitle ?? '').trim() || 'Untitled Lecture',
-      durationMillis: finalDuration,
-      localAudioUri: uri,
-      markedTimestamps: marks.map((mark) => mark.timestampMillis),
-      liveTranscript: isGuest ? '' : finalCaptions.join('\n'),
-      notes: draftNotes,
-      noteStrokes: draftStrokes,
-      noteImages: draftImages,
-    });
-    resetDraft();
-
-    // Guest recordings stay on this device — no cloud upload, no backend
-    // processing, no transcript/summary generation. Count the recording
-    // against the local guest cap and invite the user to sign in.
+    // Guest recordings are local-only with no captions, so audio is their only
+    // content. Keep the strict empty-check: never save an empty lecture or count
+    // it against the guest cap.
     if (isGuest) {
+      if (!uri || finalDuration <= 0) {
+        finishedRef.current = false;
+        guestAutoStopped.current = false;
+        setFinishing(false);
+        router.back();
+        Alert.alert(
+          'Recording not saved',
+          'We couldn’t capture any audio for this recording. Please check microphone access and try again.',
+        );
+        return;
+      }
+      createLecture({
+        id: pendingLectureId,
+        courseId: params.courseId ?? '',
+        title: (params.lectureTitle ?? '').trim() || 'Untitled Lecture',
+        durationMillis: finalDuration,
+        localAudioUri: uri,
+        markedTimestamps: marks.map((mark) => mark.timestampMillis),
+        liveTranscript: '',
+        notes: draftNotes,
+        noteStrokes: draftStrokes,
+        noteImages: draftImages,
+      });
+      resetDraft();
       await incrementGuestRecordingsUsed();
       router.replace('/');
       Alert.alert(
@@ -364,7 +502,75 @@ export default function RecordingScreen() {
       return;
     }
 
-    router.replace({ pathname: '/processing', params: { lectureId: lecture.id } });
+    // Signed-in: finalize the in-progress lecture (or create it now) with the
+    // merged bilingual history. "Meaningful content" — not just fresh audio —
+    // decides whether to keep it, so a resumed lecture or a captions-only
+    // session is never dropped as "Recording not saved".
+    const lines: PersistedCaptionLine[] = feedLinesRef.current.map((line) => ({
+      id: line.id,
+      text: line.text,
+      translationZh: line.translationZh,
+    }));
+    const { en, zh } = captionsToTranscript(lines);
+    const mergedMarks = [
+      ...priorMarksRef.current,
+      ...marks.map((mark) => mark.timestampMillis),
+    ];
+    const existing = getLecture(pendingLectureId);
+    const finalAudio = uri ?? priorAudioUriRef.current;
+    const savedDuration = Math.max(existing?.durationMillis ?? 0, finalDuration);
+    const meaningful = hasMeaningfulRecordingContent({
+      durationMillis: savedDuration,
+      hasAudio: Boolean(finalAudio),
+      captionCount: lines.length,
+      markCount: mergedMarks.length,
+      transcriptLength: en.length,
+    });
+    if (!meaningful) {
+      finishedRef.current = false;
+      setFinishing(false);
+      router.back();
+      Alert.alert(
+        'Recording not saved',
+        'We couldn’t capture any audio for this recording. Please check microphone access and try again.',
+      );
+      return;
+    }
+
+    let lectureId = pendingLectureId;
+    if (existing) {
+      updateLecture(pendingLectureId, {
+        status: 'local_recorded',
+        durationMillis: savedDuration,
+        localAudioUri: finalAudio,
+        markedTimestamps: mergedMarks,
+        liveTranscript: en,
+        liveTranscriptZh: zh,
+        liveCaptionLines: lines,
+        notes: draftNotes,
+        noteStrokes: draftStrokes,
+        noteImages: draftImages,
+      });
+    } else {
+      const lecture = createLecture({
+        id: pendingLectureId,
+        courseId: sessionCourseIdRef.current,
+        title: sessionTitleRef.current,
+        durationMillis: savedDuration,
+        localAudioUri: finalAudio,
+        markedTimestamps: mergedMarks,
+        liveTranscript: en,
+        liveTranscriptZh: zh,
+        liveCaptionLines: lines,
+        notes: draftNotes,
+        noteStrokes: draftStrokes,
+        noteImages: draftImages,
+      });
+      lectureId = lecture.id;
+    }
+    resetDraft();
+
+    router.replace({ pathname: '/processing', params: { lectureId } });
   };
 
   // Guest recordings are capped at 2 minutes. When the cap is reached we finish
@@ -415,7 +621,7 @@ export default function RecordingScreen() {
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Back"
-          onPress={() => router.back()}
+          onPress={() => void handleBack()}
           hitSlop={10}
           style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
         >
@@ -510,7 +716,7 @@ export default function RecordingScreen() {
             // page ScrollView so the feed owns its own vertical scroll.
             <View style={styles.feedRegion}>
               <CaptionHistoryFeed
-                lines={captionLines}
+                lines={feedLines}
                 partialEnglish={partialCaption}
                 partialTranslationZh={partialTranslationZh}
                 translatingPending={Boolean(

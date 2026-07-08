@@ -26,10 +26,12 @@ import {
   type CourseMaterial,
   type Lecture,
   type LectureMaterialLink,
+  type LectureStatus,
   type MaterialAnnotationStroke,
   type MaterialPageAnnotation,
   type NoteImage,
   type NoteStroke,
+  type PersistedCaptionLine,
 } from './models';
 import { supabase } from './supabase';
 
@@ -64,6 +66,12 @@ export type NewLectureInput = {
   localAudioUri: string | null;
   markedTimestamps: number[];
   liveTranscript?: string;
+  /** Draft Chinese translation captured from live captions during recording. */
+  liveTranscriptZh?: string;
+  /** Persisted bilingual caption history for an in-progress/resumable lecture. */
+  liveCaptionLines?: PersistedCaptionLine[];
+  /** Lifecycle status; defaults to 'local_recorded' when omitted (a finished save). */
+  status?: LectureStatus;
   /** Typed notes captured during recording (Mini Workspace). */
   notes?: string;
   /** Handwritten strokes captured during recording (Mini Workspace). */
@@ -88,6 +96,8 @@ type DataContextValue = {
   setSelectedCourseId: (id: string | null) => void;
   createCourse: (input: NewCourseInput) => Course;
   createLecture: (input: NewLectureInput) => Lecture;
+  /** Create-or-update a resumable in-progress lecture (never lose partial work). */
+  saveInProgressLecture: (input: NewLectureInput) => Lecture;
   updateLecture: (id: string, patch: Partial<Lecture>) => void;
   /** Soft-delete a lecture — moves it to Recently Deleted; does not destroy data. */
   deleteLecture: (id: string) => void;
@@ -661,12 +671,14 @@ export function DataProvider({ children }: { children: ReactNode }) {
       uploadStatus: 'not_uploaded',
       processingStatus: 'not_started',
       markedTimestamps: input.markedTimestamps,
-      status: 'local_recorded',
+      status: input.status ?? 'local_recorded',
       transcript: '',
       summaryEn: '',
       summaryZh: '',
       keyPoints: [],
       liveTranscript: input.liveTranscript ?? '',
+      liveTranscriptZh: input.liveTranscriptZh ?? '',
+      liveCaptionLines: input.liveCaptionLines ?? [],
       notes: input.notes ?? '',
       noteStrokes: input.noteStrokes ?? [],
       noteImages: input.noteImages ?? [],
@@ -683,6 +695,60 @@ export function DataProvider({ children }: { children: ReactNode }) {
 
   const updateLecture = useCallback((id: string, patch: Partial<Lecture>) => {
     setLectures((prev) => prev.map((l) => (l.id === id ? { ...l, ...patch } : l)));
+  }, []);
+
+  // Create-or-update an in-progress (resumable) lecture. Called while recording
+  // to make sure meaningful content is never lost on pause/exit/background: the
+  // first call creates the row with status 'in_progress'; later calls patch it.
+  // Keeps prior audio if a fresh segment URI isn't provided this save.
+  const saveInProgressLecture = useCallback((input: NewLectureInput): Lecture => {
+    const id = input.id ?? makeId('lecture');
+    let saved: Lecture | null = null;
+    setLectures((prev) => {
+      const existing = prev.find((l) => l.id === id && !l.deletedAt);
+      if (existing) {
+        const patched: Lecture = {
+          ...existing,
+          courseId: input.courseId || existing.courseId,
+          title: input.title || existing.title,
+          durationMillis: Math.max(existing.durationMillis, input.durationMillis),
+          localAudioUri: input.localAudioUri ?? existing.localAudioUri,
+          markedTimestamps: input.markedTimestamps,
+          liveTranscript: input.liveTranscript ?? existing.liveTranscript,
+          liveTranscriptZh: input.liveTranscriptZh ?? existing.liveTranscriptZh,
+          liveCaptionLines: input.liveCaptionLines ?? existing.liveCaptionLines,
+          status: 'in_progress',
+        };
+        saved = patched;
+        return prev.map((l) => (l.id === id ? patched : l));
+      }
+      const lecture: Lecture = {
+        id,
+        courseId: input.courseId,
+        title: input.title,
+        date: new Date().toISOString(),
+        durationMillis: input.durationMillis,
+        localAudioUri: input.localAudioUri,
+        remoteRecordingId: makeUuid(),
+        uploadStatus: 'not_uploaded',
+        processingStatus: 'not_started',
+        markedTimestamps: input.markedTimestamps,
+        status: 'in_progress',
+        transcript: '',
+        summaryEn: '',
+        summaryZh: '',
+        keyPoints: [],
+        liveTranscript: input.liveTranscript ?? '',
+        liveTranscriptZh: input.liveTranscriptZh ?? '',
+        liveCaptionLines: input.liveCaptionLines ?? [],
+        notes: input.notes ?? '',
+        noteStrokes: input.noteStrokes ?? [],
+        noteImages: input.noteImages ?? [],
+      };
+      saved = lecture;
+      return [...prev, lecture];
+    });
+    return saved ?? ({ id } as Lecture);
   }, []);
 
   const renameCourse = useCallback((courseId: string, newName: string) => {
@@ -1189,6 +1255,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
       setSelectedCourseId,
       createCourse,
       createLecture,
+      saveInProgressLecture,
       updateLecture,
       deleteLecture,
       deleteCourse,
@@ -1256,7 +1323,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
       clearAnnotationsForPage,
       clearAll,
     }),
-    [visibleStoreReady, currentUserId, activeCourses, activeLectures, deletedCourses, deletedLectures, selectedCourseId, createCourse, createLecture, updateLecture, deleteLecture, deleteCourse, restoreCourse, restoreLecture, permanentlyDeleteCourse, permanentlyDeleteLecture, renameCourse, renameLecture, activeMaterials, addMaterial, renameMaterial, updateMaterial, deleteMaterial, activeMaterialLinks, reserveLectureId, linkMaterialToLecture, updateLectureMaterialLink, removeLectureMaterialLink, cleanupOrphanMaterialLinks, activeMaterialAnnotations, saveAnnotationStrokes, replaceMaterialPageAnnotationStrokesForMaterial, addAnnotationStroke, undoLastAnnotationStroke, clearAnnotationsForPage, clearAll],
+    [visibleStoreReady, currentUserId, activeCourses, activeLectures, deletedCourses, deletedLectures, selectedCourseId, createCourse, createLecture, saveInProgressLecture, updateLecture, deleteLecture, deleteCourse, restoreCourse, restoreLecture, permanentlyDeleteCourse, permanentlyDeleteLecture, renameCourse, renameLecture, activeMaterials, addMaterial, renameMaterial, updateMaterial, deleteMaterial, activeMaterialLinks, reserveLectureId, linkMaterialToLecture, updateLectureMaterialLink, removeLectureMaterialLink, cleanupOrphanMaterialLinks, activeMaterialAnnotations, saveAnnotationStrokes, replaceMaterialPageAnnotationStrokesForMaterial, addAnnotationStroke, undoLastAnnotationStroke, clearAnnotationsForPage, clearAll],
   );
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;

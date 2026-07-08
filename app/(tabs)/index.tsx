@@ -221,15 +221,27 @@ export default function RecordHomeScreen() {
                     </View>
                     {recentLectures.length ? recentLectures.map((lecture, index) => {
                       const course = getCourse(lecture.courseId);
+                      const inProgress = lecture.status === 'in_progress';
                       return (
                         <Pressable
                           key={lecture.id}
-                          onPress={() => router.push({ pathname: '/lecture/[id]', params: { id: lecture.id } })}
+                          onPress={() =>
+                            inProgress
+                              ? router.push({ pathname: '/recording', params: { lectureId: lecture.id } })
+                              : router.push({ pathname: '/lecture/[id]', params: { id: lecture.id } })
+                          }
                           style={({ pressed }) => [styles.lectureRow, index < recentLectures.length - 1 && styles.lectureDivider, pressed && styles.pressed]}
                         >
-                          <IconTile icon="document-text-outline" size={32} />
+                          <IconTile icon={inProgress ? 'mic-outline' : 'document-text-outline'} size={32} />
                           <View style={styles.lectureText}>
-                            <Text numberOfLines={1} style={styles.lectureTitle}>{lecture.title}</Text>
+                            <View style={styles.lectureTitleRow}>
+                              <Text numberOfLines={1} style={styles.lectureTitle}>{lecture.title}</Text>
+                              {inProgress ? (
+                                <View style={styles.inProgressBadge}>
+                                  <Text style={styles.inProgressBadgeText}>In progress</Text>
+                                </View>
+                              ) : null}
+                            </View>
                             <Text numberOfLines={1} style={styles.lectureMeta}>{course?.name ?? 'Lecture'} · {formatShortDate(lecture.date)}</Text>
                           </View>
                           <Text style={styles.duration}>{formatDuration(lecture.durationMillis)}</Text>
@@ -286,8 +298,21 @@ const styles = StyleSheet.create({
   lectureRow: { minHeight: 55, flexDirection: 'row', alignItems: 'center', gap: 11, paddingVertical: 10 },
   lectureDivider: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   lectureText: { flex: 1 },
-  lectureTitle: { color: colors.ink, fontSize: 13.5, fontWeight: '700' },
+  lectureTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  lectureTitle: { color: colors.ink, fontSize: 13.5, fontWeight: '700', flexShrink: 1 },
   lectureMeta: { color: colors.textTertiary, fontSize: 11.5, marginTop: 2 },
+  inProgressBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 999,
+    backgroundColor: 'rgba(11, 31, 58, 0.08)',
+  },
+  inProgressBadgeText: {
+    color: colors.accentBright,
+    fontSize: 10.5,
+    fontWeight: '800',
+    letterSpacing: 0.2,
+  },
   duration: { color: colors.textSecondary, fontSize: 11.5, fontWeight: '700', fontVariant: ['tabular-nums'] },
   emptyRecent: { color: colors.textTertiary, fontSize: 12.5, marginTop: 18 },
   emptyGrid: { flexDirection: 'row', gap: 16, minHeight: 440 },

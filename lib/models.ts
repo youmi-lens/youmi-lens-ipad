@@ -7,12 +7,26 @@
  */
 
 export type LectureStatus =
+  /** Recording started and has meaningful content but was not finished yet;
+   *  it can be reopened and continued (draft / paused / in progress). */
+  | 'in_progress'
   /** Audio captured locally, not yet processed. */
   | 'local_recorded'
   /** Mock processing steps are running. */
   | 'processing_mock'
   /** Mock processing finished — sample notes available. */
   | 'ready_mock';
+
+/**
+ * A finalized bilingual caption line persisted so an in-progress lecture can be
+ * reopened and its history shown again (and appended to). Mirrors the live
+ * caption shape without pulling in the live-captions module.
+ */
+export type PersistedCaptionLine = {
+  id: string;
+  text: string;
+  translationZh?: string;
+};
 
 export type TranscriptSegment = {
   time: string;
@@ -127,6 +141,13 @@ export type Lecture = {
   keyPoints: string[];
   /** Draft transcript captured from live captions during recording, when available. */
   liveTranscript?: string;
+  /** Draft Chinese translation captured from live captions during recording. */
+  liveTranscriptZh?: string;
+  /**
+   * Persisted bilingual caption history for an in-progress lecture (local only),
+   * so it can be reopened, shown, and appended to when recording continues.
+   */
+  liveCaptionLines?: PersistedCaptionLine[];
 
   // ---- Local lecture notes (typed + handwritten) ----
   /** Typed notes for this lecture. */

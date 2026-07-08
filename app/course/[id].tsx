@@ -24,6 +24,7 @@ type LectureStatusDisplay = {
 };
 
 function lectureStatus(lecture: Lecture): LectureStatusDisplay {
+  if (lecture.status === 'in_progress') return { label: 'IN PROGRESS', variant: 'recording' };
   if (lecture.processingStatus === 'ready' || (lecture.transcript && (lecture.summaryEn || lecture.summaryZh))) {
     return { label: 'READY', variant: 'done' };
   }
@@ -145,6 +146,13 @@ export default function CourseDetailScreen() {
 
   const openLecture = (lectureId: string) => {
     setOpenLectureId(null);
+    // In-progress lectures reopen into the recording screen to continue; others
+    // open their detail page.
+    const lecture = lectures.find((l) => l.id === lectureId);
+    if (lecture?.status === 'in_progress') {
+      router.push({ pathname: '/recording', params: { lectureId } });
+      return;
+    }
     router.push({ pathname: '/lecture/[id]', params: { id: lectureId } });
   };
 
