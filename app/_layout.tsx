@@ -95,7 +95,11 @@ function AuthGate() {
             contentStyle: { backgroundColor: 'transparent' },
           }}
         />
-        <Stack.Screen name="recording" />
+        {/* Disable the iOS swipe-back gesture on the recording screen: leaving
+            must go through the in-app Back button so the audio segment is
+            finalized (stopRecording) and the in-progress lecture is persisted.
+            A raw swipe-back would unmount without finalizing the audio. */}
+        <Stack.Screen name="recording" options={{ gestureEnabled: false }} />
         <Stack.Screen name="mini-caption" options={{ animation: 'fade' }} />
         <Stack.Screen name="processing" />
         <Stack.Screen name="lecture/[id]" />
