@@ -111,6 +111,12 @@ export default function RecordingScreen() {
   const [finishing, setFinishing] = useState(false);
   const [materialPickerVisible, setMaterialPickerVisible] = useState(false);
   const [importingMaterial, setImportingMaterial] = useState(false);
+  // Reopening an in-progress lecture starts in a REVIEW state: prior captions
+  // are shown but the recorder/mic/live captions do NOT start until the user
+  // explicitly taps "Continue Recording". A fresh recording has no review state.
+  const [continueRequested, setContinueRequested] = useState(false);
+  const isReviewingResume = isResume && !continueRequested;
+  const reviewBaseSeconds = Math.floor((resumeLecture?.durationMillis ?? 0) / 1000);
   // New content APPENDS to the resumed lecture's id (no duplicate); a fresh
   // recording reserves a new id. Prior caption history / marks / audio are
   // snapshotted once at mount so we can merge new content onto them.
@@ -225,6 +231,9 @@ export default function RecordingScreen() {
   // survives an app kill), then refresh it at most every 5s while recording.
   useEffect(() => {
     if (isGuest || finishedRef.current) return;
+    // In the resumed-review state nothing new is being captured yet, and the
+    // lecture is already persisted — don't rewrite it until recording continues.
+    if (isReviewingResume) return;
     if (
       !hasMeaningfulRecordingContent({
         durationMillis,
@@ -237,7 +246,15 @@ export default function RecordingScreen() {
     if (!progressCreatedRef.current || Date.now() - lastProgressSaveRef.current > 5000) {
       persistProgress();
     }
-  }, [captionLines.length, marks.length, durationMillis, feedLines.length, isGuest, persistProgress]);
+  }, [
+    captionLines.length,
+    marks.length,
+    durationMillis,
+    feedLines.length,
+    isGuest,
+    isReviewingResume,
+    persistProgress,
+  ]);
 
   // Never lose work when the screen is torn down (Back gesture, navigation away).
   useEffect(
@@ -339,6 +356,9 @@ export default function RecordingScreen() {
   // the live caption mic stream then attaches on top without being clobbered.
   useEffect(() => {
     if (autoStarted.current || !granted) return;
+    // Resumed lecture: wait for an explicit "Continue Recording" tap before the
+    // recorder/mic/captions start, so opening it is a safe review, not a record.
+    if (isResume && !continueRequested) return;
     autoStarted.current = true;
     void startRecording().then((started) => {
       if (__DEV__) console.info('[recording] automatic local recording result', { started });
@@ -348,7 +368,7 @@ export default function RecordingScreen() {
     });
   // The recorder and caption starters intentionally run once after permission resolves.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [granted, isGuest]);
+  }, [granted, isGuest, isResume, continueRequested]);
 
   // Keep this fresh for the mount-once AppState listener below.
   isRecordingRef.current = isRecording;
@@ -408,6 +428,14 @@ export default function RecordingScreen() {
       // Pausing keeps the session — persist so it survives a later exit.
       if (!isGuest && !finishedRef.current) persistProgress();
     }
+  };
+
+  // Explicit "Continue Recording" from the resumed review state: flip out of
+  // review so the auto-start effect begins the recorder/mic/captions, appending
+  // new content to this same lecture.
+  const handleContinueRecording = () => {
+    if (continueRequested) return;
+    setContinueRequested(true);
   };
 
   // Leaving via Back keeps an in-progress lecture (no "Recording not saved" for
@@ -628,12 +656,17 @@ export default function RecordingScreen() {
           <Ionicons name="chevron-back" size={24} color={colors.textPrimary} />
         </Pressable>
 
-        {granted ? <StatusPill label={isPaused ? 'PAUSED' : 'REC'} variant={isPaused ? 'paused' : 'recording'} /> : null}
+        {granted ? (
+          <StatusPill
+            label={isReviewingResume ? 'PAUSED' : isPaused ? 'PAUSED' : 'REC'}
+            variant={isReviewingResume || isPaused ? 'paused' : 'recording'}
+          />
+        ) : null}
         <View style={styles.courseChip}>
           <Ionicons name={(course?.icon ?? 'book-outline') as keyof typeof Ionicons.glyphMap} size={13} color={colors.accent} />
           <Text style={styles.courseChipText} numberOfLines={1}>{courseName}</Text>
         </View>
-        {granted ? <Text style={styles.headerTimer}>{formatClock(seconds)}</Text> : <View style={styles.headerGrow} />}
+        {granted ? <Text style={styles.headerTimer}>{formatClock(isReviewingResume ? reviewBaseSeconds : seconds)}</Text> : <View style={styles.headerGrow} />}
         {granted && course ? (
           <Pressable
             accessibilityRole="button"
@@ -710,10 +743,12 @@ export default function RecordingScreen() {
             </Text>
           </Animated.View>
 
-          {!isGuest && captionAreaState === 'captions_visible' ? (
+          {!isGuest && (captionAreaState === 'captions_visible' || isReviewingResume) ? (
             // Live transcript: a scrollable history of paired Chinese/English
             // caption blocks (not just the newest sentence). Kept OUTSIDE the
-            // page ScrollView so the feed owns its own vertical scroll.
+            // page ScrollView so the feed owns its own vertical scroll. In the
+            // resumed-review state it shows the saved history while a "Continue
+            // Recording" button waits for the user to start appending.
             <View style={styles.feedRegion}>
               <CaptionHistoryFeed
                 lines={feedLines}
@@ -723,7 +758,17 @@ export default function RecordingScreen() {
                   latestFinalLine && !latestFinalLine.translationZh && !partialCaption,
                 )}
               />
-              {marks.length > 0 || (error && audioActive) ? (
+              {isReviewingResume ? (
+                <View style={styles.resumeBar}>
+                  <Text style={styles.resumeHint}>Resumed lecture — review above, then continue.</Text>
+                  <PrimaryButton
+                    label="Continue Recording"
+                    icon="mic"
+                    onPress={handleContinueRecording}
+                    style={styles.resumeButton}
+                  />
+                </View>
+              ) : marks.length > 0 || (error && audioActive) ? (
                 <View style={styles.feedInfoBar}>
                   {marks.length > 0 ? (
                     <Text style={styles.markHint}>
@@ -1112,6 +1157,9 @@ const styles = StyleSheet.create({
   captionStage: { minHeight: 360, justifyContent: 'flex-end', paddingBottom: 6 },
   feedRegion: { flex: 1, minHeight: 0 },
   feedInfoBar: { paddingHorizontal: 72, paddingBottom: 8, gap: 4 },
+  resumeBar: { paddingHorizontal: 72, paddingTop: 8, paddingBottom: 12, gap: 8 },
+  resumeHint: { color: colors.textTertiary, fontSize: 12.5, fontWeight: '500' },
+  resumeButton: { alignSelf: 'flex-start' },
   captionHistory: { gap: 8, marginBottom: 18, maxWidth: 880 },
   historyLine: { color: 'rgba(71,85,105,0.40)', fontSize: 17, lineHeight: 26 },
   captionSection: {
