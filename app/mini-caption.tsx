@@ -67,11 +67,13 @@ export default function MiniCaptionScreen() {
     setDraftStrokes,
     setDraftImages,
     currentDurationMillis,
+    isLectureSessionPaused,
     addMarkMillis,
   } = useRecordingNotes();
 
   const [fallbackMillis, setFallbackMillis] = useState((Number(params.elapsed ?? 0) || 0) * 1000);
   const [paused, setPaused] = useState(false);
+  const panelPaused = isLectureSessionPaused || paused;
   const [markFlash, setMarkFlash] = useState(false);
   const [panelVisible, setPanelVisible] = useState(true);
   const [autoFollowFeed, setAutoFollowFeed] = useState(true);
@@ -84,10 +86,10 @@ export default function MiniCaptionScreen() {
   // local clock is only a fallback for the brief case where Mini mounts before
   // that shared value is available.
   useEffect(() => {
-    if (paused || currentDurationMillis > 0) return;
+    if (panelPaused || currentDurationMillis > 0) return;
     const id = setInterval(() => setFallbackMillis((ms) => ms + 1000), 1000);
     return () => clearInterval(id);
-  }, [currentDurationMillis, paused]);
+  }, [currentDurationMillis, panelPaused]);
 
   useEffect(() => {
     if (!markFlash) return;
@@ -519,7 +521,7 @@ export default function MiniCaptionScreen() {
                 height: scaled.statusDot,
                 borderRadius: scaled.statusDot / 2,
               },
-              paused && styles.recDotPaused,
+              panelPaused && styles.recDotPaused,
             ]}
           />
           <Text
@@ -527,7 +529,7 @@ export default function MiniCaptionScreen() {
           >
             {formatClock(seconds)}
           </Text>
-          {paused ? <Text style={[styles.pausedLabel, { fontSize: scaled.pausedLabel }]}>PAUSED</Text> : null}
+          {panelPaused ? <Text style={[styles.pausedLabel, { fontSize: scaled.pausedLabel }]}>PAUSED</Text> : null}
           <View style={styles.spacer} />
           <Pressable
             accessibilityRole="button"
@@ -595,6 +597,7 @@ export default function MiniCaptionScreen() {
                     ]}
                   >
                     <Text
+                      selectable
                       style={[
                         styles.captionText,
                         styles.feedEnglish,
@@ -642,6 +645,7 @@ export default function MiniCaptionScreen() {
                     color={colors.iceBlue}
                   />
                   <Text
+                    selectable
                     style={[
                       styles.captionText,
                       {
@@ -684,6 +688,7 @@ export default function MiniCaptionScreen() {
                   color={colors.iceBlue}
                 />
                 <Text
+                  selectable
                   style={[
                     styles.captionText,
                     {
@@ -776,18 +781,21 @@ export default function MiniCaptionScreen() {
             </Pressable>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={paused ? 'Resume' : 'Pause'}
-              onPress={() => setPaused((p) => !p)}
+              accessibilityLabel={panelPaused ? 'Resume' : 'Pause'}
+              onPress={() => {
+                if (isLectureSessionPaused) return;
+                setPaused((p) => !p);
+              }}
               style={({ pressed }) => [
                 styles.controlBtn,
                 { height: scaled.controlHeight, borderRadius: Math.round(8 * panelScale), gap: scaled.controlGap },
                 pressed && styles.pressed,
               ]}
             >
-              <Ionicons name={paused ? 'play' : 'pause'} size={scaled.controlIcon} color={colors.textOnNavy} />
+              <Ionicons name={panelPaused ? 'play' : 'pause'} size={scaled.controlIcon} color={colors.textOnNavy} />
               {!panelCompact ? (
                 <Text style={[styles.controlLabel, { fontSize: scaled.controlLabel }]}> 
-                  {paused ? 'Resume' : 'Pause'}
+                  {panelPaused ? 'Resume' : 'Pause'}
                 </Text>
               ) : null}
             </Pressable>

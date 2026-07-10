@@ -58,6 +58,8 @@ export default function RecordingScreen() {
     addMaterial,
     reserveLectureId,
     linkMaterialToLecture,
+    materialLinksForLecture,
+    materialAnnotations,
     cleanupOrphanMaterialLinks,
   } = useData();
   const {
@@ -67,7 +69,9 @@ export default function RecordingScreen() {
     marks,
     addMarkMillis,
     setCurrentDurationMillis,
+    setLectureSessionPaused,
     resetDraft,
+    hydrateDraft,
   } = useRecordingNotes();
   // Resume mode: reopening an in-progress lecture reuses its id + saved history.
   // Snapshot it once so course/title/prior-content come from the lecture, not
@@ -113,10 +117,9 @@ export default function RecordingScreen() {
   const [importingMaterial, setImportingMaterial] = useState(false);
   // Reopening an in-progress lecture starts in a REVIEW state: prior captions
   // are shown but the recorder/mic/live captions do NOT start until the user
-  // explicitly taps "Continue Recording". A fresh recording has no review state.
+  // resumes from the existing central Pause/Continue control.
   const [continueRequested, setContinueRequested] = useState(false);
   const isReviewingResume = isResume && !continueRequested;
-  const reviewBaseSeconds = Math.floor((resumeLecture?.durationMillis ?? 0) / 1000);
   // New content APPENDS to the resumed lecture's id (no duplicate); a fresh
   // recording reserves a new id. Prior caption history / marks / audio are
   // snapshotted once at mount so we can merge new content onto them.
@@ -124,6 +127,11 @@ export default function RecordingScreen() {
   const priorCaptionLinesRef = useRef<PersistedCaptionLine[]>(resumeLecture?.liveCaptionLines ?? []);
   const priorMarksRef = useRef<number[]>(resumeLecture?.markedTimestamps ?? []);
   const priorAudioUriRef = useRef<string | null>(resumeLecture?.localAudioUri ?? null);
+  const resumeDraftRef = useRef({
+    notes: resumeLecture?.notes,
+    strokes: resumeLecture?.noteStrokes,
+    images: resumeLecture?.noteImages,
+  });
   const progressCreatedRef = useRef(isResume);
   const lastProgressSaveRef = useRef(0);
   const toast = useRef(new Animated.Value(0)).current;
@@ -134,15 +142,24 @@ export default function RecordingScreen() {
   const finishedRef = useRef(false);
   const guestAutoStopped = useRef(false);
   const lecturesRef = useRef(lectures);
+  const draftNotesRef = useRef(draftNotes);
+  const draftStrokesRef = useRef(draftStrokes);
+  const draftImagesRef = useRef(draftImages);
+  const materialLinksForLectureRef = useRef(materialLinksForLecture);
+  const materialAnnotationsRef = useRef(materialAnnotations);
 
   const granted = permissionStatus === 'granted';
-  const seconds = Math.floor(durationMillis / 1000);
+  const sessionDurationMillis = isResume
+    ? (resumeLecture?.durationMillis ?? 0) + (isReviewingResume ? 0 : durationMillis)
+    : durationMillis;
+  const seconds = Math.floor(sessionDurationMillis / 1000);
   const recordingSessionActive = isRecording || isPaused || durationMillis > 0;
   // Reliable "audio is genuinely capturing" signal — the recorder's own state,
   // not just permission. Controls and caption copy derive from this so the UI
   // never claims recording is active when startup failed.
   const audioActive = isRecording || isPaused;
   const controlsEnabled = recordingControlsEnabled(audioActive);
+  const centralControlEnabled = isReviewingResume || controlsEnabled;
   const latestFinalEnglish = latestFinalLine?.text ?? captionLines[captionLines.length - 1]?.text ?? '';
   const visibleEnglishCaption = partialCaption || latestFinalEnglish || latestCaption;
   const captionAreaState = resolveCaptionAreaState({
@@ -178,8 +195,13 @@ export default function RecordingScreen() {
   feedLinesRef.current = feedLines;
   const marksRef = useRef(marks);
   marksRef.current = marks;
+  draftNotesRef.current = draftNotes;
+  draftStrokesRef.current = draftStrokes;
+  draftImagesRef.current = draftImages;
+  materialLinksForLectureRef.current = materialLinksForLecture;
+  materialAnnotationsRef.current = materialAnnotations;
   const durationRef = useRef(durationMillis);
-  durationRef.current = durationMillis;
+  durationRef.current = sessionDurationMillis;
 
   // Persist (create-or-update) the in-progress lecture from current content.
   // Returns true when something was saved. Signed-in only — guest recordings
@@ -198,12 +220,24 @@ export default function RecordingScreen() {
         ...marksRef.current.map((mark) => mark.timestampMillis),
       ];
       const nextAudio = audioUri ?? priorAudioUriRef.current;
+      const currentLinks = materialLinksForLectureRef.current(pendingLectureId);
+      const currentAnnotations = materialAnnotationsRef.current.filter(
+        (annotation) => annotation.lectureId === pendingLectureId && !annotation.deletedAt,
+      );
       const meaningful = hasMeaningfulRecordingContent({
         durationMillis: durationRef.current,
         hasAudio: Boolean(nextAudio),
         captionCount: lines.length,
         markCount: mergedMarks.length,
         transcriptLength: en.length,
+        notesLength: draftNotesRef.current.trim().length,
+        strokeCount: draftStrokesRef.current.length,
+        imageCount: draftImagesRef.current.length,
+        materialLinkCount: currentLinks.length,
+        materialAnnotationCount: currentAnnotations.reduce(
+          (count, annotation) => count + annotation.strokes.length,
+          0,
+        ),
       });
       if (!meaningful) return false;
       saveInProgressLecture({
@@ -216,6 +250,9 @@ export default function RecordingScreen() {
         liveTranscript: en,
         liveTranscriptZh: zh,
         liveCaptionLines: lines,
+        notes: draftNotesRef.current,
+        noteStrokes: draftStrokesRef.current,
+        noteImages: draftImagesRef.current,
       });
       if (nextAudio) priorAudioUriRef.current = nextAudio;
       progressCreatedRef.current = true;
@@ -236,9 +273,16 @@ export default function RecordingScreen() {
     if (isReviewingResume) return;
     if (
       !hasMeaningfulRecordingContent({
-        durationMillis,
+        durationMillis: sessionDurationMillis,
         captionCount: feedLines.length,
         markCount: marks.length,
+        notesLength: draftNotes.trim().length,
+        strokeCount: draftStrokes.length,
+        imageCount: draftImages.length,
+        materialLinkCount: materialLinksForLecture(pendingLectureId).length,
+        materialAnnotationCount: materialAnnotations
+          .filter((annotation) => annotation.lectureId === pendingLectureId && !annotation.deletedAt)
+          .reduce((count, annotation) => count + annotation.strokes.length, 0),
       })
     ) {
       return;
@@ -250,7 +294,14 @@ export default function RecordingScreen() {
     captionLines.length,
     marks.length,
     durationMillis,
+    sessionDurationMillis,
     feedLines.length,
+    draftNotes,
+    draftStrokes.length,
+    draftImages.length,
+    materialLinksForLecture,
+    materialAnnotations,
+    pendingLectureId,
     isGuest,
     isReviewingResume,
     persistProgress,
@@ -330,34 +381,45 @@ export default function RecordingScreen() {
     stopLiveCaptions();
   }, [stopLiveCaptions]);
 
-  // Start each recording session with an empty Mini Workspace draft.
+  // Fresh recordings start with an empty Mini Workspace draft. Reopened
+  // in-progress lectures rehydrate their saved draft instead of wiping it.
   useEffect(() => {
+    if (isResume) {
+      hydrateDraft(resumeDraftRef.current);
+      return;
+    }
     resetDraft();
-  }, [resetDraft]);
+  }, [hydrateDraft, isResume, pendingLectureId, resetDraft]);
 
   // If the user abandons the recording before Finish creates the Lecture,
   // discard any temporary material links created against the reserved id.
   useEffect(() => {
     return () => {
       if (!finishedRef.current) {
-        cleanupOrphanMaterialLinks(lecturesRef.current.map((lecture) => lecture.id));
+        const validLectureIds = lecturesRef.current.map((lecture) => lecture.id);
+        if (progressCreatedRef.current) validLectureIds.push(pendingLectureId);
+        cleanupOrphanMaterialLinks(validLectureIds);
       }
     };
-  }, [cleanupOrphanMaterialLinks]);
+  }, [cleanupOrphanMaterialLinks, pendingLectureId]);
 
   // Recording is the authoritative clock. Mini mirrors this value rather than
   // maintaining its own mark timeline, so marks from either surface align.
   useEffect(() => {
-    setCurrentDurationMillis(durationMillis);
-  }, [durationMillis, setCurrentDurationMillis]);
+    setCurrentDurationMillis(sessionDurationMillis);
+  }, [sessionDurationMillis, setCurrentDurationMillis]);
+
+  useEffect(() => {
+    setLectureSessionPaused(isReviewingResume || isPaused);
+  }, [isPaused, isReviewingResume, setLectureSessionPaused]);
 
   // Begin recording automatically when the screen opens with permission
   // granted. The local recorder starts first so it owns the audio session;
   // the live caption mic stream then attaches on top without being clobbered.
   useEffect(() => {
     if (autoStarted.current || !granted) return;
-    // Resumed lecture: wait for an explicit "Continue Recording" tap before the
-    // recorder/mic/captions start, so opening it is a safe review, not a record.
+    // Resumed lecture: wait for the existing central Pause/Continue control
+    // before the recorder/mic/captions start, so opening it is a safe review.
     if (isResume && !continueRequested) return;
     autoStarted.current = true;
     void startRecording().then((started) => {
@@ -418,6 +480,10 @@ export default function RecordingScreen() {
   };
 
   const togglePause = () => {
+    if (isReviewingResume) {
+      setContinueRequested(true);
+      return;
+    }
     if (isPaused) {
       resumeRecording();
       if (!isGuest) void startCaptionPipeline();
@@ -428,14 +494,6 @@ export default function RecordingScreen() {
       // Pausing keeps the session — persist so it survives a later exit.
       if (!isGuest && !finishedRef.current) persistProgress();
     }
-  };
-
-  // Explicit "Continue Recording" from the resumed review state: flip out of
-  // review so the auto-start effect begins the recorder/mic/captions, appending
-  // new content to this same lecture.
-  const handleContinueRecording = () => {
-    if (continueRequested) return;
-    setContinueRequested(true);
   };
 
   // Leaving via Back keeps an in-progress lecture (no "Recording not saved" for
@@ -458,7 +516,7 @@ export default function RecordingScreen() {
   };
 
   const markImportant = () => {
-    addMarkMillis(durationMillis);
+    addMarkMillis(sessionDurationMillis);
     toast.setValue(1);
     Animated.timing(toast, {
       toValue: 0,
@@ -471,14 +529,14 @@ export default function RecordingScreen() {
     if (finishing) return;
     if (__DEV__) {
       console.info('[recording] finish pressed', {
-        durationMillis,
+        durationMillis: sessionDurationMillis,
         hasCourse: Boolean(course),
         hasLectureTitle: Boolean((params.lectureTitle ?? '').trim()),
       });
     }
     setFinishing(true);
     finishedRef.current = true;
-    const finalDuration = durationMillis;
+    const finalDuration = sessionDurationMillis;
     stopMicStream();
     stopLiveCaptions();
     const uri = await stopRecording();
@@ -547,12 +605,24 @@ export default function RecordingScreen() {
     const existing = getLecture(pendingLectureId);
     const finalAudio = uri ?? priorAudioUriRef.current;
     const savedDuration = Math.max(existing?.durationMillis ?? 0, finalDuration);
+    const currentLinks = materialLinksForLecture(pendingLectureId);
+    const currentAnnotations = materialAnnotations.filter(
+      (annotation) => annotation.lectureId === pendingLectureId && !annotation.deletedAt,
+    );
     const meaningful = hasMeaningfulRecordingContent({
       durationMillis: savedDuration,
       hasAudio: Boolean(finalAudio),
       captionCount: lines.length,
       markCount: mergedMarks.length,
       transcriptLength: en.length,
+      notesLength: draftNotes.trim().length,
+      strokeCount: draftStrokes.length,
+      imageCount: draftImages.length,
+      materialLinkCount: currentLinks.length,
+      materialAnnotationCount: currentAnnotations.reduce(
+        (count, annotation) => count + annotation.strokes.length,
+        0,
+      ),
     });
     if (!meaningful) {
       finishedRef.current = false;
@@ -666,12 +736,12 @@ export default function RecordingScreen() {
           <Ionicons name={(course?.icon ?? 'book-outline') as keyof typeof Ionicons.glyphMap} size={13} color={colors.accent} />
           <Text style={styles.courseChipText} numberOfLines={1}>{courseName}</Text>
         </View>
-        {granted ? <Text style={styles.headerTimer}>{formatClock(isReviewingResume ? reviewBaseSeconds : seconds)}</Text> : <View style={styles.headerGrow} />}
+        {granted ? <Text style={styles.headerTimer}>{formatClock(seconds)}</Text> : <View style={styles.headerGrow} />}
         {granted && course ? (
           <Pressable
             accessibilityRole="button"
             onPress={() => setMaterialPickerVisible(true)}
-            disabled={!recordingSessionActive || finishing}
+            disabled={(!recordingSessionActive && !isReviewingResume) || finishing}
             style={({ pressed }) => [styles.materialTopButton, pressed && styles.pressed]}
           >
             <Ionicons name="document-text-outline" size={14} color={colors.textSecondary} />
@@ -746,9 +816,7 @@ export default function RecordingScreen() {
           {!isGuest && (captionAreaState === 'captions_visible' || isReviewingResume) ? (
             // Live transcript: a scrollable history of paired Chinese/English
             // caption blocks (not just the newest sentence). Kept OUTSIDE the
-            // page ScrollView so the feed owns its own vertical scroll. In the
-            // resumed-review state it shows the saved history while a "Continue
-            // Recording" button waits for the user to start appending.
+            // page ScrollView so the feed owns its own vertical scroll.
             <View style={styles.feedRegion}>
               <CaptionHistoryFeed
                 lines={feedLines}
@@ -758,17 +826,7 @@ export default function RecordingScreen() {
                   latestFinalLine && !latestFinalLine.translationZh && !partialCaption,
                 )}
               />
-              {isReviewingResume ? (
-                <View style={styles.resumeBar}>
-                  <Text style={styles.resumeHint}>Resumed lecture — review above, then continue.</Text>
-                  <PrimaryButton
-                    label="Continue Recording"
-                    icon="mic"
-                    onPress={handleContinueRecording}
-                    style={styles.resumeButton}
-                  />
-                </View>
-              ) : marks.length > 0 || (error && audioActive) ? (
+              {marks.length > 0 || (error && audioActive) ? (
                 <View style={styles.feedInfoBar}>
                   {marks.length > 0 ? (
                     <Text style={styles.markHint}>
@@ -868,14 +926,14 @@ export default function RecordingScreen() {
 
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={isPaused ? 'Resume recording' : 'Pause recording'}
-              accessibilityState={{ disabled: !controlsEnabled }}
-              disabled={!controlsEnabled}
+              accessibilityLabel={isReviewingResume || isPaused ? 'Resume recording' : 'Pause recording'}
+              accessibilityState={{ disabled: !centralControlEnabled }}
+              disabled={!centralControlEnabled}
               onPress={togglePause}
-              style={({ pressed }) => [styles.roundBtn, !controlsEnabled && styles.disabled, pressed && styles.pressed]}
+              style={({ pressed }) => [styles.roundBtn, !centralControlEnabled && styles.disabled, pressed && styles.pressed]}
             >
               <Ionicons
-                name={isPaused ? 'play' : 'pause'}
+                name={isReviewingResume || isPaused ? 'play' : 'pause'}
                 size={32}
                 color={colors.pearlWhite}
               />
@@ -1157,9 +1215,6 @@ const styles = StyleSheet.create({
   captionStage: { minHeight: 360, justifyContent: 'flex-end', paddingBottom: 6 },
   feedRegion: { flex: 1, minHeight: 0 },
   feedInfoBar: { paddingHorizontal: 72, paddingBottom: 8, gap: 4 },
-  resumeBar: { paddingHorizontal: 72, paddingTop: 8, paddingBottom: 12, gap: 8 },
-  resumeHint: { color: colors.textTertiary, fontSize: 12.5, fontWeight: '500' },
-  resumeButton: { alignSelf: 'flex-start' },
   captionHistory: { gap: 8, marginBottom: 18, maxWidth: 880 },
   historyLine: { color: 'rgba(71,85,105,0.40)', fontSize: 17, lineHeight: 26 },
   captionSection: {

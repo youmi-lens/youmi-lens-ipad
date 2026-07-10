@@ -707,6 +707,18 @@ export function DataProvider({ children }: { children: ReactNode }) {
     setLectures((prev) => {
       const existing = prev.find((l) => l.id === id && !l.deletedAt);
       if (existing) {
+        const hasNotes = Object.prototype.hasOwnProperty.call(input, 'notes');
+        const hasStrokes = Object.prototype.hasOwnProperty.call(input, 'noteStrokes');
+        const hasImages = Object.prototype.hasOwnProperty.call(input, 'noteImages');
+        const nextNotes = hasNotes ? (input.notes ?? '') : existing.notes;
+        const nextStrokes = hasStrokes ? (input.noteStrokes ?? []) : (existing.noteStrokes ?? []);
+        const nextImages = hasImages ? (input.noteImages ?? []) : (existing.noteImages ?? []);
+        const notesChanged =
+          nextNotes !== existing.notes ||
+          nextStrokes !== (existing.noteStrokes ?? []) ||
+          nextImages !== (existing.noteImages ?? []);
+        const hasNoteContent =
+          nextNotes.length > 0 || nextStrokes.length > 0 || nextImages.length > 0;
         const patched: Lecture = {
           ...existing,
           courseId: input.courseId || existing.courseId,
@@ -717,6 +729,10 @@ export function DataProvider({ children }: { children: ReactNode }) {
           liveTranscript: input.liveTranscript ?? existing.liveTranscript,
           liveTranscriptZh: input.liveTranscriptZh ?? existing.liveTranscriptZh,
           liveCaptionLines: input.liveCaptionLines ?? existing.liveCaptionLines,
+          notes: nextNotes,
+          noteStrokes: nextStrokes,
+          noteImages: nextImages,
+          noteUpdatedAt: notesChanged && hasNoteContent ? new Date().toISOString() : existing.noteUpdatedAt,
           status: 'in_progress',
         };
         saved = patched;
@@ -744,6 +760,12 @@ export function DataProvider({ children }: { children: ReactNode }) {
         notes: input.notes ?? '',
         noteStrokes: input.noteStrokes ?? [],
         noteImages: input.noteImages ?? [],
+        noteUpdatedAt:
+          (input.notes && input.notes.length > 0) ||
+          (input.noteStrokes && input.noteStrokes.length > 0) ||
+          (input.noteImages && input.noteImages.length > 0)
+            ? new Date().toISOString()
+            : undefined,
       };
       saved = lecture;
       return [...prev, lecture];

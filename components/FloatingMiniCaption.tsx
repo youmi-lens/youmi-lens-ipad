@@ -54,11 +54,12 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
     latestFinalLine,
     captionLines,
   } = useLiveCaptions();
-  const { currentDurationMillis, addMarkMillis } = useRecordingNotes();
+  const { currentDurationMillis, isLectureSessionPaused, addMarkMillis } = useRecordingNotes();
 
   const [panelVisible, setPanelVisible] = useState(true);
   const [markFlash, setMarkFlash] = useState(false);
   const [paused, setPaused] = useState(false);
+  const panelPaused = isLectureSessionPaused || paused;
   const [autoFollowFeed, setAutoFollowFeed] = useState(true);
   const [panelSize, setPanelSize] = useState({ width: DEFAULT_PANEL_WIDTH, height: DEFAULT_PANEL_HEIGHT });
 
@@ -369,11 +370,11 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
           style={[
             styles.recDot,
             { width: scaled.statusDot, height: scaled.statusDot, borderRadius: scaled.statusDot / 2 },
-            paused && styles.recDotPaused,
+            panelPaused && styles.recDotPaused,
           ]}
         />
         <Text style={[styles.timer, { fontSize: scaled.timer }]}>{formatClock(seconds)}</Text>
-        {paused ? <Text style={[styles.pausedLabel, { fontSize: scaled.pausedLabel }]}>PAUSED</Text> : null}
+        {panelPaused ? <Text style={[styles.pausedLabel, { fontSize: scaled.pausedLabel }]}>PAUSED</Text> : null}
         <View style={styles.spacer} />
         <Pressable
           accessibilityRole="button"
@@ -438,6 +439,7 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
                   ]}
                 >
                   <Text
+                    selectable
                     style={[
                       styles.captionText,
                       styles.feedEnglish,
@@ -576,17 +578,20 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
           </Pressable>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={paused ? 'Resume' : 'Pause'}
-            onPress={() => setPaused((p) => !p)}
+            accessibilityLabel={panelPaused ? 'Resume' : 'Pause'}
+            onPress={() => {
+              if (isLectureSessionPaused) return;
+              setPaused((p) => !p);
+            }}
             style={({ pressed }) => [
               styles.controlBtn,
               { height: scaled.controlHeight, borderRadius: Math.round(8 * panelScale), gap: scaled.controlGap },
               pressed && styles.pressed,
             ]}
           >
-            <Ionicons name={paused ? 'play' : 'pause'} size={scaled.controlIcon} color={colors.textOnNavy} />
+            <Ionicons name={panelPaused ? 'play' : 'pause'} size={scaled.controlIcon} color={colors.textOnNavy} />
             {!panelCompact ? (
-              <Text style={[styles.controlLabel, { fontSize: scaled.controlLabel }]}>{paused ? 'Resume' : 'Pause'}</Text>
+              <Text style={[styles.controlLabel, { fontSize: scaled.controlLabel }]}>{panelPaused ? 'Resume' : 'Pause'}</Text>
             ) : null}
           </Pressable>
         </View>
@@ -629,6 +634,7 @@ function CaptionFallbackRow({
         color={colors.iceBlue}
       />
       <Text
+        selectable
         style={[styles.captionText, { fontSize: englishSize, lineHeight: Math.round(englishSize * 1.4) }]}
         numberOfLines={englishLines}
         ellipsizeMode="tail"

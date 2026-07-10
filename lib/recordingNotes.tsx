@@ -50,6 +50,9 @@ type RecordingNotesValue = {
   /** Authoritative recorder clock mirrored from the Recording screen. */
   currentDurationMillis: number;
   setCurrentDurationMillis: (durationMillis: number) => void;
+  /** Whether the shared lecture session is paused. */
+  isLectureSessionPaused: boolean;
+  setLectureSessionPaused: (paused: boolean) => void;
   /** Add an important-moment mark in the canonical millisecond unit. */
   addMarkMillis: (timestampMillis: number, label?: string) => void;
   /** Add a mark at the latest mirrored recorder time. */
@@ -58,6 +61,12 @@ type RecordingNotesValue = {
   clearMarks: () => void;
   /** Clear the draft — called when a new recording starts and after Finish. */
   resetDraft: () => void;
+  /** Load a persisted draft when reopening an in-progress lecture. */
+  hydrateDraft: (draft: {
+    notes?: string;
+    strokes?: NoteStroke[];
+    images?: NoteImage[];
+  }) => void;
 };
 
 const RecordingNotesContext = createContext<RecordingNotesValue | null>(null);
@@ -74,6 +83,7 @@ export function RecordingNotesProvider({ children }: { children: ReactNode }) {
   const [draftImages, setDraftImages] = useState<NoteImage[]>([]);
   const [marks, setMarks] = useState<RecordingMark[]>([]);
   const [currentDurationMillis, setCurrentDurationMillisState] = useState(0);
+  const [isLectureSessionPaused, setLectureSessionPaused] = useState(false);
 
   const setCurrentDurationMillis = useCallback((durationMillis: number) => {
     setCurrentDurationMillisState(Math.max(0, Math.round(durationMillis)));
@@ -104,7 +114,20 @@ export function RecordingNotesProvider({ children }: { children: ReactNode }) {
     setDraftImages([]);
     setMarks([]);
     setCurrentDurationMillisState(0);
+    setLectureSessionPaused(false);
   }, []);
+
+  const hydrateDraft = useCallback(
+    (draft: { notes?: string; strokes?: NoteStroke[]; images?: NoteImage[] }) => {
+      setDraftNotes(draft.notes ?? '');
+      setDraftStrokes(draft.strokes ?? []);
+      setDraftImages(draft.images ?? []);
+      setMarks([]);
+      setCurrentDurationMillisState(0);
+      setLectureSessionPaused(true);
+    },
+    [],
+  );
 
   useEffect(() => {
     const nextUserId = user?.id ?? null;
@@ -125,10 +148,13 @@ export function RecordingNotesProvider({ children }: { children: ReactNode }) {
       marks,
       currentDurationMillis,
       setCurrentDurationMillis,
+      isLectureSessionPaused,
+      setLectureSessionPaused,
       addMarkMillis,
       addMarkAtCurrentTime,
       clearMarks,
       resetDraft,
+      hydrateDraft,
     }),
     [
       draftNotes,
@@ -137,10 +163,12 @@ export function RecordingNotesProvider({ children }: { children: ReactNode }) {
       marks,
       currentDurationMillis,
       setCurrentDurationMillis,
+      isLectureSessionPaused,
       addMarkMillis,
       addMarkAtCurrentTime,
       clearMarks,
       resetDraft,
+      hydrateDraft,
     ],
   );
 

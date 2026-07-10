@@ -78,7 +78,7 @@ export function LiveCaptionsStrip() {
           {status === 'error' ? 'CAPTIONS ERROR' : connecting ? 'CONNECTING' : 'LIVE'}
         </Text>
       </View>
-      <Text style={styles.captionText} numberOfLines={2}>
+      <Text selectable style={styles.captionText} numberOfLines={2}>
         {displayText}
       </Text>
       <Pressable

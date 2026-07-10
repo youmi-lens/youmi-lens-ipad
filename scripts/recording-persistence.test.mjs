@@ -19,6 +19,11 @@ assert.equal(hasMeaningfulRecordingContent({ hasAudio: true }), true);
 assert.equal(hasMeaningfulRecordingContent({ captionCount: 1 }), true);
 assert.equal(hasMeaningfulRecordingContent({ markCount: 1 }), true);
 assert.equal(hasMeaningfulRecordingContent({ transcriptLength: 5 }), true);
+assert.equal(hasMeaningfulRecordingContent({ notesLength: 5 }), true);
+assert.equal(hasMeaningfulRecordingContent({ strokeCount: 1 }), true);
+assert.equal(hasMeaningfulRecordingContent({ imageCount: 1 }), true);
+assert.equal(hasMeaningfulRecordingContent({ materialLinkCount: 1 }), true);
+assert.equal(hasMeaningfulRecordingContent({ materialAnnotationCount: 1 }), true);
 
 // ---- caption merge (resume append + translation update) ------------------
 const prior = [

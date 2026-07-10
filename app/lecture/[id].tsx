@@ -262,7 +262,7 @@ export default function LectureDetailScreen() {
                   label={getTranscriptSectionLabel('en')}
                 />
                 {transcriptEn ? (
-                  <Text style={styles.bodyText}>{transcriptEn}</Text>
+                  <Text selectable style={styles.bodyText}>{transcriptEn}</Text>
                 ) : (
                   <Text style={styles.emptyInline}>Transcript is not ready yet.</Text>
                 )}
