@@ -26,6 +26,7 @@ import {
   NotebookCanvas,
   type NotebookOverlayRect,
 } from '@/components/NotebookCanvas';
+import { NativeLookupText } from '@/components/NativeLookupText';
 import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
 import { formatClock } from '@/lib/format';
 import { useLiveCaptions } from '@/lib/liveCaptions';
@@ -596,8 +597,7 @@ export default function MiniCaptionScreen() {
                       },
                     ]}
                   >
-                    <Text
-                      selectable
+                    <NativeLookupText
                       style={[
                         styles.captionText,
                         styles.feedEnglish,
@@ -608,7 +608,7 @@ export default function MiniCaptionScreen() {
                       ]}
                     >
                       {line.text}
-                    </Text>
+                    </NativeLookupText>
                     {line.translationZh ? (
                       <Text
                         style={[
@@ -644,8 +644,7 @@ export default function MiniCaptionScreen() {
                     size={scaled.icon}
                     color={colors.iceBlue}
                   />
-                  <Text
-                    selectable
+                  <NativeLookupText
                     style={[
                       styles.captionText,
                       {
@@ -655,7 +654,7 @@ export default function MiniCaptionScreen() {
                     ]}
                   >
                     {captionLine}
-                  </Text>
+                  </NativeLookupText>
                 </View>
               )}
             </ScrollView>
@@ -687,8 +686,7 @@ export default function MiniCaptionScreen() {
                   size={scaled.icon}
                   color={colors.iceBlue}
                 />
-                <Text
-                  selectable
+                <NativeLookupText
                   style={[
                     styles.captionText,
                     {
@@ -700,7 +698,7 @@ export default function MiniCaptionScreen() {
                   ellipsizeMode="tail"
                 >
                   {captionLine}
-                </Text>
+                </NativeLookupText>
               </View>
               {showLatestOnlyChinese && translationLine ? (
                 <Text

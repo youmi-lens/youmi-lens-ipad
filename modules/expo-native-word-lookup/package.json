@@ -1,0 +1,7 @@
+{
+  "name": "expo-native-word-lookup",
+  "version": "1.0.0",
+  "description": "Native iOS dictionary lookup bridge for Youmi Lens captions.",
+  "main": "index.ts",
+  "private": true
+}

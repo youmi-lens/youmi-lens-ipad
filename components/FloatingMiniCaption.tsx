@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { NativeLookupText } from '@/components/NativeLookupText';
 import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
 import { formatClock } from '@/lib/format';
 import { useLiveCaptions } from '@/lib/liveCaptions';
@@ -438,8 +439,7 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
                     },
                   ]}
                 >
-                  <Text
-                    selectable
+                  <NativeLookupText
                     style={[
                       styles.captionText,
                       styles.feedEnglish,
@@ -447,7 +447,7 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
                     ]}
                   >
                     {line.text}
-                  </Text>
+                  </NativeLookupText>
                   {line.translationZh ? (
                     <Text
                       style={[
@@ -633,14 +633,13 @@ function CaptionFallbackRow({
         size={iconSize}
         color={colors.iceBlue}
       />
-      <Text
-        selectable
+      <NativeLookupText
         style={[styles.captionText, { fontSize: englishSize, lineHeight: Math.round(englishSize * 1.4) }]}
         numberOfLines={englishLines}
         ellipsizeMode="tail"
       >
         {captionLine}
-      </Text>
+      </NativeLookupText>
     </View>
   );
 }

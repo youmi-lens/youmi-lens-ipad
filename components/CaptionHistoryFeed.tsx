@@ -8,6 +8,7 @@ import {
   type NativeSyntheticEvent,
 } from 'react-native';
 
+import { NativeLookupText } from '@/components/NativeLookupText';
 import { colors } from '@/constants/theme';
 import { historyLineCount, isNearBottom } from '@/lib/captionFeed.mjs';
 import type { LiveCaptionLine } from '@/lib/liveCaptions';
@@ -36,8 +37,8 @@ export type CaptionHistoryFeedProps = {
  *     updating live even while the student scrolls the history above.
  *
  * History auto-follows new lines only while the user is at/near the bottom; once
- * they scroll up it stays where they left it (no jump-to-latest button). Caption
- * text is selectable for the iOS Copy / Look Up / Translate menu.
+ * they scroll up it stays where they left it (no jump-to-latest button). English
+ * text stays selectable for Copy and supports direct native dictionary lookup.
  */
 export function CaptionHistoryFeed({
   lines,
@@ -78,9 +79,9 @@ export function CaptionHistoryFeed({
 
   const renderItem = useCallback(({ item }: { item: LiveCaptionLine }) => (
     <View style={styles.historyBlock}>
-      <Text selectable style={styles.enHistory}>
+      <NativeLookupText style={styles.enHistory}>
         {item.text}
-      </Text>
+      </NativeLookupText>
       {item.translationZh ? (
         <Text selectable style={styles.zhHistory}>
           {item.translationZh}
@@ -114,10 +115,12 @@ export function CaptionHistoryFeed({
       <View style={styles.currentBlock}>
         {hasCurrent ? (
           <>
-            <Text selectable style={styles.enCurrent}>
+            <NativeLookupText
+              style={styles.enCurrent}
+              suffix={hasLive ? <Text style={styles.caret}>│</Text> : null}
+            >
               {currentEnglish}
-              {hasLive ? <Text style={styles.caret}>│</Text> : null}
-            </Text>
+            </NativeLookupText>
             {currentZh ? (
               <Text selectable style={styles.zhCurrent}>
                 {currentZh}

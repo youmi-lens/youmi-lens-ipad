@@ -15,6 +15,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
+import { NativeLookupText } from '@/components/NativeLookupText';
 import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
 import { useLiveCaptions } from '@/lib/liveCaptions';
 
@@ -78,9 +79,9 @@ export function LiveCaptionsStrip() {
           {status === 'error' ? 'CAPTIONS ERROR' : connecting ? 'CONNECTING' : 'LIVE'}
         </Text>
       </View>
-      <Text selectable style={styles.captionText} numberOfLines={2}>
+      <NativeLookupText style={styles.captionText} numberOfLines={2}>
         {displayText}
-      </Text>
+      </NativeLookupText>
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="Collapse live captions"

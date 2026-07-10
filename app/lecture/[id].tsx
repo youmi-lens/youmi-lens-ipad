@@ -18,6 +18,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlassCard } from '@/components/GlassCard';
 import { AppBackground } from '@/components/AppBackground';
 import { HandwritingPreview, NotebookCanvas } from '@/components/NotebookCanvas';
+import { NativeLookupText } from '@/components/NativeLookupText';
 import { RenameModal } from '@/components/RenameModal';
 import { StatusPill, StatusVariant } from '@/components/StatusPill';
 import { WorkspaceSidebar } from '@/components/WorkspaceSidebar';
@@ -262,7 +263,7 @@ export default function LectureDetailScreen() {
                   label={getTranscriptSectionLabel('en')}
                 />
                 {transcriptEn ? (
-                  <Text selectable style={styles.bodyText}>{transcriptEn}</Text>
+                  <NativeLookupText style={styles.bodyText}>{transcriptEn}</NativeLookupText>
                 ) : (
                   <Text style={styles.emptyInline}>Transcript is not ready yet.</Text>
                 )}
