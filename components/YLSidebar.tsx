@@ -8,6 +8,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LogoMark } from '@/components/BrandHeader';
 import { colors, fontSize, layout, radius, shadows, spacing } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
+import { useT } from '@/lib/i18n';
 
 type IconName = ComponentProps<typeof Ionicons>['name'];
 
@@ -29,8 +30,9 @@ function SidebarFrame({ items }: { items: SidebarItem[] }) {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const { user, username, isGuest } = useAuth();
-  const accountName = isGuest ? 'Guest' : username ?? user?.email?.split('@')[0] ?? 'Account';
-  const accountSubtitle = isGuest ? 'Local recordings' : user?.email ?? 'Signed in';
+  const t = useT();
+  const accountName = isGuest ? t('sidebar.guest') : username ?? user?.email?.split('@')[0] ?? t('sidebar.account');
+  const accountSubtitle = isGuest ? t('sidebar.localRecordings') : user?.email ?? t('sidebar.signedIn');
   const initials = accountName
     .split(/\s+/)
     .map((part) => part[0])
@@ -77,7 +79,7 @@ function SidebarFrame({ items }: { items: SidebarItem[] }) {
 
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Open account settings"
+        accessibilityLabel={t('sidebar.openAccountSettings')}
         onPress={() => router.push('/settings')}
         style={({ pressed }) => [styles.account, pressed && styles.pressed]}
       >
@@ -94,10 +96,15 @@ function SidebarFrame({ items }: { items: SidebarItem[] }) {
 }
 
 export function YLSidebar({ state, descriptors, navigation }: BottomTabBarProps) {
+  const t = useT();
   const items = state.routes.map((route, index) => {
     const selected = state.index === index;
     const options = descriptors[route.key].options;
-    const label = typeof options.title === 'string' ? options.title : route.name;
+    const label =
+      route.name === 'index' ? t('nav.record') :
+      route.name === 'courses' ? t('nav.courses') :
+      route.name === 'settings' ? t('nav.settings') :
+      typeof options.title === 'string' ? options.title : route.name;
     return {
       key: route.key,
       icon: ICONS[route.name] ?? 'ellipse-outline',
@@ -123,6 +130,7 @@ export function WorkspaceSidebar({
 }) {
   const router = useRouter();
   const { width } = useWindowDimensions();
+  const t = useT();
   if (width < 900) return null;
 
   const routes: {
@@ -131,9 +139,9 @@ export function WorkspaceSidebar({
     label: string;
     href: Href;
   }[] = [
-    { key: 'record', icon: 'mic-outline', label: 'Record', href: '/' },
-    { key: 'courses', icon: 'library-outline', label: 'Courses', href: '/courses' },
-    { key: 'settings', icon: 'settings-outline', label: 'Settings', href: '/settings' },
+    { key: 'record', icon: 'mic-outline', label: t('nav.record'), href: '/' },
+    { key: 'courses', icon: 'library-outline', label: t('nav.courses'), href: '/courses' },
+    { key: 'settings', icon: 'settings-outline', label: t('nav.settings'), href: '/settings' },
   ];
 
   return (

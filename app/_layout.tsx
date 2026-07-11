@@ -7,7 +7,9 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { colors } from '@/constants/theme';
 import { AuthProvider, useAuth } from '@/lib/auth';
+import { I18nProvider } from '@/lib/i18n';
 import { LiveCaptionsProvider } from '@/lib/liveCaptions';
+import { useProcessingOrchestrator } from '@/lib/useProcessingOrchestrator';
 import { RecordingNotesProvider } from '@/lib/recordingNotes';
 import { DataProvider } from '@/lib/store';
 
@@ -26,19 +28,32 @@ export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
+        <I18nProvider>
         <AuthProvider>
           <LiveCaptionsProvider>
             <DataProvider>
               <RecordingNotesProvider>
+                <ProcessingOrchestrator />
                 <AuthGate />
               </RecordingNotesProvider>
               <StatusBar style="dark" />
             </DataProvider>
           </LiveCaptionsProvider>
         </AuthProvider>
+        </I18nProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );
+}
+
+/**
+ * Headless host for the durable processing orchestrator. Mounted once, inside
+ * DataProvider + AuthProvider, so committed lectures keep uploading/processing
+ * no matter which screen (or none) is on top. Renders nothing.
+ */
+function ProcessingOrchestrator() {
+  useProcessingOrchestrator();
+  return null;
 }
 
 /**

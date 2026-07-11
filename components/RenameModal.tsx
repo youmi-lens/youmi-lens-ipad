@@ -17,6 +17,7 @@ import {
 } from 'react-native';
 
 import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
+import { useT } from '@/lib/i18n';
 
 type RenameModalProps = {
   visible: boolean;
@@ -39,6 +40,7 @@ export function RenameModal({
   onCancel,
   onSave,
 }: RenameModalProps) {
+  const t = useT();
   const [value, setValue] = useState(initialValue);
   const inputRef = useRef<TextInput>(null);
 
@@ -90,7 +92,7 @@ export function RenameModal({
 
           {/* Validation hint */}
           {value.length > 0 && !canSave ? (
-            <Text style={styles.validationHint}>Name cannot be empty or spaces only.</Text>
+            <Text style={styles.validationHint}>{t('rename.empty')}</Text>
           ) : null}
 
           {/* Buttons */}
@@ -100,7 +102,7 @@ export function RenameModal({
               onPress={onCancel}
               style={({ pressed }) => [styles.cancelBtn, pressed && styles.pressed]}
             >
-              <Text style={styles.cancelLabel}>Cancel</Text>
+              <Text style={styles.cancelLabel}>{t('common.cancel')}</Text>
             </Pressable>
 
             <Pressable
@@ -113,7 +115,7 @@ export function RenameModal({
                 pressed && canSave && styles.pressed,
               ]}
             >
-              <Text style={[styles.saveLabel, !canSave && styles.saveLabelDisabled]}>Save</Text>
+              <Text style={[styles.saveLabel, !canSave && styles.saveLabelDisabled]}>{t('common.save')}</Text>
             </Pressable>
           </View>
         </View>

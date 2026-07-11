@@ -15,6 +15,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NativeLookupText } from '@/components/NativeLookupText';
 import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
 import { formatClock } from '@/lib/format';
+import { useT } from '@/lib/i18n';
 import { useLiveCaptions } from '@/lib/liveCaptions';
 import { useRecordingNotes } from '@/lib/recordingNotes';
 
@@ -45,6 +46,7 @@ export type FloatingMiniCaptionProps = {
  * The panel is draggable/resizable and floats over the current workspace.
  */
 export function FloatingMiniCaption({ topOffset = 76, enabled = true }: FloatingMiniCaptionProps) {
+  const t = useT();
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
   const {
@@ -199,14 +201,14 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
   const latestFinalEnglish = latestFinalLine?.text ?? captionLines[captionLines.length - 1]?.text ?? '';
   const visibleEnglishCaption = partialCaption || latestFinalEnglish || latestCaption;
   const captionLine = captionsLive
-    ? visibleEnglishCaption || 'Listening…'
+    ? visibleEnglishCaption || t('mini.listeningStatus')
     : status === 'connecting'
-      ? 'Live captions connecting…'
+      ? t('mini.connecting')
       : visibleEnglishCaption
         ? visibleEnglishCaption
         : status === 'error'
-          ? 'Live captions unavailable'
-          : 'Listening…';
+          ? t('mini.unavailable')
+          : t('mini.listeningStatus');
   const translationLine = partialTranslationZh || latestFinalLine?.translationZh;
   const translationPending = Boolean(latestFinalLine && !translationLine && !partialCaption);
   const seconds = Math.floor(Math.max(0, currentDurationMillis) / 1000);
@@ -323,7 +325,7 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
       >
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Show captions"
+          accessibilityLabel={t('mini.showCaptions')}
           onPress={() => {
             if (listeningPillWasDraggedRef.current) return;
             setPanelVisible(true);
@@ -331,7 +333,7 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
           style={({ pressed }) => [styles.listeningPill, pressed && styles.pressed]}
         >
           <View style={styles.listeningDot} />
-          <Text style={styles.listeningPillLabel}>Youmi Listening</Text>
+          <Text style={styles.listeningPillLabel}>{t('mini.listening')}</Text>
           <Ionicons name="chevron-up" size={15} color={colors.textOnNavyMuted} />
         </Pressable>
       </Animated.View>
@@ -375,11 +377,11 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
           ]}
         />
         <Text style={[styles.timer, { fontSize: scaled.timer }]}>{formatClock(seconds)}</Text>
-        {panelPaused ? <Text style={[styles.pausedLabel, { fontSize: scaled.pausedLabel }]}>PAUSED</Text> : null}
+        {panelPaused ? <Text style={[styles.pausedLabel, { fontSize: scaled.pausedLabel }]}>{t('mini.paused')}</Text> : null}
         <View style={styles.spacer} />
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Hide captions"
+          accessibilityLabel={t('mini.hideCaptions')}
           onPress={() => setPanelVisible(false)}
           hitSlop={8}
           style={({ pressed }) => [
@@ -459,7 +461,7 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
                       {line.translationZh}
                     </Text>
                   ) : line.isActive && translationPending ? (
-                    <Text style={[styles.captionTranslationPending, { fontSize: scaled.chinese }]}>Translating…</Text>
+                    <Text style={[styles.captionTranslationPending, { fontSize: scaled.chinese }]}>{t('mini.translating')}</Text>
                   ) : null}
                 </View>
               ))
@@ -534,7 +536,7 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
         <View style={[styles.controls, { gap: scaled.controlGap }]}> 
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Mark important"
+            accessibilityLabel={t('mini.markImportant')}
             onPress={markImportant}
             style={({ pressed }) => [
               styles.controlBtn,
@@ -550,13 +552,13 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
             />
             {!panelCompact ? (
               <Text style={[styles.controlLabel, { fontSize: scaled.controlLabel }, markFlash && styles.controlLabelActive]}>
-                {markFlash ? 'Marked' : 'Mark'}
+                {markFlash ? t('mini.marked') : t('mini.mark')}
               </Text>
             ) : null}
           </Pressable>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Expand caption panel"
+            accessibilityLabel={t('mini.expandPanel')}
             onPress={() =>
               setPanelSize((current) => {
                 const maxWidth = Math.max(MIN_PANEL_WIDTH, width * 0.96);
@@ -574,11 +576,11 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
             ]}
           >
             <Ionicons name="scan-outline" size={scaled.controlIcon} color={colors.textOnNavy} />
-            {!panelCompact ? <Text style={[styles.controlLabel, { fontSize: scaled.controlLabel }]}>Expand</Text> : null}
+            {!panelCompact ? <Text style={[styles.controlLabel, { fontSize: scaled.controlLabel }]}>{t('mini.expand')}</Text> : null}
           </Pressable>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={panelPaused ? 'Resume' : 'Pause'}
+            accessibilityLabel={panelPaused ? t('mini.resume') : t('mini.pause')}
             onPress={() => {
               if (isLectureSessionPaused) return;
               setPaused((p) => !p);
@@ -591,7 +593,7 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
           >
             <Ionicons name={panelPaused ? 'play' : 'pause'} size={scaled.controlIcon} color={colors.textOnNavy} />
             {!panelCompact ? (
-              <Text style={[styles.controlLabel, { fontSize: scaled.controlLabel }]}>{panelPaused ? 'Resume' : 'Pause'}</Text>
+              <Text style={[styles.controlLabel, { fontSize: scaled.controlLabel }]}>{panelPaused ? t('mini.resume') : t('mini.pause')}</Text>
             ) : null}
           </Pressable>
         </View>

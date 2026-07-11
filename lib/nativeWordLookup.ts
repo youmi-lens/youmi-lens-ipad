@@ -9,6 +9,21 @@ type NativeWordLookupModule = {
 let lookedUp = false;
 let nativeModule: NativeWordLookupModule | null = null;
 
+type WordLookupSuccessListener = (term: string) => void;
+const successListeners = new Set<WordLookupSuccessListener>();
+
+/**
+ * Subscribe to successful dictionary lookups (used only for UX signals such as
+ * dismissing the discoverability hint). Purely additive — it does not change
+ * the double-tap trigger behavior. Returns an unsubscribe function.
+ */
+export function addWordLookupSuccessListener(listener: WordLookupSuccessListener): () => void {
+  successListeners.add(listener);
+  return () => {
+    successListeners.delete(listener);
+  };
+}
+
 function getNativeModule(): NativeWordLookupModule | null {
   if (lookedUp) return nativeModule;
   lookedUp = true;
@@ -42,7 +57,11 @@ export async function openNativeWordLookup(term: string): Promise<boolean> {
   if (!module) return false;
 
   try {
-    return await module.openAsync(normalizedTerm);
+    const opened = await module.openAsync(normalizedTerm);
+    if (opened) {
+      successListeners.forEach((listener) => listener(normalizedTerm));
+    }
+    return opened;
   } catch {
     return false;
   }

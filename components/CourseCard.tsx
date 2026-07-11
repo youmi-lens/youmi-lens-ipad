@@ -6,6 +6,7 @@ import { GlassCard } from '@/components/GlassCard';
 import { IconTile } from '@/components/WorkspaceUI';
 import { colors, fontSize, spacing } from '@/constants/theme';
 import type { Course } from '@/lib/models';
+import { useT, localizeSystemDefaultTitle } from '@/lib/i18n';
 
 type IconName = ComponentProps<typeof Ionicons>['name'];
 
@@ -24,6 +25,7 @@ export function CourseCard({
   durationLabel?: string;
   onPress?: () => void;
 }) {
+  const t = useT();
   return (
     <GlassCard padding={0} onPress={onPress} style={styles.card}>
       <View style={styles.body}>
@@ -36,15 +38,15 @@ export function CourseCard({
           />
           <Ionicons name="chevron-forward" size={19} color={colors.textTertiary} />
         </View>
-        <Text numberOfLines={2} style={styles.name}>{course.name}</Text>
+        <Text numberOfLines={2} style={styles.name}>{localizeSystemDefaultTitle(t, course.name)}</Text>
         <Text style={styles.stats}>
-          {lectureCount} {lectureCount === 1 ? 'lecture' : 'lectures'}
+          {t(lectureCount === 1 ? 'courses.lectureCount' : 'courses.lectureCountOther', { count: lectureCount })}
           {durationLabel ? ` · ${durationLabel}` : ''}
         </Text>
         <View style={styles.divider} />
         <View style={styles.footer}>
-          <Text style={styles.last}>{lastActivity ?? 'No lectures yet'}</Text>
-          <Text style={styles.ready}>{readyCount} {readyCount === 1 ? 'summary' : 'summaries'} ready</Text>
+          <Text style={styles.last}>{lastActivity ?? t('courses.noLecturesYet')}</Text>
+          <Text style={styles.ready}>{t(readyCount === 1 ? 'courses.summaryReady' : 'courses.summariesReady', { count: readyCount })}</Text>
         </View>
       </View>
     </GlassCard>

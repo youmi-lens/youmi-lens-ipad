@@ -13,6 +13,7 @@ import { SwipeDeleteRow } from '@/components/SwipeDeleteRow';
 import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
 import { formatDate, formatDuration, formatShortDate } from '@/lib/format';
 import { pickAndImportPdf } from '@/lib/importMaterial';
+import { useT, localizeSystemDefaultTitle } from '@/lib/i18n';
 import type { CourseMaterial, Lecture } from '@/lib/models';
 import { useData } from '@/lib/store';
 
@@ -23,20 +24,21 @@ type LectureStatusDisplay = {
   variant: StatusVariant;
 };
 
-function lectureStatus(lecture: Lecture): LectureStatusDisplay {
-  if (lecture.status === 'in_progress') return { label: 'IN PROGRESS', variant: 'recording' };
+function lectureStatus(lecture: Lecture, t: (key: string) => string): LectureStatusDisplay {
+  if (lecture.status === 'in_progress') return { label: t('status.inProgress'), variant: 'recording' };
   if (lecture.processingStatus === 'ready' || (lecture.transcript && (lecture.summaryEn || lecture.summaryZh))) {
-    return { label: 'READY', variant: 'done' };
+    return { label: t('status.ready'), variant: 'done' };
   }
-  if (lecture.processingStatus === 'processing') return { label: 'PROCESSING', variant: 'processing' };
-  if (lecture.processingStatus === 'failed') return { label: 'FAILED', variant: 'idle' };
-  if (lecture.uploadStatus === 'uploaded') return { label: 'UPLOADED', variant: 'synced' };
-  if (lecture.uploadStatus === 'uploading') return { label: 'UPLOADING', variant: 'processing' };
-  if (lecture.uploadStatus === 'upload_failed') return { label: 'UPLOAD FAILED', variant: 'idle' };
-  return { label: 'RECORDED', variant: 'idle' };
+  if (lecture.processingStatus === 'processing') return { label: t('status.processing'), variant: 'processing' };
+  if (lecture.processingStatus === 'failed') return { label: t('status.failed'), variant: 'idle' };
+  if (lecture.uploadStatus === 'uploaded') return { label: t('status.uploaded'), variant: 'synced' };
+  if (lecture.uploadStatus === 'uploading') return { label: t('status.uploading'), variant: 'processing' };
+  if (lecture.uploadStatus === 'upload_failed') return { label: t('status.uploadFailed'), variant: 'idle' };
+  return { label: t('status.recorded'), variant: 'idle' };
 }
 
 export default function CourseDetailScreen() {
+  const t = useT();
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string }>();
   const {
@@ -83,17 +85,16 @@ export default function CourseDetailScreen() {
       return;
     }
     if (result.canceled) return; // user dismissed picker — no alert
-    Alert.alert('Could not import material', result.reason);
+    Alert.alert(t('course.importFail'), result.reason);
   };
 
   const confirmDeleteMaterial = (materialId: string) => {
     Alert.alert(
-      'Delete material',
-      'This material will move to Recently Deleted. The file stays on this iPad.',
+      t('course.deleteMaterialTitle'), t('course.deleteMaterialBody'),
       [
-        { text: 'Cancel', style: 'cancel', onPress: () => setOpenMaterialId(null) },
+        { text: t('common.cancel'), style: 'cancel', onPress: () => setOpenMaterialId(null) },
         {
-          text: 'Delete',
+          text: t('common.delete'),
           style: 'destructive',
           onPress: () => {
             deleteMaterial(materialId);
@@ -126,13 +127,13 @@ export default function CourseDetailScreen() {
       <SafeAreaView style={styles.root} edges={['top', 'left', 'right', 'bottom']}>
         <View style={styles.notFound}>
           <Ionicons name="library-outline" size={36} color={colors.mutedBlueGray} />
-          <Text style={styles.notFoundTitle}>This course could not be found.</Text>
+          <Text style={styles.notFoundTitle}>{t('course.notFound')}</Text>
           <Pressable
             accessibilityRole="button"
             onPress={() => router.replace('/courses')}
             style={({ pressed }) => [styles.softButton, pressed && styles.pressed]}
           >
-            <Text style={styles.softButtonLabel}>Back to Courses</Text>
+            <Text style={styles.softButtonLabel}>{t('course.back')}</Text>
           </Pressable>
         </View>
       </SafeAreaView>
@@ -158,12 +159,11 @@ export default function CourseDetailScreen() {
 
   const confirmDeleteLecture = (lectureId: string) => {
     Alert.alert(
-      'Delete lecture',
-      'This lecture will move to Recently Deleted. You can restore it anytime.',
+      t('course.deleteLectureTitle'), t('course.deleteLectureBody'),
       [
-        { text: 'Cancel', style: 'cancel', onPress: () => setOpenLectureId(null) },
+        { text: t('common.cancel'), style: 'cancel', onPress: () => setOpenLectureId(null) },
         {
-          text: 'Delete',
+          text: t('common.delete'),
           style: 'destructive',
           onPress: () => {
             deleteLecture(lectureId);
@@ -179,17 +179,17 @@ export default function CourseDetailScreen() {
       <View style={styles.header}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Back"
+          accessibilityLabel={t('common.back')}
           onPress={() => router.back()}
           hitSlop={10}
           style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}
         >
           <Ionicons name="chevron-back" size={24} color={colors.deepNavy} />
         </Pressable>
-        <Text style={styles.headerTitle}>Course Detail</Text>
+        <Text style={styles.headerTitle}>{t('course.detail')}</Text>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Rename course"
+          accessibilityLabel={t('course.rename')}
           onPress={() => setCourseRenameVisible(true)}
           hitSlop={10}
           style={({ pressed }) => [styles.menuButton, pressed && styles.pressed]}
@@ -210,41 +210,41 @@ export default function CourseDetailScreen() {
                 <Ionicons name={course.icon as IoniconName} size={28} color={course.accent} />
               </View>
               <View style={styles.heroText}>
-                <Text style={styles.courseName}>{course.name}</Text>
+                <Text style={styles.courseName}>{localizeSystemDefaultTitle(t, course.name)}</Text>
                 <View style={styles.metaRow}>
                   <Text style={styles.metaText}>
-                    {lectures.length} {lectures.length === 1 ? 'lecture' : 'lectures'}
+                    {t(lectures.length === 1 ? 'course.lectureCount' : 'course.lectureCountOther', { count: lectures.length })}
                   </Text>
                   <View style={styles.metaDot} />
                   <Text style={styles.metaText}>
-                    {latestLecture ? `Last recorded ${formatShortDate(latestLecture.date)}` : 'No recordings yet'}
+                    {latestLecture ? t('course.lastRecorded', { date: formatShortDate(latestLecture.date) }) : t('course.noRecordings')}
                   </Text>
                 </View>
               </View>
             </View>
-            <PrimaryButton label="Start new lecture" icon="mic" onPress={startLecture} style={styles.startButton} />
+            <PrimaryButton label={t('course.start')} icon="mic" onPress={startLecture} style={styles.startButton} />
           </GlassCard>
 
           {/* ───── Course Materials (Build 7 V1.1, local-only) ───── */}
           <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Materials</Text>
+            <Text style={styles.sectionTitle}>{t('course.materials')}</Text>
             <Text style={styles.sectionMeta}>
-              {materials.length} {materials.length === 1 ? 'item' : 'items'}
+              {t(materials.length === 1 ? 'course.itemCount' : 'course.itemCountOther', { count: materials.length })}
             </Text>
           </View>
 
           <GlassCard style={styles.materialsCard}>
             <Text style={styles.materialsBanner}>
-              Materials are saved on this iPad only. Cloud backup for materials will come later.
+              {t('course.materialsLocal')}
             </Text>
             {materials.length === 0 ? (
               <View style={styles.materialsEmpty}>
                 <View style={styles.materialsEmptyIcon}>
                   <Ionicons name="document-attach-outline" size={26} color={colors.deepNavy} />
                 </View>
-                <Text style={styles.materialsEmptyTitle}>No materials imported yet.</Text>
+                <Text style={styles.materialsEmptyTitle}>{t('course.noMaterials')}</Text>
                 <Text style={styles.materialsEmptyBody}>
-                  Import a PDF textbook, slide deck, or reading you want available across this course.
+                  {t('course.materialsEmptyDetail')}
                 </Text>
               </View>
             ) : (
@@ -269,7 +269,7 @@ export default function CourseDetailScreen() {
                         <Ionicons name="document-text-outline" size={20} color={course.accent} />
                       </View>
                       <View style={styles.materialBody}>
-                        <Text style={styles.materialTitle} numberOfLines={1}>{material.title}</Text>
+                        <Text style={styles.materialTitle} numberOfLines={1}>{localizeSystemDefaultTitle(t, material.title)}</Text>
                         <View style={styles.lectureMetaRow}>
                           <Text style={styles.lectureMeta}>PDF</Text>
                           {material.pageCount ? (
@@ -304,7 +304,7 @@ export default function CourseDetailScreen() {
                       </View>
                       <Pressable
                         accessibilityRole="button"
-                        accessibilityLabel="Rename material"
+                        accessibilityLabel={t('course.renameMaterial')}
                         hitSlop={8}
                         onPress={(e) => {
                           e.stopPropagation();
@@ -323,7 +323,7 @@ export default function CourseDetailScreen() {
               </View>
             )}
             <SecondaryButton
-              label={importing ? 'Importing…' : 'Import PDF'}
+              label={importing ? t('common.importing') : t('common.importPdf')}
               icon="cloud-upload-outline"
               onPress={() => { void handleImportMaterial(); }}
               disabled={importing}
@@ -341,9 +341,9 @@ export default function CourseDetailScreen() {
 
           {/* ───── Lectures ───── */}
           <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Lectures</Text>
+            <Text style={styles.sectionTitle}>{t('course.lectures')}</Text>
             {latestLecture ? (
-              <Text style={styles.sectionMeta}>Latest {formatDate(latestLecture.date)}</Text>
+              <Text style={styles.sectionMeta}>{t('course.latest', { date: formatDate(latestLecture.date) })}</Text>
             ) : null}
           </View>
 
@@ -352,16 +352,16 @@ export default function CourseDetailScreen() {
               <View style={styles.emptyIcon}>
                 <Ionicons name="mic-outline" size={28} color={colors.deepNavy} />
               </View>
-              <Text style={styles.emptyTitle}>No lectures recorded yet.</Text>
+              <Text style={styles.emptyTitle}>{t('course.noLectures')}</Text>
               <Text style={styles.emptyBody}>
                 Record your first lecture to start building this course library.
               </Text>
-              <PrimaryButton label="Start first lecture" icon="mic" onPress={startLecture} style={styles.emptyButton} />
+              <PrimaryButton label={t('course.startFirst')} icon="mic" onPress={startLecture} style={styles.emptyButton} />
             </GlassCard>
           ) : (
             <View style={styles.lectureList}>
               {lectures.map((lecture, index) => {
-                const status = lectureStatus(lecture);
+                      const status = lectureStatus(lecture, t);
                 return (
                   <SwipeDeleteRow
                     key={lecture.id}
@@ -380,7 +380,7 @@ export default function CourseDetailScreen() {
                         <Ionicons name="document-text-outline" size={20} color={course.accent} />
                       </View>
                       <View style={styles.lectureBody}>
-                        <Text style={styles.lectureTitle} numberOfLines={1}>{lecture.title}</Text>
+                        <Text style={styles.lectureTitle} numberOfLines={1}>{localizeSystemDefaultTitle(t, lecture.title)}</Text>
                         <View style={styles.lectureMetaRow}>
                           <Text style={styles.lectureMeta}>{formatDate(lecture.date)}</Text>
                           <View style={styles.metaDot} />
@@ -390,7 +390,7 @@ export default function CourseDetailScreen() {
                       <StatusPill label={status.label} variant={status.variant} />
                       <Pressable
                         accessibilityRole="button"
-                        accessibilityLabel="Rename lecture"
+                        accessibilityLabel={t('course.renameLecture')}
                         hitSlop={8}
                         onPress={(e) => {
                           e.stopPropagation();
@@ -413,10 +413,10 @@ export default function CourseDetailScreen() {
       {/* Rename course modal */}
       <RenameModal
         visible={courseRenameVisible}
-        title="Rename Course"
-        label="Course name"
+        title={t('rename.courseTitle')}
+        label={t('rename.courseLabel')}
         initialValue={course.name}
-        placeholder="e.g. Introduction to Biology"
+        placeholder={t('rename.coursePlaceholder')}
         onCancel={() => setCourseRenameVisible(false)}
         onSave={(name) => {
           renameCourse(course.id, name);
@@ -427,10 +427,10 @@ export default function CourseDetailScreen() {
       {/* Rename lecture modal (per-row) */}
       <RenameModal
         visible={renameLectureTarget !== null}
-        title="Rename Lecture"
-        label="Lecture title"
+        title={t('rename.lectureTitle')}
+        label={t('rename.lectureLabel')}
         initialValue={renameLectureTarget?.title ?? ''}
-        placeholder="e.g. Week 3 — Cell Division"
+        placeholder={t('rename.lecturePlaceholder')}
         onCancel={() => setRenameLectureTarget(null)}
         onSave={(title) => {
           if (renameLectureTarget) renameLecture(renameLectureTarget.id, title);
@@ -441,10 +441,10 @@ export default function CourseDetailScreen() {
       {/* Rename material modal (per-row) */}
       <RenameModal
         visible={renameMaterialTarget !== null}
-        title="Rename Material"
-        label="Material name"
+        title={t('rename.materialTitle')}
+        label={t('rename.materialLabel')}
         initialValue={renameMaterialTarget?.title ?? ''}
-        placeholder="e.g. Psychology Textbook"
+        placeholder={t('rename.materialPlaceholder')}
         onCancel={() => setRenameMaterialTarget(null)}
         onSave={(title) => {
           if (renameMaterialTarget) renameMaterial(renameMaterialTarget.id, title);

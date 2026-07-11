@@ -1,7 +1,8 @@
 import { Ionicons } from '@expo/vector-icons';
+import Constants from 'expo-constants';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { ComponentProps, useCallback, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { GlassCard } from '@/components/GlassCard';
@@ -10,6 +11,7 @@ import { PageHeading, ProgressBar } from '@/components/WorkspaceUI';
 import { colors, layout, radius } from '@/constants/theme';
 import { deleteAccount } from '@/lib/account';
 import { useAuth } from '@/lib/auth';
+import { useI18n } from '@/lib/i18n';
 import { fetchPlanStatus, PlanStatus, safeAccessLabel } from '@/lib/planStatus';
 import { purchaseService } from '@/lib/purchases';
 import { useData } from '@/lib/store';
@@ -57,6 +59,21 @@ export default function SettingsScreen() {
   const router = useRouter();
   const { courses, lectures, clearAll } = useData();
   const { user, username, signOut, session, updateUsername, clearLocalSession, isGuest, exitGuest } = useAuth();
+  const { t, language, setLanguage, languages } = useI18n();
+  const [langModalVisible, setLangModalVisible] = useState(false);
+  const currentLanguageLabel = languages.find((option) => option.code === language)?.nativeLabel ?? 'English';
+  // App version read from config (never hardcoded); '' if unavailable.
+  const appVersion = Constants.expoConfig?.version ?? '';
+  // Map the neutral access label (from safeAccessLabel — an App-Store-safe UI
+  // label, not raw backend data) to a translation key. Falls back to the label
+  // itself, so purchase logic and tier meaning are never altered.
+  const accessLabelKey: Record<string, string> = {
+    'Developer': 'settings.plan.access.developer',
+    'Extended Access': 'settings.plan.access.extended',
+    'Student Basic': 'settings.plan.access.studentBasic',
+    'Student Access': 'settings.plan.access.studentAccess',
+  };
+  const localizedAccessLabel = (raw: string) => (accessLabelKey[raw] ? t(accessLabelKey[raw]) : raw);
   const [planStatus, setPlanStatus] = useState<PlanStatus | null>(null);
   const [planLoading, setPlanLoading] = useState(true);
   const [planError, setPlanError] = useState<string | null>(null);
@@ -76,14 +93,14 @@ export default function SettingsScreen() {
     try {
       setPlanStatus(await fetchPlanStatus(session.access_token));
     } catch {
-      setPlanError('Account status unavailable.');
+      setPlanError(t('settings.plan.statusUnavailable'));
     } finally {
       setPlanLoading(false);
     }
-  }, [session?.access_token]);
+  }, [session?.access_token, t]);
   useFocusEffect(useCallback(() => { void loadPlan(); }, [loadPlan]));
 
-  const email = user?.email ?? 'Signed in';
+  const email = user?.email ?? t('sidebar.signedIn');
   const displayName = username ?? email;
   const initials = (username ?? user?.email ?? 'U').split(/[\s@]+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase();
   const used = planStatus?.recordingsUsedToday ?? 0;
@@ -91,12 +108,12 @@ export default function SettingsScreen() {
 
   const handleSignOut = async () => {
     const { error } = await signOut();
-    if (error) Alert.alert('Unable to sign out', error);
+    if (error) Alert.alert(t('settings.alerts.signOutFailTitle'), error);
   };
   const handleGuestSignIn = async () => { await exitGuest(); router.replace('/auth'); };
   const handleRestorePurchases = async () => {
     if (!session?.access_token || isGuest) {
-      Alert.alert('Sign in required', 'Sign in to refresh your purchase status.');
+      Alert.alert(t('settings.alerts.signInRequiredTitle'), t('settings.alerts.refreshSignInBody'));
       return;
     }
     if (restoringPurchases) return;
@@ -104,25 +121,27 @@ export default function SettingsScreen() {
     try {
       const result = await purchaseService.restoreStudentPass(session.access_token);
       await loadPlan();
-      Alert.alert(result.ok ? 'Access refreshed' : 'Access status', result.message);
+      Alert.alert(result.ok ? t('settings.alerts.accessRefreshedTitle') : t('settings.alerts.accessStatusTitle'), result.message);
     } catch (error) {
+      // Raw technical detail stays in logs; the user sees a localized generic message.
+      console.warn('[settings] refresh access failed', error);
       Alert.alert(
-        'Access refresh failed',
-        error instanceof Error ? error.message : 'Please try again with a network connection.',
+        t('settings.alerts.accessRefreshFailTitle'),
+        t('settings.alerts.accessRefreshFailBody'),
       );
     } finally {
       setRestoringPurchases(false);
     }
   };
-  const handleClearData = () => Alert.alert('Clear Local Data', 'Permanently remove local courses and lectures from this device?', [
-    { text: 'Cancel', style: 'cancel' },
-    { text: 'Clear', style: 'destructive', onPress: clearAll },
+  const handleClearData = () => Alert.alert(t('settings.alerts.clearTitle'), t('settings.alerts.clearBody'), [
+    { text: t('common.cancel'), style: 'cancel' },
+    { text: t('common.clear'), style: 'destructive', onPress: clearAll },
   ]);
   const performAccountDeletion = async () => {
     if (deletingAccount) return;
     const token = session?.access_token;
     if (!token) {
-      Alert.alert('Sign in required', 'Please sign in again before deleting your account.');
+      Alert.alert(t('settings.alerts.signInRequiredTitle'), t('settings.alerts.deleteSignInBody'));
       return;
     }
     setDeletingAccount(true);
@@ -132,11 +151,13 @@ export default function SettingsScreen() {
       const { error } = await signOut();
       if (error) await clearLocalSession();
       router.replace('/auth');
-      Alert.alert('Account deleted', 'Your Youmi Lens account has been deleted.');
+      Alert.alert(t('settings.alerts.accountDeletedTitle'), t('settings.alerts.accountDeletedBody'));
     } catch (error) {
+      // Raw technical detail stays in logs; the user sees a localized generic message.
+      console.warn('[settings] account deletion failed', error);
       Alert.alert(
-        'Could not delete account',
-        error instanceof Error ? error.message : 'Please try again or contact support.',
+        t('settings.alerts.deleteFailTitle'),
+        t('settings.alerts.deleteFailBody'),
       );
     } finally {
       setDeletingAccount(false);
@@ -144,21 +165,21 @@ export default function SettingsScreen() {
   };
   const confirmDeleteAccount = () => {
     Alert.alert(
-      'Delete Account?',
-      'This will permanently delete your Youmi Lens account and associated data. This action cannot be undone.',
+      t('settings.alerts.deleteConfirmTitle'),
+      t('settings.alerts.deleteConfirmBody'),
       [
-        { text: 'Cancel', style: 'cancel' },
+        { text: t('common.cancel'), style: 'cancel' },
         {
-          text: 'Continue',
+          text: t('common.continue'),
           style: 'destructive',
           onPress: () => {
             Alert.alert(
-              'Confirm Deletion',
-              'Are you absolutely sure? Your recordings, transcripts, summaries, and usage history may be deleted.',
+              t('settings.alerts.deleteConfirm2Title'),
+              t('settings.alerts.deleteConfirm2Body'),
               [
-                { text: 'Cancel', style: 'cancel' },
+                { text: t('common.cancel'), style: 'cancel' },
                 {
-                  text: 'Delete Account',
+                  text: t('settings.alerts.deleteConfirmCta'),
                   style: 'destructive',
                   onPress: () => void performAccountDeletion(),
                 },
@@ -171,11 +192,11 @@ export default function SettingsScreen() {
   };
   const handleSaveUsername = async (value: string) => {
     const trimmed = value.trim();
-    if (trimmed.length < 2 || trimmed.length > 64) return Alert.alert('Invalid username', 'Username must be 2–64 characters.');
+    if (trimmed.length < 2 || trimmed.length > 64) return Alert.alert(t('settings.alerts.invalidUsernameTitle'), t('settings.alerts.invalidUsernameBody'));
     setUsernameSaving(true);
     const { error } = await updateUsername(trimmed);
     setUsernameSaving(false);
-    if (error) return Alert.alert('Unable to update username', error);
+    if (error) return Alert.alert(t('settings.alerts.updateUsernameFailTitle'), error);
     setUsernameModalVisible(false);
   };
 
@@ -183,7 +204,7 @@ export default function SettingsScreen() {
     <SafeAreaView style={styles.root} edges={['top', 'left', 'right']}>
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         <View style={styles.content}>
-          <PageHeading eyebrow="Preferences" title="Settings" />
+          <PageHeading eyebrow={t('settings.eyebrow')} title={t('settings.title')} />
           <View style={styles.grid}>
             <View style={styles.column}>
               <GlassCard padding={0}>
@@ -192,11 +213,11 @@ export default function SettingsScreen() {
                     <View style={styles.profile}>
                       <View style={styles.avatar}><Text style={styles.avatarText}>G</Text></View>
                       <View style={styles.profileText}>
-                        <Text style={styles.profileName}>Guest</Text>
-                        <Text style={styles.profileEmail}>Recordings stay on this device</Text>
+                        <Text style={styles.profileName}>{t('settings.account.guestName')}</Text>
+                        <Text style={styles.profileEmail}>{t('settings.account.guestSubtitle')}</Text>
                       </View>
                     </View>
-                    <SettingRow icon="log-in-outline" label="Sign in" detail="Save and sync your lecture workspace." onPress={handleGuestSignIn} last />
+                    <SettingRow icon="log-in-outline" label={t('settings.account.signIn')} detail={t('settings.account.signInDetail')} onPress={handleGuestSignIn} last />
                   </>
                 ) : (
                   <>
@@ -206,84 +227,109 @@ export default function SettingsScreen() {
                         <Text style={styles.profileName}>{displayName}</Text>
                         <Text style={styles.profileEmail}>{email}</Text>
                       </View>
-                      <View style={styles.activeBadge}><Text style={styles.activeBadgeText}>● ACTIVE</Text></View>
+                      <View style={styles.activeBadge}><Text style={styles.activeBadgeText}>{t('settings.account.activeBadge')}</Text></View>
                     </View>
-                    <SettingRow icon="person-outline" label="Edit username" value={username ?? 'Not set'} onPress={() => setUsernameModalVisible(true)} />
-                    <SettingRow icon="log-out-outline" label="Sign out" detail="You can sign back in anytime." onPress={() => void handleSignOut()} last />
+                    <SettingRow icon="person-outline" label={t('settings.account.editUsername')} value={username ?? t('settings.account.notSet')} onPress={() => setUsernameModalVisible(true)} />
+                    <SettingRow icon="log-out-outline" label={t('settings.account.signOut')} detail={t('settings.account.signOutDetail')} onPress={() => void handleSignOut()} last />
                   </>
                 )}
               </GlassCard>
 
               {!isGuest ? (
                 <GlassCard padding={0}>
-                  <Text style={styles.cardHeading}>Plan & usage</Text>
+                  <Text style={styles.cardHeading}>{t('settings.plan.heading')}</Text>
                   {planLoading && !planStatus ? (
                     <View style={styles.planLoading}><ActivityIndicator color={colors.navy} /></View>
                   ) : planStatus ? (
                     <View style={styles.usageBlock}>
                       <View style={styles.usageRow}>
-                        <Text style={styles.usageLabel}>Recordings today</Text>
+                        <Text style={styles.usageLabel}>{t('settings.plan.recordingsToday')}</Text>
                         <Text style={styles.usageValue}>{used} / {limit || '—'}</Text>
                       </View>
                       <ProgressBar value={limit > 0 ? used / limit : 0} />
                       <View style={styles.usageRow}>
-                        <Text style={styles.usageLabel}>Max length</Text>
-                        <Text style={styles.usageValue}>{planStatus.maxRecordingMinutes ?? '—'} min</Text>
+                        <Text style={styles.usageLabel}>{t('settings.plan.maxLength')}</Text>
+                        <Text style={styles.usageValue}>{t('settings.plan.minutesValue', { minutes: planStatus.maxRecordingMinutes ?? '—' })}</Text>
                       </View>
                       <View style={styles.accessLine}>
-                        <Text style={styles.accessName}>{safeAccessLabel(planStatus.planType, planStatus.displayName)}</Text>
-                        <Text style={styles.accessStatus}>{planStatus.entitlement?.active ? 'Active access' : 'Current access'}</Text>
+                        <Text style={styles.accessName}>{localizedAccessLabel(safeAccessLabel(planStatus.planType, planStatus.displayName))}</Text>
+                        <Text style={styles.accessStatus}>{planStatus.entitlement?.active ? t('settings.plan.activeAccess') : t('settings.plan.currentAccess')}</Text>
                       </View>
                       <View style={styles.accessLine}>
-                        <Text style={styles.accessName}>Access ends</Text>
+                        <Text style={styles.accessName}>{t('settings.plan.accessEnds')}</Text>
                         <Text style={styles.accessStatus}>{formatDate(planStatus.entitlement?.expiresAt)}</Text>
                       </View>
                     </View>
                   ) : (
                     <Pressable onPress={() => void loadPlan()} style={styles.planLoading}>
-                      <Text style={styles.settingDetail}>{planError ?? 'Account status unavailable.'} Tap to retry.</Text>
+                      <Text style={styles.settingDetail}>{planError ?? t('settings.plan.statusUnavailable')} {t('settings.plan.tapToRetry')}</Text>
                     </Pressable>
                   )}
-                  <SettingRow icon="sparkles-outline" label="Student Basic" detail="Compare access and 30-day quotas." value={planStatus?.entitlement?.active ? 'View' : 'Explore'} onPress={() => router.push('/plans')} />
-                  <SettingRow icon="refresh-outline" label={restoringPurchases ? 'Refreshing Purchase Access…' : 'Refresh Purchase Access'} onPress={restoringPurchases ? undefined : () => void handleRestorePurchases()} last />
+                  <SettingRow icon="sparkles-outline" label={t('settings.plan.studentBasicRow')} detail={t('settings.plan.studentBasicDetail')} value={planStatus?.entitlement?.active ? t('settings.plan.view') : t('settings.plan.explore')} onPress={() => router.push('/plans')} />
+                  <SettingRow icon="refresh-outline" label={restoringPurchases ? t('settings.plan.refreshing') : t('settings.plan.refresh')} onPress={restoringPurchases ? undefined : () => void handleRestorePurchases()} last />
                 </GlassCard>
               ) : null}
             </View>
 
             <View style={styles.column}>
               <GlassCard padding={0}>
-                <Text style={styles.cardHeading}>Language</Text>
-                <SettingRow icon="mic-outline" label="Caption language" value="English" onPress={() => Alert.alert('Caption Language', 'English is currently supported for live captions.')} />
-                <SettingRow icon="language-outline" label="Translation language" value="中文（简体）" />
-                <SettingRow icon="globe-outline" label="App language" value="English" last />
+                <Text style={styles.cardHeading}>{t('settings.language.heading')}</Text>
+                <SettingRow icon="mic-outline" label={t('settings.language.caption')} value={t('settings.language.english')} onPress={() => Alert.alert(t('settings.language.captionAlertTitle'), t('settings.language.captionAlertBody'))} />
+                <SettingRow icon="language-outline" label={t('settings.language.translation')} value="中文（简体）" />
+                <SettingRow icon="globe-outline" label={t('settings.language.app')} value={currentLanguageLabel} onPress={() => setLangModalVisible(true)} last />
               </GlassCard>
 
               <GlassCard padding={0}>
-                <Text style={styles.cardHeading}>Storage</Text>
-                <SettingRow icon="cloud-outline" label="Account storage" detail="Lectures, transcripts and notes stay linked to your account." />
-                <SettingRow icon="trash-bin-outline" label="Recently deleted" onPress={() => router.push('/recently-deleted')} />
-                <SettingRow icon="folder-open-outline" label="Clear local data" detail={`${courses.length} courses · ${lectures.length} lectures on this device`} onPress={handleClearData} last />
+                <Text style={styles.cardHeading}>{t('settings.storage.heading')}</Text>
+                <SettingRow icon="cloud-outline" label={t('settings.storage.account')} detail={t('settings.storage.accountDetail')} />
+                <SettingRow icon="trash-bin-outline" label={t('settings.storage.recentlyDeleted')} onPress={() => router.push('/recently-deleted')} />
+                <SettingRow icon="folder-open-outline" label={t('settings.storage.clear')} detail={t('settings.storage.clearDetail', { courses: courses.length, lectures: lectures.length })} onPress={handleClearData} last />
               </GlassCard>
 
               {!isGuest ? (
                 <GlassCard padding={0} style={styles.dangerCard}>
-                  <SettingRow icon="trash-outline" label={deletingAccount ? 'Deleting account…' : 'Delete account'} detail="Permanently removes your account and associated data." onPress={deletingAccount ? undefined : confirmDeleteAccount} danger last />
+                  <SettingRow icon="trash-outline" label={deletingAccount ? t('settings.delete.deleting') : t('settings.delete.label')} detail={t('settings.delete.detail')} onPress={deletingAccount ? undefined : confirmDeleteAccount} danger last />
                 </GlassCard>
               ) : null}
-              <Text style={styles.footer}>Youmi Lens for iPad · Version 1.0.0</Text>
+              <Text style={styles.footer}>{t('settings.footer', { version: appVersion || '1.0.0' })}</Text>
             </View>
           </View>
         </View>
       </ScrollView>
       <RenameModal
         visible={usernameModalVisible}
-        title="Edit Username"
-        label="Username"
+        title={t('settings.username.modalTitle')}
+        label={t('settings.username.modalLabel')}
         initialValue={username ?? ''}
-        placeholder="Your username"
+        placeholder={t('settings.username.modalPlaceholder')}
         onCancel={() => { if (!usernameSaving) setUsernameModalVisible(false); }}
         onSave={(value) => { void handleSaveUsername(value); }}
       />
+      <Modal
+        visible={langModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setLangModalVisible(false)}
+      >
+        <Pressable style={styles.langOverlay} onPress={() => setLangModalVisible(false)}>
+          <Pressable style={styles.langSheet} onPress={() => {}}>
+            <View style={styles.langSheetHeader}>
+              <Text style={styles.langSheetTitle}>{t('settings.language.selectTitle')}</Text>
+              <Text style={styles.langSheetSubtitle}>{t('settings.language.selectSubtitle')}</Text>
+            </View>
+            {languages.map((option, index) => (
+              <SettingRow
+                key={option.code}
+                icon={option.code === language ? 'checkmark-circle' : 'ellipse-outline'}
+                label={option.nativeLabel}
+                detail={option.label}
+                onPress={() => { setLanguage(option.code); setLangModalVisible(false); }}
+                last={index === languages.length - 1}
+              />
+            ))}
+          </Pressable>
+        </Pressable>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -328,4 +374,9 @@ const styles = StyleSheet.create({
   dangerCard: { borderColor: colors.borderStrong },
   footer: { color: colors.textTertiary, fontSize: 11.5, textAlign: 'center', marginTop: 2 },
   pressed: { opacity: 0.68 },
+  langOverlay: { flex: 1, backgroundColor: 'rgba(15, 23, 42, 0.35)', alignItems: 'center', justifyContent: 'center', padding: 24 },
+  langSheet: { width: '100%', maxWidth: 420, backgroundColor: colors.surface, borderRadius: radius.lg, overflow: 'hidden' },
+  langSheetHeader: { paddingHorizontal: 20, paddingTop: 18, paddingBottom: 6 },
+  langSheetTitle: { color: colors.ink, fontSize: 15, fontWeight: '800' },
+  langSheetSubtitle: { color: colors.textTertiary, fontSize: 11.5, lineHeight: 16, marginTop: 4 },
 });

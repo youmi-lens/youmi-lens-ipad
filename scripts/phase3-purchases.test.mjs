@@ -40,15 +40,15 @@ assert.equal(storekit.products[0].type, 'Consumable');
 // The simplified upgrade screen shows a single price line driven by the
 // StoreKit-localized value, never a literal price string.
 assert.match(purchases, /displayPrice: product\.displayPrice/);
-assert.match(plans, /product\?\.displayPrice \?\? 'App Store unavailable'/);
+assert.match(plans, /product\?\.displayPrice \?\? t\('plans\.appStoreUnavailable'\)/);
 assert.doesNotMatch(plans, /\$4\.99|US\$4\.99/);
 
 // 3. Closed sales require an explicit backend true and do not hide active access.
 assert.match(purchases, /status\?\.studentPass\?\.isPurchasable === true/);
 assert.match(plans, /currentStatus\?\.studentPass\?\.isPurchasable === false/);
-assert.match(plans, /New Student Basic purchases are currently unavailable\./);
+assert.match(plans, /t\('plans\.unavailable'\)/);
 assert.match(plans, /const activeEntitlement = currentStatus\?\.entitlement\?\.active/);
-assert.match(plans, /Your active access remains visible even when new purchases are closed\./);
+assert.match(plans, /t\('plans\.activeNote'\)/);
 
 // 4-5. Active access shows expiry; the verified-grant guard still pins every
 // protected paid quota (600/120/90/90/6/10), and the simplified screen surfaces
@@ -60,9 +60,9 @@ assert.match(plans, /status\.maxRecordingMinutes === 90/);
 assert.match(plans, /status\.maxLiveSessionMinutes === 90/);
 assert.match(plans, /status\.maxRecordingsPerDay === 6/);
 assert.match(plans, /status\.maxProcessingJobsPerDay === 10/);
-assert.match(plans, /600 study minutes each month/);
-assert.match(plans, /6 recordings every day/);
-assert.match(plans, /10 study tasks every day/);
+assert.match(plans, /'plans\.benefit1'/);
+assert.match(plans, /'plans\.benefit2'/);
+assert.match(plans, /'plans\.benefit3'/);
 
 // 6. Both the handler and service prevent concurrent purchase requests.
 assert.match(plans, /purchaseLockRef\.current \|\| busy !== null/);
@@ -74,7 +74,7 @@ assert.match(purchases, /code: 'purchase_in_progress'/);
 
 // 7. Apple cancellation clears loading through finally and exits before any failure alert.
 const cancelBranch = plans.indexOf("if (result.code === 'cancelled') return;");
-const failureAlert = plans.indexOf("Alert.alert('Purchase not completed'");
+const failureAlert = plans.indexOf("Alert.alert(t('plans.purchaseIncomplete')");
 assert.ok(cancelBranch > 0 && cancelBranch < failureAlert);
 assert.match(purchases, /name === ErrorCode\.UserCancelled/);
 assert.match(plans, /finally \{\s*purchaseLockRef\.current = false;\s*setBusy\(null\);/);
@@ -88,10 +88,10 @@ assert.ok(requestIndex > 0 && requestIndex < verifyIndex);
 assert.ok(verifyIndex < backendGrantIndex && backendGrantIndex < serviceSuccessIndex);
 // The timeout-wrapped request still invokes the StoreKit purchase for the SKU.
 assert.match(purchases, /requestPurchase\(\{\s*type: PRODUCT_QUERY_TYPE,\s*request: \{ apple: \{ sku: STUDENT_PASS_PRODUCT_ID \} \}/);
-assert.match(plans, /if \(!result\.ok\) \{[\s\S]*Purchase not completed[\s\S]*return;/);
+assert.match(plans, /if \(!result\.ok\) \{[\s\S]*plans\.purchaseIncomplete[\s\S]*return;/);
 assert.match(plans, /const refreshedStatus = await loadStatus\(\);/);
 assert.match(plans, /refreshedStatus && confirmsStudentBasicGrant\(refreshedStatus\)/);
-assert.match(plans, /Apple payment was verified, but updated access could not be confirmed/);
+assert.match(plans, /t\('plans\.refreshNeededBody'\)/);
 assert.doesNotMatch(plans, /Student Basic active'[^]*result\.ok/);
 
 // 11. Refresh Access is backend-first and refreshes quota/status before reporting success.
@@ -100,7 +100,7 @@ assert.ok(entitlementLookup > 0);
 assert.match(purchases, /\/api\/iap\/entitlement/);
 assert.doesNotMatch(purchases, /\/api\/iap\/restore/);
 assert.match(plans, /const result = await purchaseService\.restoreStudentPass\(accessToken\);[\s\S]*const refreshedStatus = await loadStatus\(\);/);
-assert.match(plans, /Refresh Access/);
+assert.match(plans, /plans\.refreshAccess/);
 
 // 12. Status is keyed to Supabase user.id and stale requests are discarded.
 assert.match(plans, /const accountId = user\?\.id \?\? null/);
@@ -147,8 +147,8 @@ assert.match(purchases, /getUnfinishedStudentPassPurchases\(\)/);
 assert.match(purchases, /verifyPurchaseWithBackend\(purchase, accessToken\)/);
 
 // 14. Required product language is present and prohibited paywall language is absent.
-assert.match(plans, /30 days of premium lecture support/);
-assert.match(plans, /One-time payment\. Does not renew automatically\./);
+assert.match(plans, /plans\.subtitle/);
+assert.match(plans, /plans\.fine/);
 for (const forbidden of forbiddenPaywallCopy) {
   assert.doesNotMatch(plans.toLowerCase(), new RegExp(forbidden), `paywall omits prohibited copy: ${forbidden}`);
 }

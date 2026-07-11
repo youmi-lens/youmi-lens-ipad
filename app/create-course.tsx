@@ -17,11 +17,13 @@ import { GlassCard } from '@/components/GlassCard';
 import { PrimaryButton } from '@/components/PrimaryButton';
 import { colors } from '@/constants/theme';
 import { COURSE_PRESETS } from '@/lib/models';
+import { useT } from '@/lib/i18n';
 import { useData } from '@/lib/store';
 
 type IconName = ComponentProps<typeof Ionicons>['name'];
 
 export default function CreateCourseScreen() {
+  const t = useT();
   const router = useRouter();
   const { createCourse } = useData();
   const [name, setName] = useState('');
@@ -50,7 +52,7 @@ export default function CreateCourseScreen() {
           <GlassCard elevated padding={0} style={styles.sheet}>
             <View style={styles.sheetContent}>
               <View style={styles.header}>
-                <Text style={styles.title}>New course</Text>
+                <Text style={styles.title}>{t('createCourse.title')}</Text>
                 <Pressable onPress={() => router.back()} style={({ pressed }) => [styles.close, pressed && styles.pressed]}>
                   <Ionicons name="close" size={18} color={colors.textSecondary} />
                 </Pressable>
@@ -61,25 +63,25 @@ export default function CreateCourseScreen() {
                   <Ionicons name={preset.icon as IconName} size={20} color={preset.accent} />
                 </View>
                 <View>
-                  <Text style={styles.previewName}>{name.trim() || 'Your course'}</Text>
-                  <Text style={styles.previewHint}>Live preview</Text>
+                  <Text style={styles.previewName}>{name.trim() || t('createCourse.yourCourse')}</Text>
+                  <Text style={styles.previewHint}>{t('createCourse.preview')}</Text>
                 </View>
               </View>
 
-              <Text style={styles.label}>COURSE NAME</Text>
+              <Text style={styles.label}>{t('createCourse.name')}</Text>
               <TextInput
                 autoFocus
                 value={name}
                 onChangeText={setName}
                 onSubmitEditing={handleCreate}
-                placeholder="e.g. Intro to Data Science"
+                placeholder={t('createCourse.placeholder')}
                 placeholderTextColor={colors.textTertiary}
                 returnKeyType="done"
                 style={styles.input}
                 maxLength={48}
               />
 
-              <Text style={[styles.label, styles.colorLabel]}>COLOUR & ICON</Text>
+              <Text style={[styles.label, styles.colorLabel]}>{t('createCourse.appearance')}</Text>
               <View style={styles.swatches}>
                 {COURSE_PRESETS.map((option, index) => {
                   const selected = index === presetIndex;
@@ -102,7 +104,7 @@ export default function CreateCourseScreen() {
                 })}
               </View>
 
-              <PrimaryButton label="Create course" onPress={handleCreate} disabled={!canCreate} style={styles.createButton} />
+              <PrimaryButton label={t('home.createCourse')} onPress={handleCreate} disabled={!canCreate} style={styles.createButton} />
             </View>
           </GlassCard>
         </ScrollView>

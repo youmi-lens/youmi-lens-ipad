@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 
 import { colors, fontSize, radius, spacing } from '@/constants/theme';
+import { useT } from '@/lib/i18n';
 
 // ─── Layout constants ────────────────────────────────────────────────────────
 
@@ -71,6 +72,7 @@ export function SwipeDeleteRow({
   style,
   rowStyle,
 }: SwipeDeleteRowProps) {
+  const t = useT();
   // ── Animated values ──────────────────────────────────────────────────────
   //
   // TWO separate animated values on TWO separate drivers — never mixed:
@@ -335,7 +337,7 @@ export function SwipeDeleteRow({
           {/* Pressable delete tap target — fills the growing panel */}
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Delete"
+            accessibilityLabel={t('common.delete')}
             onPress={onDelete}
             style={({ pressed }) => [styles.deleteAction, pressed && styles.deletePressed]}
           >
@@ -350,7 +352,7 @@ export function SwipeDeleteRow({
               ]}
             >
               <Ionicons name="trash-outline" size={22} color={colors.pearlWhite} />
-              <Text style={styles.deleteLabel}>Delete</Text>
+              <Text style={styles.deleteLabel}>{t('common.delete')}</Text>
             </Animated.View>
           </Pressable>
         </Animated.View>

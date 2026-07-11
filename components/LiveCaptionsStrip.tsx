@@ -18,8 +18,10 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { NativeLookupText } from '@/components/NativeLookupText';
 import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
 import { useLiveCaptions } from '@/lib/liveCaptions';
+import { useT } from '@/lib/i18n';
 
 export function LiveCaptionsStrip() {
+  const t = useT();
   const {
     status,
     latestCaption,
@@ -61,12 +63,12 @@ export function LiveCaptionsStrip() {
     return (
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Expand live captions"
+        accessibilityLabel={t('captions.expand')}
         onPress={() => setCollapsed(false)}
         style={({ pressed }) => [styles.pill, pressed && styles.pressed]}
       >
         <View style={[styles.dot, status === 'error' && styles.dotError]} />
-        <Text style={styles.pillLabel}>LIVE</Text>
+        <Text style={styles.pillLabel}>{t('captions.live')}</Text>
       </Pressable>
     );
   }
@@ -84,7 +86,7 @@ export function LiveCaptionsStrip() {
       </NativeLookupText>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Collapse live captions"
+        accessibilityLabel={t('captions.collapse')}
         hitSlop={10}
         onPress={() => setCollapsed(true)}
         style={({ pressed }) => [styles.collapseButton, pressed && styles.pressed]}

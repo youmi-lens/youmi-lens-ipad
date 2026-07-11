@@ -32,6 +32,7 @@ import { FloatingMiniCaption } from '@/components/FloatingMiniCaption';
 import { MaterialFloatingToolbar } from '@/components/MaterialFloatingToolbar';
 import { PageIndicatorBadge } from '@/components/PageIndicatorBadge';
 import { useLiveCaptions } from '@/lib/liveCaptions';
+import { useT, localizeSystemDefaultTitle } from '@/lib/i18n';
 import {
   MaterialAnnotationMode,
   MaterialAnnotationOverlay,
@@ -94,6 +95,7 @@ function materialScopeLectureId(materialId: string): string {
 }
 
 export default function LectureMaterialWorkspaceScreen() {
+  const t = useT();
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const params = useLocalSearchParams<{ lectureId?: string; materialId?: string }>();
@@ -409,10 +411,10 @@ export default function LectureMaterialWorkspaceScreen() {
 
   const handlePdfError = useCallback((err: unknown) => {
     setLoadingPdf(false);
-    const message = err instanceof Error ? err.message : 'The PDF could not be loaded.';
-    if (__DEV__) console.warn('[material] PDF load error', err);
-    setPdfError(message);
-  }, []);
+    // Raw technical detail stays in logs; the user sees a localized generic message.
+    console.warn('[material] PDF load error', err);
+    setPdfError(t('material.loadFailed'));
+  }, [t]);
 
   // --- Native annotation bridge (Phase 2) ---
 
@@ -630,13 +632,13 @@ export default function LectureMaterialWorkspaceScreen() {
         />
         <View style={styles.emptyState}>
           <Ionicons name="document-outline" size={36} color={colors.mutedBlueGray} />
-          <Text style={styles.emptyTitle}>This lecture material could not be found.</Text>
+          <Text style={styles.emptyTitle}>{t('material.notFound')}</Text>
           <Pressable
             accessibilityRole="button"
             onPress={() => router.back()}
             style={({ pressed }) => [styles.softButton, pressed && styles.pressed]}
           >
-            <Text style={styles.softButtonLabel}>Go back</Text>
+            <Text style={styles.softButtonLabel}>{t('material.goBack')}</Text>
           </Pressable>
         </View>
       </View>
@@ -652,7 +654,7 @@ export default function LectureMaterialWorkspaceScreen() {
         />
         <View style={styles.emptyState}>
           <Ionicons name="construct-outline" size={36} color={colors.mutedBlueGray} />
-          <Text style={styles.emptyTitle}>PDF viewer is not available in this build yet.</Text>
+          <Text style={styles.emptyTitle}>{t('material.viewerUnavailable')}</Text>
           <Text style={styles.emptyBody}>
             Please rebuild the app from Xcode after running pod install.
           </Text>
@@ -726,13 +728,13 @@ export default function LectureMaterialWorkspaceScreen() {
       {loadingPdf && !pdfError ? (
         <View style={styles.pdfLoading} pointerEvents="none">
           <ActivityIndicator color={colors.deepNavy} />
-          <Text style={styles.pdfLoadingLabel}>Opening PDF…</Text>
+          <Text style={styles.pdfLoadingLabel}>{t('material.opening')}</Text>
         </View>
       ) : null}
       {pdfError ? (
         <View style={styles.pdfErrorBlock} pointerEvents="none">
           <Ionicons name="alert-circle-outline" size={28} color={colors.recordingRed} />
-          <Text style={styles.emptyTitle}>Could not open this PDF.</Text>
+          <Text style={styles.emptyTitle}>{t('material.openFailed')}</Text>
           <Text style={styles.emptyBody}>{pdfError}</Text>
         </View>
       ) : null}
@@ -755,7 +757,7 @@ export default function LectureMaterialWorkspaceScreen() {
         >
           <View style={styles.floatingTitlePill}>
             <Text style={styles.floatingTitleText} numberOfLines={1}>
-              {material.title}
+              {localizeSystemDefaultTitle(t, material.title)}
             </Text>
             {totalPages > 0 ? (
               <>
@@ -857,10 +859,11 @@ function FloatingBackButton({
   onPress: () => void;
   style?: ViewStyle;
 }) {
+  const t = useT();
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel="Back"
+      accessibilityLabel={t('common.back')}
       onPress={onPress}
       hitSlop={10}
       style={({ pressed }) => [styles.floatingBack, style, pressed && styles.pressed]}
@@ -896,6 +899,7 @@ function FloatingPageNavigator({
   bottomOffset: number;
   captionsEnabled: boolean;
 }) {
+  const t = useT();
   const opacity = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     Animated.timing(opacity, {
@@ -930,8 +934,8 @@ function FloatingPageNavigator({
         accessibilityRole="button"
         accessibilityLabel={
           showTotal
-            ? `Page ${currentPage} of ${totalPages}. Tap to go to page.`
-            : `Page ${currentPage}. Tap to go to page.`
+            ? t('material.pageOfA11y', { current: currentPage, total: totalPages })
+            : t('material.pageA11y', { current: currentPage })
         }
         onPress={onTapCurrent}
         hitSlop={8}
@@ -966,6 +970,7 @@ function GoToPageModal({
   onCancel: () => void;
   onGo: (page: number) => void;
 }) {
+  const t = useT();
   const initial = Number.isFinite(currentPage) && currentPage > 0 ? String(currentPage) : '';
   const [value, setValue] = useState<string>(initial);
   const [error, setError] = useState<string | null>(null);
@@ -992,12 +997,12 @@ function GoToPageModal({
 
   const validate = (): { ok: true; page: number } | { ok: false; reason: string } => {
     const trimmed = value.trim();
-    if (!trimmed) return { ok: false, reason: 'Please enter a page number.' };
+    if (!trimmed) return { ok: false, reason: t('material.pageRequired') };
     const parsed = Number.parseInt(trimmed, 10);
     if (!Number.isFinite(parsed) || String(parsed) !== trimmed) {
-      return { ok: false, reason: 'Please enter a whole number.' };
+      return { ok: false, reason: t('material.wholePage') };
     }
-    if (parsed < 1) return { ok: false, reason: 'Pages start at 1.' };
+    if (parsed < 1) return { ok: false, reason: t('material.pagesStartOne') };
     if (totalPages > 0 && parsed > totalPages) {
       return {
         ok: false,
@@ -1016,7 +1021,7 @@ function GoToPageModal({
     onGo(result.page);
   };
 
-  const helper = totalPages > 0 ? `1–${totalPages}` : 'Enter a page number';
+  const helper = totalPages > 0 ? `1–${totalPages}` : t('material.enterPage');
 
   return (
     <Modal
@@ -1032,7 +1037,7 @@ function GoToPageModal({
       >
         <Pressable style={modalStyles.backdrop} onPress={onCancel} />
         <View style={modalStyles.card}>
-          <Text style={modalStyles.title}>Go to page</Text>
+          <Text style={modalStyles.title}>{t('material.goToPage')}</Text>
           <Text style={modalStyles.helper}>{helper}</Text>
           <TextInput
             ref={inputRef}
@@ -1040,14 +1045,14 @@ function GoToPageModal({
             value={value}
             onChangeText={handleChange}
             keyboardType="number-pad"
-            placeholder="Page number"
+            placeholder={t('material.pageNumber')}
             placeholderTextColor={colors.textTertiary}
             autoFocus
             selectTextOnFocus
             returnKeyType="go"
             onSubmitEditing={handleGo}
             maxLength={6}
-            accessibilityLabel="Page number"
+            accessibilityLabel={t('material.pageNumber')}
           />
           {error ? <Text style={modalStyles.error}>{error}</Text> : null}
           <View style={modalStyles.buttonRow}>
@@ -1056,14 +1061,14 @@ function GoToPageModal({
               onPress={onCancel}
               style={({ pressed }) => [modalStyles.cancelBtn, pressed && modalStyles.pressed]}
             >
-              <Text style={modalStyles.cancelLabel}>Cancel</Text>
+              <Text style={modalStyles.cancelLabel}>{t('common.cancel')}</Text>
             </Pressable>
             <Pressable
               accessibilityRole="button"
               onPress={handleGo}
               style={({ pressed }) => [modalStyles.goBtn, pressed && modalStyles.pressed]}
             >
-              <Text style={modalStyles.goLabel}>Go</Text>
+              <Text style={modalStyles.goLabel}>{t('material.go')}</Text>
             </Pressable>
           </View>
         </View>
@@ -1081,11 +1086,12 @@ function Header({
   subtitle?: string;
   onBack: () => void;
 }) {
+  const t = useT();
   return (
     <View style={styles.header}>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Back"
+        accessibilityLabel={t('common.back')}
         onPress={onBack}
         hitSlop={10}
         style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}

@@ -11,9 +11,11 @@ import { SwipeDeleteRow } from '@/components/SwipeDeleteRow';
 import { PageHeading } from '@/components/WorkspaceUI';
 import { colors, layout } from '@/constants/theme';
 import { formatDuration, formatShortDate } from '@/lib/format';
+import { useT } from '@/lib/i18n';
 import { useData } from '@/lib/store';
 
 export default function CoursesScreen() {
+  const t = useT();
   const router = useRouter();
   const { loaded, courses, lectures, lecturesForCourse, setSelectedCourseId, deleteCourse } = useData();
   const [openCourseId, setOpenCourseId] = useState<string | null>(null);
@@ -26,9 +28,9 @@ export default function CoursesScreen() {
 
   const showCourseNotEmptyAlert = () => {
     Alert.alert(
-      'Course is not empty',
-      'This course contains lectures. Delete or move them first.',
-      [{ text: 'OK', onPress: () => setOpenCourseId(null) }],
+      t('courses.notEmptyTitle'),
+      t('courses.notEmptyBody'),
+      [{ text: t('common.ok'), onPress: () => setOpenCourseId(null) }],
     );
   };
 
@@ -38,12 +40,12 @@ export default function CoursesScreen() {
       return;
     }
     Alert.alert(
-      'Delete course',
-      'This empty course will move to Recently Deleted. You can restore it anytime.',
+      t('courses.deleteTitle'),
+      t('courses.deleteBody'),
       [
-        { text: 'Cancel', style: 'cancel', onPress: () => setOpenCourseId(null) },
+        { text: t('common.cancel'), style: 'cancel', onPress: () => setOpenCourseId(null) },
         {
-          text: 'Delete',
+          text: t('common.delete'),
           style: 'destructive',
           onPress: () => {
             const result = deleteCourse(courseId);
@@ -66,12 +68,12 @@ export default function CoursesScreen() {
       >
         <View style={styles.content}>
           <PageHeading
-            eyebrow="Library"
-            title="Courses"
-            subtitle={`${courses.length} ${courses.length === 1 ? 'course' : 'courses'} · ${lectures.length} ${lectures.length === 1 ? 'lecture' : 'lectures'}${lectures.length ? ` · ${formatDuration(totalDuration)}` : ''}`}
+            eyebrow={t('courses.library')}
+            title={t('courses.title')}
+            subtitle={`${t('courses.counts', { courses: courses.length, lectures: lectures.length })}${lectures.length ? ` · ${formatDuration(totalDuration)}` : ''}`}
             action={loaded && courses.length ? (
               <View style={styles.headerActions}>
-                <PrimaryButton label="New course" icon="add" onPress={() => router.push('/create-course')} style={styles.newButton} />
+                <PrimaryButton label={t('courses.new')} icon="add" onPress={() => router.push('/create-course')} style={styles.newButton} />
               </View>
             ) : undefined}
           />
@@ -81,9 +83,9 @@ export default function CoursesScreen() {
           ) : courses.length === 0 ? (
             <GlassCard padding={36} style={styles.empty}>
               <View style={styles.emptyIcon}><Ionicons name="library-outline" size={30} color={colors.navy} /></View>
-              <Text style={styles.emptyTitle}>Build your course library</Text>
-              <Text style={styles.emptyBody}>Create a course to organize recordings, summaries, notes, and study material.</Text>
-              <PrimaryButton label="Create course" icon="add" onPress={() => router.push('/create-course')} style={styles.emptyButton} />
+              <Text style={styles.emptyTitle}>{t('courses.emptyTitle')}</Text>
+              <Text style={styles.emptyBody}>{t('courses.emptyBody')}</Text>
+              <PrimaryButton label={t('home.createCourse')} icon="add" onPress={() => router.push('/create-course')} style={styles.emptyButton} />
             </GlassCard>
           ) : (
             <View style={styles.grid}>
@@ -105,7 +107,7 @@ export default function CoursesScreen() {
                       course={course}
                       lectureCount={courseLectures.length}
                       durationLabel={courseLectures.length ? formatDuration(duration) : undefined}
-                      lastActivity={latest ? `Last ${formatShortDate(latest.date)}` : undefined}
+                      lastActivity={latest ? t('courses.last', { date: formatShortDate(latest.date) }) : undefined}
                       readyCount={ready}
                       onPress={() => openCourse(course.id)}
                     />
@@ -114,7 +116,7 @@ export default function CoursesScreen() {
               })}
               <Pressable onPress={() => router.push('/create-course')} style={({ pressed }) => [styles.ghostCard, pressed && styles.pressed]}>
                 <View style={styles.plus}><Ionicons name="add" size={22} color={colors.navy} /></View>
-                <Text style={styles.ghostLabel}>New course</Text>
+                <Text style={styles.ghostLabel}>{t('courses.new')}</Text>
               </Pressable>
             </View>
           )}

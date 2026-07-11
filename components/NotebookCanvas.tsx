@@ -59,6 +59,7 @@ import Svg, {
 
 import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
 import type { NoteImage, NotePoint, NoteStroke } from '@/lib/models';
+import { useT } from '@/lib/i18n';
 import {
   addPencilDoubleTapListener,
   isPencilDoubleTapAvailable,
@@ -1082,6 +1083,7 @@ export function NotebookCanvas({
   avoidRects = [],
   style,
 }: NotebookCanvasProps) {
+  const t = useT();
   const images = useMemo(() => rawImages ?? [], [rawImages]);
   const onImagesChange = rawOnImagesChange ?? NOOP_IMAGES_CHANGE;
   const [mode, setMode] = useState<CanvasMode>(DEFAULT_TOOLBAR_PREFERENCES.mode);
@@ -2539,12 +2541,12 @@ export function NotebookCanvas({
       return;
     }
     Alert.alert(
-      'Clear page',
-      `Remove the handwriting, images${pageIdx === 0 ? ' and typed notes' : ''} on page ${pageIdx + 1}? You can undo this.`,
+      t('tools.clearPage'),
+      t('tools.clearPageDetail', { typed: pageIdx === 0 ? t('tools.andTyped') : '', page: pageIdx + 1 }),
       [
-        { text: 'Cancel', style: 'cancel' },
+        { text: t('common.cancel'), style: 'cancel' },
         {
-          text: 'Clear',
+          text: t('common.clear'),
           style: 'destructive',
           onPress: () => {
             recordHistory();
@@ -2557,7 +2559,7 @@ export function NotebookCanvas({
         },
       ],
     );
-  }, [strokes, text, images, onStrokesChange, onTextChange, onImagesChange, recordHistory]);
+  }, [strokes, text, images, onStrokesChange, onTextChange, onImagesChange, recordHistory, t]);
 
   const deleteSelectedObjects = useCallback(() => {
     const ids = selectedIdsRef.current;
@@ -2859,7 +2861,7 @@ export function NotebookCanvas({
       {...toolbarDragTouchHandlers}
     >
       <NavySurface />
-      <View accessibilityLabel="Move notebook tools" accessibilityRole="adjustable" style={styles.vMiniGrip}>
+      <View accessibilityLabel={t('tools.moveNotebook')} accessibilityRole="adjustable" style={styles.vMiniGrip}>
         <GripDots />
       </View>
       <View style={styles.vMiniCur}>
@@ -2867,7 +2869,7 @@ export function NotebookCanvas({
       </View>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Expand notebook tools"
+        accessibilityLabel={t('tools.expandNotebook')}
         onPress={() => runToolbarPress(() => setToolbarCollapsed(false))}
         hitSlop={TOOLBAR_ICON_HIT_SLOP}
         {...toolbarDragResponder.panHandlers}
@@ -2900,7 +2902,7 @@ export function NotebookCanvas({
               <Pressable
                 key={tool.key}
                 accessibilityRole="button"
-                accessibilityLabel={`${tool.label} tool`}
+                accessibilityLabel={t('tools.toolA11y', { tool: t(`tools.${tool.key}`) })}
                 accessibilityState={{ selected: active }}
                 onPress={() => runToolbarPress(() => changeMode(tool.key))}
                 hitSlop={TOOLBAR_ICON_HIT_SLOP}
@@ -2922,7 +2924,7 @@ export function NotebookCanvas({
           <View style={styles.vRailDivider} />
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Hand — move canvas"
+            accessibilityLabel={t('tools.hand')}
             accessibilityState={{ selected: mode === 'scroll' }}
             onPress={() => runToolbarPress(() => changeMode(mode === 'scroll' ? 'write' : 'scroll'))}
             hitSlop={TOOLBAR_ICON_HIT_SLOP}
@@ -2936,7 +2938,7 @@ export function NotebookCanvas({
           </Pressable>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Minimize notebook tools"
+            accessibilityLabel={t('tools.minimizeNotebook')}
             onPress={() => runToolbarPress(() => setToolbarCollapsed(true))}
             hitSlop={TOOLBAR_ICON_HIT_SLOP}
             {...toolbarDragResponder.panHandlers}
@@ -2971,7 +2973,7 @@ export function NotebookCanvas({
                         <Pressable
                           key={option.key}
                           accessibilityRole="button"
-                          accessibilityLabel={`${mode === 'highlight' ? 'Highlighter' : 'Pen'} colour ${option.key}`}
+                          accessibilityLabel={t('tools.colorA11y', { tool: mode === 'highlight' ? t('tools.highlighter') : t('tools.pen'), color: t(`tools.color.${option.key.toLowerCase()}`) })}
                           accessibilityState={{ selected: isActive }}
                           onPress={() =>
                             runToolbarPress(() =>
@@ -2998,7 +3000,7 @@ export function NotebookCanvas({
                         <Pressable
                           key={option.key}
                           accessibilityRole="button"
-                          accessibilityLabel={`${mode === 'highlight' ? 'Highlighter' : 'Pen'} width ${option.key}`}
+                          accessibilityLabel={t('tools.widthA11y', { tool: mode === 'highlight' ? t('tools.highlighter') : t('tools.pen'), width: t(`tools.size.${option.key.toLowerCase()}`) })}
                           accessibilityState={{ selected: active }}
                           onPress={() =>
                             runToolbarPress(() =>
@@ -3033,7 +3035,7 @@ export function NotebookCanvas({
                       <Pressable
                         key={option.key}
                         accessibilityRole="button"
-                        accessibilityLabel={`${option.label} eraser`}
+                        accessibilityLabel={t('tools.eraserA11y', { size: t(`tools.size.${option.key}`) })}
                         accessibilityState={{ selected: active }}
                         onPress={() => runToolbarPress(() => setEraserSizeKey(option.key))}
                         style={({ pressed }) => [styles.nib, active && styles.nibActive, pressed && styles.toolbarPressed]}
@@ -3060,7 +3062,7 @@ export function NotebookCanvas({
                       <Pressable
                         key={shape}
                         accessibilityRole="button"
-                        accessibilityLabel={shape === 'rect' ? 'Rectangular selection' : 'Freeform lasso selection'}
+                        accessibilityLabel={shape === 'rect' ? t('tools.rectSelection') : t('tools.lassoSelection')}
                         accessibilityState={{ selected: active }}
                         onPress={() => runToolbarPress(() => setSelectionShape(shape))}
                         hitSlop={TOOLBAR_ICON_HIT_SLOP}
@@ -3084,10 +3086,10 @@ export function NotebookCanvas({
 
               {mode === 'insert' ? (
                 <View style={styles.vCtxPanel}>
-                  <Text style={styles.vCtxLabel}>Insert</Text>
+                  <Text style={styles.vCtxLabel}>{t('tools.insert')}</Text>
                   <Pressable
                     accessibilityRole="button"
-                    accessibilityLabel="Insert image from Photos"
+                    accessibilityLabel={t('tools.insertPhotos')}
                     onPress={() => runToolbarPress(pickImage)}
                     style={({ pressed }) => [styles.vInsertButton, pressed && styles.toolbarPressed]}
                   >
@@ -3097,7 +3099,7 @@ export function NotebookCanvas({
                       <Circle cx="11" cy="11.5" r="1.3" fill={colors.pearlWhite} />
                       <Path d="M8 18l3-3 2.2 2.2L16 14l4 4" stroke={colors.pearlWhite} strokeWidth={1.6} strokeLinejoin="round" fill="none" />
                     </Svg>
-                    <Text style={styles.vInsertLabel}>Photos</Text>
+                    <Text style={styles.vInsertLabel}>{t('tools.photos')}</Text>
                   </Pressable>
                 </View>
               ) : null}
@@ -3115,7 +3117,7 @@ export function NotebookCanvas({
         <NavySurface />
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={hasSelection ? 'Delete selected' : 'Clear page'}
+          accessibilityLabel={hasSelection ? t('tools.deleteSelected') : t('tools.clearPage')}
           accessibilityState={{ disabled: !canClear }}
           onPress={() => runToolbarPress(handleTrashPress)}
           disabled={!canClear}
@@ -3280,7 +3282,7 @@ export function NotebookCanvas({
             >
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel="Duplicate selected image"
+                accessibilityLabel={t('tools.duplicateImage')}
                 onPress={duplicateSelected}
                 hitSlop={TOOLBAR_ICON_HIT_SLOP}
                 style={({ pressed }) => [styles.imageActionButton, pressed && styles.toolbarPressed]}
@@ -3290,7 +3292,7 @@ export function NotebookCanvas({
               <View style={styles.imageActionDivider} />
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel="Delete selected image"
+                accessibilityLabel={t('tools.deleteImage')}
                 onPress={deleteSelectedObjects}
                 hitSlop={TOOLBAR_ICON_HIT_SLOP}
                 style={({ pressed }) => [styles.imageActionButton, pressed && styles.toolbarPressed]}
@@ -3306,13 +3308,13 @@ export function NotebookCanvas({
               <Ionicons name="pencil-outline" size={22} color={colors.mutedBlueGray} />
               <Text style={styles.emptyHintText}>
                 {mode === 'scroll'
-                  ? 'Scroll mode is on. Drag with one finger to move around the page.'
-                  : 'Use Apple Pencil to write. Use your finger to scroll.'}
+                  ? t('tools.scrollHint')
+                  : t('tools.pencilHint')}
               </Text>
               <Text style={styles.emptyHintSub}>
                 {doubleTapAvailable
-                  ? 'Double-tap your Apple Pencil to switch between pen and eraser.'
-                  : 'Switch between pen, eraser and typing from the toolbar above.'}
+                  ? t('tools.pencilDoubleTapHint')
+                  : t('tools.toolbarHint')}
               </Text>
             </View>
           ) : null}
@@ -3376,7 +3378,7 @@ export function NotebookCanvas({
                 ]}
               >
                 <View
-                  accessibilityLabel="Move notebook tools"
+                  accessibilityLabel={t('tools.moveNotebook')}
                   accessibilityRole="adjustable"
                   style={styles.collapsedGrip}
                 >
@@ -3387,7 +3389,7 @@ export function NotebookCanvas({
                 </View>
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel="Expand notebook tools"
+                  accessibilityLabel={t('tools.expandNotebook')}
                   onPress={() => runToolbarPress(() => setToolbarCollapsed(false))}
                   hitSlop={TOOLBAR_ICON_HIT_SLOP}
                   {...toolbarDragResponder.panHandlers}
@@ -3416,7 +3418,7 @@ export function NotebookCanvas({
             >
               <View style={[styles.primaryToolbarRow, toolbarVertical && styles.primaryToolbarRail]}>
                 <View
-                  accessibilityLabel="Move notebook tools"
+                  accessibilityLabel={t('tools.moveNotebook')}
                   accessibilityRole="adjustable"
                   style={[styles.expandedDragHandle, toolbarVertical && styles.expandedDragHandleVertical]}
                 >
@@ -3430,7 +3432,7 @@ export function NotebookCanvas({
                       <Pressable
                         key={tool.key}
                         accessibilityRole="button"
-                        accessibilityLabel={`${tool.label} tool`}
+                        accessibilityLabel={t('tools.toolA11y', { tool: t(`tools.${tool.key}`) })}
                         accessibilityState={{ selected: active }}
                         onPress={() => runToolbarPress(() => changeMode(tool.key))}
                         hitSlop={TOOLBAR_ICON_HIT_SLOP}
@@ -3462,7 +3464,7 @@ export function NotebookCanvas({
 
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel="Hand — move canvas"
+                  accessibilityLabel={t('tools.hand')}
                   accessibilityState={{ selected: mode === 'scroll' }}
                   onPress={() => runToolbarPress(() => changeMode(mode === 'scroll' ? 'write' : 'scroll'))}
                   hitSlop={TOOLBAR_ICON_HIT_SLOP}
@@ -3487,7 +3489,7 @@ export function NotebookCanvas({
 
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel="Minimize notebook tools"
+                  accessibilityLabel={t('tools.minimizeNotebook')}
                   onPress={() => runToolbarPress(() => setToolbarCollapsed(true))}
                   hitSlop={TOOLBAR_ICON_HIT_SLOP}
                   {...toolbarDragResponder.panHandlers}
@@ -3522,7 +3524,7 @@ export function NotebookCanvas({
                 >
                   {mode === 'write' || mode === 'highlight' ? (
                     <>
-                      <Text style={styles.contextLabel}>{mode === 'highlight' ? 'Highlight' : 'Pen'}</Text>
+                      <Text style={styles.contextLabel}>{mode === 'highlight' ? t('tools.highlight') : t('tools.pen')}</Text>
                       <View style={styles.swatchGroup}>
                         {(mode === 'highlight' ? HIGHLIGHTER_COLORS : PEN_COLORS).map((option) => {
                           const selectedColor = mode === 'highlight' ? highlighterColor : penColor;
@@ -3531,7 +3533,7 @@ export function NotebookCanvas({
                             <Pressable
                               key={option.key}
                               accessibilityRole="button"
-                              accessibilityLabel={`${mode === 'highlight' ? 'Highlighter' : 'Pen'} colour ${option.key}`}
+                              accessibilityLabel={t('tools.colorA11y', { tool: mode === 'highlight' ? t('tools.highlighter') : t('tools.pen'), color: t(`tools.color.${option.key.toLowerCase()}`) })}
                               accessibilityState={{ selected: isActive }}
                               onPress={() =>
                                 runToolbarPress(() =>
@@ -3560,7 +3562,7 @@ export function NotebookCanvas({
                             <Pressable
                               key={option.key}
                               accessibilityRole="button"
-                              accessibilityLabel={`${mode === 'highlight' ? 'Highlighter' : 'Pen'} width ${option.key}`}
+                              accessibilityLabel={t('tools.widthA11y', { tool: mode === 'highlight' ? t('tools.highlighter') : t('tools.pen'), width: t(`tools.size.${option.key.toLowerCase()}`) })}
                               accessibilityState={{ selected: active }}
                               onPress={() =>
                                 runToolbarPress(() =>
@@ -3590,7 +3592,7 @@ export function NotebookCanvas({
 
                   {mode === 'erase' ? (
                     <>
-                      <Text style={styles.contextLabel}>Size</Text>
+                      <Text style={styles.contextLabel}>{t('tools.size')}</Text>
                       <View style={styles.nibGroup}>
                         {ERASER_SIZES.map((option) => {
                           const active = eraserSizeKey === option.key;
@@ -3599,7 +3601,7 @@ export function NotebookCanvas({
                             <Pressable
                               key={option.key}
                               accessibilityRole="button"
-                              accessibilityLabel={`${option.label} eraser`}
+                              accessibilityLabel={t('tools.eraserA11y', { size: t(`tools.size.${option.key}`) })}
                               accessibilityState={{ selected: active }}
                               onPress={() => runToolbarPress(() => setEraserSizeKey(option.key))}
                               {...toolbarDragResponder.panHandlers}
@@ -3629,7 +3631,7 @@ export function NotebookCanvas({
                           <Pressable
                             key={shape}
                             accessibilityRole="button"
-                            accessibilityLabel={shape === 'rect' ? 'Rectangular selection' : 'Freeform lasso selection'}
+                            accessibilityLabel={shape === 'rect' ? t('tools.rectSelection') : t('tools.lassoSelection')}
                             accessibilityState={{ selected: active }}
                             onPress={() => runToolbarPress(() => setSelectionShape(shape))}
                             hitSlop={TOOLBAR_ICON_HIT_SLOP}
@@ -3655,7 +3657,7 @@ export function NotebookCanvas({
                     <View style={styles.insertRow}>
                       <Pressable
                         accessibilityRole="button"
-                        accessibilityLabel="Insert image from Photos"
+                        accessibilityLabel={t('tools.insertPhotos')}
                         onPress={() => runToolbarPress(pickImage)}
                         {...toolbarDragResponder.panHandlers}
                         {...toolbarDragTouchHandlers}
@@ -3667,9 +3669,9 @@ export function NotebookCanvas({
                           <Circle cx="11" cy="11.5" r="1.3" fill={colors.pearlWhite} />
                           <Path d="M8 18l3-3 2.2 2.2L16 14l4 4" stroke={colors.pearlWhite} strokeWidth={1.6} strokeLinejoin="round" fill="none" />
                         </Svg>
-                        <Text style={styles.insertButtonLabel}>Choose from Photos</Text>
+                        <Text style={styles.insertButtonLabel}>{t('tools.choosePhotos')}</Text>
                       </Pressable>
-                      <Text style={styles.contextHint}>Insert a screenshot or image</Text>
+                      <Text style={styles.contextHint}>{t('tools.insertHint')}</Text>
                     </View>
                   ) : null}
                 </Animated.View>
@@ -3695,7 +3697,7 @@ export function NotebookCanvas({
                 />
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel={hasSelection ? 'Delete selected' : 'Clear page'}
+                  accessibilityLabel={hasSelection ? t('tools.deleteSelected') : t('tools.clearPage')}
                   accessibilityState={{ disabled: !canClear }}
                   onPress={() => runToolbarPress(handleTrashPress)}
                   disabled={!canClear}
@@ -3736,7 +3738,7 @@ export function NotebookCanvas({
           <View style={styles.toolToast}>
             <ModeIcon mode={toolToast} active />
             <Text style={styles.toolToastText}>
-              {toolToast === 'erase' ? 'Eraser' : toolToast === 'highlight' ? 'Highlighter' : 'Pen'}
+              {toolToast === 'erase' ? t('tools.eraser') : toolToast === 'highlight' ? t('tools.highlighter') : t('tools.pen')}
             </Text>
           </View>
         </View>
@@ -3750,7 +3752,7 @@ export function NotebookCanvas({
         <View style={styles.fixedHistory} pointerEvents="box-none">
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Undo last action"
+            accessibilityLabel={t('tools.undo')}
             accessibilityState={{ disabled: !canUndo }}
             onPress={undo}
             disabled={!canUndo}
@@ -3765,7 +3767,7 @@ export function NotebookCanvas({
           <View style={styles.fixedHistoryDivider} />
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Redo last undone action"
+            accessibilityLabel={t('tools.redo')}
             accessibilityState={{ disabled: !canRedo }}
             onPress={redo}
             disabled={!canRedo}

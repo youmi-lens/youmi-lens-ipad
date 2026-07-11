@@ -21,8 +21,9 @@ import { IconTile, PageHeading, Pill, ProgressBar, SectionLabel } from '@/compon
 import { colors, layout } from '@/constants/theme';
 import { user } from '@/data/mockData';
 import { useAuth } from '@/lib/auth';
-import { formatDuration, formatShortDate, greetingForNow } from '@/lib/format';
+import { formatDuration, formatShortDate } from '@/lib/format';
 import { useGuestRecordingUsage } from '@/lib/guest';
+import { useT, localizeSystemDefaultTitle } from '@/lib/i18n';
 import { COURSE_PRESETS } from '@/lib/models';
 import { fetchPlanStatus, PlanStatus } from '@/lib/planStatus';
 import { useData } from '@/lib/store';
@@ -30,6 +31,9 @@ import { useData } from '@/lib/store';
 type IconName = ComponentProps<typeof Ionicons>['name'];
 
 export default function RecordHomeScreen() {
+  const t = useT();
+  const hour = new Date().getHours();
+  const greeting = t(hour < 12 ? 'home.greetingMorning' : hour < 18 ? 'home.greetingAfternoon' : 'home.greetingEvening');
   const router = useRouter();
   const {
     loaded,
@@ -75,9 +79,9 @@ export default function RecordHomeScreen() {
   const openCreateCourse = () => router.push('/create-course');
   const goToSignIn = () => { void exitGuest().then(() => router.replace('/auth')); };
   const promptGuestSignIn = () => {
-    Alert.alert('Sign in to continue', 'Sign in to continue recording lectures.', [
-      { text: 'Not now', style: 'cancel' },
-      { text: 'Sign In', onPress: goToSignIn },
+    Alert.alert(t('home.signInTitle'), t('home.signInBody'), [
+      { text: t('common.notNow'), style: 'cancel' },
+      { text: t('common.signIn'), onPress: goToSignIn },
     ]);
   };
   const startQuickRecording = () => {
@@ -113,17 +117,17 @@ export default function RecordHomeScreen() {
             <View style={styles.loading}><ActivityIndicator color={colors.accent} /></View>
           ) : courses.length === 0 ? (
             <>
-              <PageHeading eyebrow="Welcome to Youmi Lens" title="Your lectures, captured and understood" />
+              <PageHeading eyebrow={t('home.welcome')} title={t('home.title')} />
               <View style={styles.emptyGrid}>
                 <GlassCard elevated style={styles.emptyHero}>
                   <LogoMark size={36} />
-                  <Text style={styles.emptyTitle}>Create your first course</Text>
+                  <Text style={styles.emptyTitle}>{t('home.createFirstCourse')}</Text>
                   <Text style={styles.emptyBody}>
                     Courses keep every recording, transcript and summary organised. Add one, then record your first lecture.
                   </Text>
                   <View style={styles.emptyActions}>
-                    <PrimaryButton label="Create course" icon="add" onPress={openCreateCourse} />
-                    <SecondaryButton label="Quick recording" icon="mic-outline" onPress={startQuickRecording} />
+                    <PrimaryButton label={t('home.createCourse')} icon="add" onPress={openCreateCourse} />
+                    <SecondaryButton label={t('home.quickRecording')} icon="mic-outline" onPress={startQuickRecording} />
                   </View>
                 </GlassCard>
                 <GlassCard style={styles.stepsCard}>
@@ -146,12 +150,12 @@ export default function RecordHomeScreen() {
           ) : (
             <>
               <PageHeading
-                eyebrow={`${greetingForNow()}, ${user.firstName}`}
-                title="Ready for your next lecture?"
+                eyebrow={`${greeting}, ${user.firstName}`}
+                title={t('home.nextLecture')}
               />
               <View style={styles.homeGrid}>
                 <GlassCard elevated style={styles.recordCard}>
-                  <SectionLabel>Record a lecture</SectionLabel>
+                  <SectionLabel>{t('home.recordLecture')}</SectionLabel>
                   <View style={styles.selectorRow}>
                     <Pressable onPress={cycleCourse} style={({ pressed }) => [styles.courseSelector, pressed && styles.pressed]}>
                       <IconTile
@@ -160,8 +164,8 @@ export default function RecordHomeScreen() {
                         backgroundColor={colors.surfaceMuted}
                       />
                       <View style={styles.selectorText}>
-                        <Text style={styles.selectorLabel}>COURSE</Text>
-                        <Text style={styles.selectorValue} numberOfLines={1}>{selectedCourse?.name}</Text>
+                        <Text style={styles.selectorLabel}>{t('home.course')}</Text>
+                        <Text style={styles.selectorValue} numberOfLines={1}>{localizeSystemDefaultTitle(t, selectedCourse?.name)}</Text>
                       </View>
                       <Ionicons name="chevron-forward" size={17} color={colors.textTertiary} />
                     </Pressable>
@@ -172,42 +176,42 @@ export default function RecordHomeScreen() {
                   <TextInput
                     value={lectureTitle}
                     onChangeText={setLectureTitle}
-                    placeholder="Lecture title (optional)"
+                    placeholder={t('home.lecturePlaceholder')}
                     placeholderTextColor={colors.textTertiary}
                     style={styles.input}
                     maxLength={60}
                   />
-                  <PrimaryButton label="Start Recording" icon="radio-button-on" size="lg" onPress={startRecording} />
+                  <PrimaryButton label={t('home.startRecording')} icon="radio-button-on" size="lg" onPress={startRecording} />
                   <View style={styles.featureRow}>
-                    <Pill>Live captions</Pill>
-                    <Pill>文A Bilingual</Pill>
-                    <Pill>Smart notes</Pill>
+                    <Pill>{t('home.liveCaptions')}</Pill>
+                    <Pill>{t('home.bilingual')}</Pill>
+                    <Pill>{t('home.smartNotes')}</Pill>
                   </View>
                 </GlassCard>
 
                 <View style={styles.sideStack}>
                   <GlassCard padding={20}>
-                    <SectionLabel>Today</SectionLabel>
+                    <SectionLabel>{t('home.today')}</SectionLabel>
                     {isGuest ? (
                       <>
                         <View style={styles.metricRow}>
-                          <Text style={styles.metricLabel}>Guest recordings left</Text>
+                          <Text style={styles.metricLabel}>{t('home.guestLeft')}</Text>
                           <Text style={styles.metricValue}>{guestRemaining}</Text>
                         </View>
                         <ProgressBar value={guestRemaining > 0 ? 0.35 : 1} />
-                        <Pressable onPress={goToSignIn}><Text style={styles.accountLink}>Sign in for account access</Text></Pressable>
+                        <Pressable onPress={goToSignIn}><Text style={styles.accountLink}>{t('home.signInAccess')}</Text></Pressable>
                       </>
                     ) : (
                       <>
                         <View style={styles.metricRow}>
-                          <Text style={styles.metricLabel}>Recordings</Text>
+                          <Text style={styles.metricLabel}>{t('home.recordings')}</Text>
                           <Text style={styles.metricValue}>
                             {planLoading ? '—' : `${recordingsUsed} / ${recordingsLimit || '—'}`}
                           </Text>
                         </View>
                         <ProgressBar value={usageProgress} />
                         <View style={styles.metricRow}>
-                          <Text style={styles.metricLabel}>Max length</Text>
+                          <Text style={styles.metricLabel}>{t('home.maxLength')}</Text>
                           <Text style={styles.metricValue}>{planStatus?.maxRecordingMinutes ?? '—'} min</Text>
                         </View>
                       </>
@@ -216,8 +220,8 @@ export default function RecordHomeScreen() {
 
                   <GlassCard padding={20} style={styles.recentCard}>
                     <View style={styles.recentHeader}>
-                      <SectionLabel>Recent lectures</SectionLabel>
-                      <Pressable onPress={() => router.push('/courses')}><Text style={styles.viewAll}>View all</Text></Pressable>
+                      <SectionLabel>{t('home.recentLectures')}</SectionLabel>
+                      <Pressable onPress={() => router.push('/courses')}><Text style={styles.viewAll}>{t('home.viewAll')}</Text></Pressable>
                     </View>
                     {recentLectures.length ? recentLectures.map((lecture, index) => {
                       const course = getCourse(lecture.courseId);
@@ -235,20 +239,20 @@ export default function RecordHomeScreen() {
                           <IconTile icon={inProgress ? 'mic-outline' : 'document-text-outline'} size={32} />
                           <View style={styles.lectureText}>
                             <View style={styles.lectureTitleRow}>
-                              <Text numberOfLines={1} style={styles.lectureTitle}>{lecture.title}</Text>
+                              <Text numberOfLines={1} style={styles.lectureTitle}>{localizeSystemDefaultTitle(t, lecture.title)}</Text>
                               {inProgress ? (
                                 <View style={styles.inProgressBadge}>
-                                  <Text style={styles.inProgressBadgeText}>In progress</Text>
+                                  <Text style={styles.inProgressBadgeText}>{t('home.inProgress')}</Text>
                                 </View>
                               ) : null}
                             </View>
-                            <Text numberOfLines={1} style={styles.lectureMeta}>{course?.name ?? 'Lecture'} · {formatShortDate(lecture.date)}</Text>
+                            <Text numberOfLines={1} style={styles.lectureMeta}>{course?.name ? localizeSystemDefaultTitle(t, course.name) : t('lecture.defaultCourse')} · {formatShortDate(lecture.date)}</Text>
                           </View>
                           <Text style={styles.duration}>{formatDuration(lecture.durationMillis)}</Text>
                         </Pressable>
                       );
                     }) : (
-                      <Text style={styles.emptyRecent}>Recorded lectures will appear here.</Text>
+                      <Text style={styles.emptyRecent}>{t('home.emptyRecent')}</Text>
                     )}
                   </GlassCard>
                 </View>

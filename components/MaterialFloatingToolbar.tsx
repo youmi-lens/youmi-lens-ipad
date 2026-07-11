@@ -27,6 +27,7 @@ import { Animated, PanResponder, Pressable, StyleSheet, View } from 'react-nativ
 import Svg, { Defs, LinearGradient, Path, Stop } from 'react-native-svg';
 
 import { colors } from '@/constants/theme';
+import { useT } from '@/lib/i18n';
 
 // ---- Navy toolbar tokens — copied verbatim from NotebookCanvas so the two
 // ---- toolbars are pixel-identical. ----
@@ -379,6 +380,7 @@ export function MaterialFloatingToolbar({
   eraserSize,
   onSelectEraserSize,
 }: MaterialFloatingToolbarProps) {
+  const t = useT();
   const [dock, setDock] = useState<MaterialToolbarDock>(DEFAULT_PREFERENCES.dock);
   const [collapsed, setCollapsed] = useState(DEFAULT_PREFERENCES.collapsed);
   const [preferencesLoaded, setPreferencesLoaded] = useState(false);
@@ -623,7 +625,7 @@ export function MaterialFloatingToolbar({
       <Pressable
         key={tool.key}
         accessibilityRole="button"
-        accessibilityLabel={`${tool.label} tool`}
+        accessibilityLabel={t('tools.toolA11y', { tool: t(`tools.${tool.key === 'highlighter' ? 'highlight' : tool.key}`) })}
         accessibilityState={{ selected: active }}
         onPress={() => runPress(() => onChangeMode(tool.key))}
         hitSlop={TOOLBAR_ICON_HIT_SLOP}
@@ -641,7 +643,7 @@ export function MaterialFloatingToolbar({
   const renderHand = () => (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel="Hand — scroll the page"
+      accessibilityLabel={t('tools.scrollPage')}
       accessibilityState={{ selected: handActive }}
       onPress={() => runPress(() => onChangeMode(handActive ? 'pen' : 'scroll'))}
       hitSlop={TOOLBAR_ICON_HIT_SLOP}
@@ -671,7 +673,7 @@ export function MaterialFloatingToolbar({
   const renderMinimize = () => (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel="Minimize tools"
+      accessibilityLabel={t('tools.minimizeTools')}
       onPress={() => runPress(() => setCollapsed(true))}
       hitSlop={TOOLBAR_ICON_HIT_SLOP}
       {...dragHandlers}
@@ -702,7 +704,7 @@ export function MaterialFloatingToolbar({
       <Pressable
         key={option.key}
         accessibilityRole="button"
-        accessibilityLabel={`${mode === 'highlighter' ? 'Highlight' : 'Pen'} colour ${option.key}`}
+        accessibilityLabel={t('tools.colorA11y', { tool: mode === 'highlighter' ? t('tools.highlight') : t('tools.pen'), color: option.key })}
         accessibilityState={{ selected: isActive }}
         onPress={() => runPress(() => onSelectColor(option.value))}
         hitSlop={TOOLBAR_ICON_HIT_SLOP}
@@ -740,7 +742,7 @@ export function MaterialFloatingToolbar({
   const widthNibs = widthOptions.map((option) =>
     renderNib(
       option.key,
-      `${mode === 'highlighter' ? 'Highlight' : 'Pen'} width ${option.key}`,
+      t('tools.widthA11y', { tool: mode === 'highlighter' ? t('tools.highlight') : t('tools.pen'), width: option.key }),
       option.dot,
       activeWidth === option.value,
       () => onSelectWidth(option.value),
@@ -749,7 +751,7 @@ export function MaterialFloatingToolbar({
   const eraserNibs = eraserSizes.map((option) =>
     renderNib(
       option.key,
-      `${option.key} eraser`,
+      t('tools.eraserA11y', { size: option.key }),
       option.dot,
       eraserSize === option.value,
       () => onSelectEraserSize(option.value),
@@ -784,7 +786,7 @@ export function MaterialFloatingToolbar({
   const mainStrip = (
     <View style={vertical ? styles.rail : styles.row}>
       <View
-        accessibilityLabel="Move material tools"
+        accessibilityLabel={t('tools.moveMaterial')}
         accessibilityRole="adjustable"
         style={[styles.dragHandle, vertical && styles.dragHandleVertical]}
         {...dragHandlers}
@@ -797,8 +799,8 @@ export function MaterialFloatingToolbar({
       <View style={[styles.divider, vertical && styles.dividerVertical]} />
       {renderHand()}
       <View style={[styles.divider, vertical && styles.dividerVertical]} />
-      {renderHistoryButton('undo', canUndo, onUndo, 'Undo last annotation stroke')}
-      {renderHistoryButton('redo', canRedo, onRedo, 'Redo annotation stroke')}
+      {renderHistoryButton('undo', canUndo, onUndo, t('tools.undo'))}
+      {renderHistoryButton('redo', canRedo, onRedo, t('tools.redo'))}
       {renderMinimize()}
     </View>
   );
@@ -820,7 +822,7 @@ export function MaterialFloatingToolbar({
 
   const collapsedCapsule = (
     <View style={[styles.collapsedContent, vertical && styles.collapsedContentVertical]}>
-      <View accessibilityLabel="Move material tools" accessibilityRole="adjustable" style={styles.collapsedGrip} {...dragHandlers}>
+      <View accessibilityLabel={t('tools.moveMaterial')} accessibilityRole="adjustable" style={styles.collapsedGrip} {...dragHandlers}>
         <GripDots />
       </View>
       <View style={styles.collapsedCur}>
@@ -828,7 +830,7 @@ export function MaterialFloatingToolbar({
       </View>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Expand tools"
+        accessibilityLabel={t('tools.expandTools')}
         onPress={() => runPress(() => setCollapsed(false))}
         hitSlop={TOOLBAR_ICON_HIT_SLOP}
         {...dragHandlers}

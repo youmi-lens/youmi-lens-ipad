@@ -29,6 +29,7 @@ import {
 import { NativeLookupText } from '@/components/NativeLookupText';
 import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
 import { formatClock } from '@/lib/format';
+import { useT } from '@/lib/i18n';
 import { useLiveCaptions } from '@/lib/liveCaptions';
 import { useRecordingNotes } from '@/lib/recordingNotes';
 
@@ -47,6 +48,7 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 export default function MiniCaptionScreen() {
+  const t = useT();
   const router = useRouter();
   const params = useLocalSearchParams<{ elapsed?: string }>();
   const insets = useSafeAreaInsets();
@@ -304,14 +306,14 @@ export default function MiniCaptionScreen() {
   // English is the primary live caption; Chinese is translation support
   // underneath it. Fixed order for V1 — see Settings → Language.
   const captionLine = captionsLive
-    ? visibleEnglishCaption || 'Listening…'
+    ? visibleEnglishCaption || t('mini.listeningStatus')
     : status === 'connecting'
-      ? 'Live captions connecting…'
+      ? t('mini.connecting')
       : visibleEnglishCaption
         ? visibleEnglishCaption
         : status === 'error' || status === 'unavailable'
-          ? 'Live captions unavailable'
-          : 'Listening…';
+          ? t('mini.unavailable')
+          : t('mini.listeningStatus');
   const translationLine = partialTranslationZh || latestFinalLine?.translationZh;
   const translationPending = Boolean(latestFinalLine && !translationLine && !partialCaption);
   const displayMillis = currentDurationMillis > 0 ? currentDurationMillis : fallbackMillis;
@@ -446,12 +448,12 @@ export default function MiniCaptionScreen() {
       <View style={[styles.miniNav, { top: insets.top + 8 }]} pointerEvents="box-none">
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Back to recording"
+          accessibilityLabel={t('mini.backRecording')}
           onPress={() => router.back()}
           style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}
         >
           <Ionicons name="chevron-back" size={18} color={colors.deepNavy} />
-          <Text style={styles.backButtonLabel}>Recording</Text>
+          <Text style={styles.backButtonLabel}>{t('mini.recording')}</Text>
         </Pressable>
       </View>
 
@@ -465,7 +467,7 @@ export default function MiniCaptionScreen() {
         >
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Show captions"
+            accessibilityLabel={t('mini.showCaptions')}
             onPress={() => {
               if (listeningPillWasDraggedRef.current) return;
               setPanelVisible(true);
@@ -473,7 +475,7 @@ export default function MiniCaptionScreen() {
             style={({ pressed }) => [styles.listeningPill, pressed && styles.pressed]}
           >
             <View style={styles.listeningDot} />
-            <Text style={styles.listeningPillLabel}>Youmi Listening</Text>
+            <Text style={styles.listeningPillLabel}>{t('mini.listening')}</Text>
             <Ionicons name="chevron-up" size={15} color={colors.textOnNavyMuted} />
           </Pressable>
         </Animated.View>
@@ -530,11 +532,11 @@ export default function MiniCaptionScreen() {
           >
             {formatClock(seconds)}
           </Text>
-          {panelPaused ? <Text style={[styles.pausedLabel, { fontSize: scaled.pausedLabel }]}>PAUSED</Text> : null}
+          {panelPaused ? <Text style={[styles.pausedLabel, { fontSize: scaled.pausedLabel }]}>{t('mini.paused')}</Text> : null}
           <View style={styles.spacer} />
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Hide captions"
+            accessibilityLabel={t('mini.hideCaptions')}
             onPress={() => setPanelVisible(false)}
             hitSlop={8}
             style={({ pressed }) => [
@@ -623,7 +625,7 @@ export default function MiniCaptionScreen() {
                         {line.translationZh}
                       </Text>
                     ) : line.isActive && translationPending ? (
-                      <Text style={[styles.captionTranslationPending, { fontSize: scaled.chinese }]}>Translating…</Text>
+                      <Text style={[styles.captionTranslationPending, { fontSize: scaled.chinese }]}>{t('mini.translating')}</Text>
                     ) : null}
                   </View>
                 ))
@@ -735,7 +737,7 @@ export default function MiniCaptionScreen() {
           <View style={[styles.controls, { gap: scaled.controlGap }]}> 
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Mark important"
+              accessibilityLabel={t('mini.markImportant')}
               onPress={markImportant}
               style={({ pressed }) => [
                 styles.controlBtn,
@@ -751,13 +753,13 @@ export default function MiniCaptionScreen() {
               />
               {!panelCompact ? (
                 <Text style={[styles.controlLabel, { fontSize: scaled.controlLabel }, markFlash && styles.controlLabelActive]}>
-                  {markFlash ? 'Marked' : 'Mark'}
+                  {markFlash ? t('mini.marked') : t('mini.mark')}
                 </Text>
               ) : null}
             </Pressable>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Expand caption panel"
+              accessibilityLabel={t('mini.expandPanel')}
               onPress={() =>
                 setPanelSize((current) => {
                   const maxWidth = Math.max(MIN_PANEL_WIDTH, width * 0.96);
@@ -775,11 +777,11 @@ export default function MiniCaptionScreen() {
               ]}
             >
               <Ionicons name="scan-outline" size={scaled.controlIcon} color={colors.textOnNavy} />
-              {!panelCompact ? <Text style={[styles.controlLabel, { fontSize: scaled.controlLabel }]}>Expand</Text> : null}
+              {!panelCompact ? <Text style={[styles.controlLabel, { fontSize: scaled.controlLabel }]}>{t('mini.expand')}</Text> : null}
             </Pressable>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={panelPaused ? 'Resume' : 'Pause'}
+              accessibilityLabel={panelPaused ? t('mini.resume') : t('mini.pause')}
               onPress={() => {
                 if (isLectureSessionPaused) return;
                 setPaused((p) => !p);
@@ -793,7 +795,7 @@ export default function MiniCaptionScreen() {
               <Ionicons name={panelPaused ? 'play' : 'pause'} size={scaled.controlIcon} color={colors.textOnNavy} />
               {!panelCompact ? (
                 <Text style={[styles.controlLabel, { fontSize: scaled.controlLabel }]}> 
-                  {panelPaused ? 'Resume' : 'Pause'}
+                  {panelPaused ? t('mini.resume') : t('mini.pause')}
                 </Text>
               ) : null}
             </Pressable>

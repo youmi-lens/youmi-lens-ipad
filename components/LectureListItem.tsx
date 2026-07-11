@@ -4,6 +4,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
 import { formatDuration, formatShortDate } from '@/lib/format';
+import { useT, localizeSystemDefaultTitle } from '@/lib/i18n';
 import type { Course, Lecture } from '@/lib/models';
 
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
@@ -33,6 +34,7 @@ export function LectureListItem({
   variant = 'card',
   last = false,
 }: LectureListItemProps) {
+  const t = useT();
   const isRow = variant === 'row';
   const tint = course?.tint ?? colors.iceTint;
   const accent = course?.accent ?? colors.deepNavy;
@@ -55,10 +57,10 @@ export function LectureListItem({
 
       <View style={styles.body}>
         <Text style={styles.title} numberOfLines={1}>
-          {lecture.title}
+          {localizeSystemDefaultTitle(t, lecture.title)}
         </Text>
         <Text style={styles.meta} numberOfLines={1}>
-          {course?.name ?? 'Lecture'}
+          {course?.name ? localizeSystemDefaultTitle(t, course.name) : t('lecture.defaultCourse')}
         </Text>
       </View>
 

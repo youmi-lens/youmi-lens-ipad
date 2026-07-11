@@ -25,6 +25,7 @@ import { WorkspaceSidebar } from '@/components/WorkspaceSidebar';
 import { colors, fontSize, radius, spacing } from '@/constants/theme';
 import { exportLectureNotesPdf, hasExportableLectureNotes } from '@/lib/exportLectureNotesPdf';
 import { formatClock, formatDate, formatDuration } from '@/lib/format';
+import { useT, localizeSystemDefaultTitle } from '@/lib/i18n';
 import {
   getLectureSummaryByLanguage,
   getLectureTranscriptByLanguage,
@@ -39,10 +40,6 @@ type IoniconName = ComponentProps<typeof Ionicons>['name'];
 const TABS = ['Summary', 'Transcript', 'Marked', 'Notes'] as const;
 type Tab = (typeof TABS)[number];
 
-const STATUS_INFO: Record<string, { label: string; variant: StatusVariant }> = {
-  local_recorded: { label: 'RECORDED', variant: 'idle' },
-};
-
 /** A study-note style block header: icon tile + label. */
 function BlockHeader({ icon, label }: { icon: IoniconName; label: string }) {
   return (
@@ -56,6 +53,7 @@ function BlockHeader({ icon, label }: { icon: IoniconName; label: string }) {
 }
 
 export default function LectureDetailScreen() {
+  const t = useT();
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string }>();
   const { getLecture, getCourse, updateLecture, renameLecture } = useData();
@@ -83,13 +81,13 @@ export default function LectureDetailScreen() {
       <SafeAreaView style={styles.root} edges={['top', 'left', 'right', 'bottom']}>
         <View style={styles.notFound}>
           <Ionicons name="document-outline" size={36} color={colors.mutedBlueGray} />
-          <Text style={styles.notFoundText}>This lecture could not be found.</Text>
+          <Text style={styles.notFoundText}>{t('lecture.notFound')}</Text>
           <Pressable
             accessibilityRole="button"
             onPress={() => router.replace('/')}
             style={({ pressed }) => [styles.notFoundBtn, pressed && styles.pressed]}
           >
-            <Text style={styles.notFoundBtnText}>Back to Home</Text>
+            <Text style={styles.notFoundBtnText}>{t('lecture.backHome')}</Text>
           </Pressable>
         </View>
       </SafeAreaView>
@@ -106,12 +104,12 @@ export default function LectureDetailScreen() {
   const notesHasContent = typedNotes.length > 0 || strokeCount > 0;
   const status =
     lecture.processingStatus === 'ready'
-      ? { label: 'READY', variant: 'done' as StatusVariant }
+      ? { label: t('status.ready'), variant: 'done' as StatusVariant }
       : lecture.processingStatus === 'processing'
-        ? { label: 'PROCESSING', variant: 'processing' as StatusVariant }
+        ? { label: t('status.processing'), variant: 'processing' as StatusVariant }
         : lecture.processingStatus === 'failed'
-          ? { label: 'FAILED', variant: 'idle' as StatusVariant }
-          : STATUS_INFO[lecture.status] ?? STATUS_INFO.local_recorded;
+          ? { label: t('status.failed'), variant: 'idle' as StatusVariant }
+          : { label: t('status.recorded'), variant: 'idle' as StatusVariant };
 
   const openNotesEditor = () => {
     setNotesDraft(lecture.notes);
@@ -132,7 +130,7 @@ export default function LectureDetailScreen() {
 
   const handleExportPdf = async () => {
     if (!hasExportableLectureNotes(lecture)) {
-      Alert.alert('Nothing to export yet', 'There are no notes to export yet.');
+      Alert.alert(t('lecture.nothingExport'), t('lecture.noNotesExport'));
       return;
     }
 
@@ -140,9 +138,11 @@ export default function LectureDetailScreen() {
     try {
       await exportLectureNotesPdf({ lecture, course });
     } catch (err) {
+      // Raw technical detail stays in logs; the user sees a localized generic message.
+      console.warn('[lecture] PDF export failed', err);
       Alert.alert(
-        'Could not export PDF',
-        err instanceof Error ? err.message : 'Please try again in a moment.',
+        t('lecture.exportFailed'),
+        t('lecture.tryAgain'),
       );
     } finally {
       setExportingPdf(false);
@@ -167,7 +167,7 @@ export default function LectureDetailScreen() {
       <View style={styles.header}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Back"
+          accessibilityLabel={t('common.back')}
           onPress={() => router.back()}
           hitSlop={10}
           style={({ pressed }) => [styles.backBtn, pressed && styles.pressed]}
@@ -185,17 +185,17 @@ export default function LectureDetailScreen() {
         ) : null}
         <View style={styles.headerText}>
           <Text style={styles.headerTitle} numberOfLines={1}>
-            {lecture.title}
+            {localizeSystemDefaultTitle(t, lecture.title)}
           </Text>
           <Text style={styles.headerMeta} numberOfLines={1}>
-            {course?.name ?? 'Lecture'} · {formatDate(lecture.date)} ·{' '}
+            {course?.name ? localizeSystemDefaultTitle(t, course.name) : t('lecture.defaultCourse')} · {formatDate(lecture.date)} ·{' '}
             {formatDuration(lecture.durationMillis)}
           </Text>
         </View>
         <StatusPill label={status.label} variant={status.variant} />
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Rename lecture"
+          accessibilityLabel={t('course.renameLecture')}
           onPress={() => setRenameVisible(true)}
           hitSlop={8}
           style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
@@ -219,7 +219,7 @@ export default function LectureDetailScreen() {
             </View>
           ) : (
             <Text style={styles.emptyInline}>
-              {lecture.storagePath ? 'Audio playback from cloud storage is coming soon.' : 'Audio playback is not available for this lecture.'}
+              {lecture.storagePath ? t('lecture.audioCloudSoon') : t('lecture.audioUnavailable')}
             </Text>
           )}
         </GlassCard>
@@ -227,21 +227,21 @@ export default function LectureDetailScreen() {
 
       {/* Tab bar */}
       <View style={styles.tabBar}>
-        {TABS.map((t) => {
-          const active = t === tab;
+        {TABS.map((tabName) => {
+          const active = tabName === tab;
           return (
             <Pressable
-              key={t}
+              key={tabName}
               accessibilityRole="tab"
               accessibilityState={{ selected: active }}
-              onPress={() => setTab(t)}
+              onPress={() => setTab(tabName)}
               style={[styles.tab, active && styles.tabActive]}
             >
               <Text
                 style={[styles.tabLabel, active && styles.tabLabelActive]}
                 numberOfLines={1}
               >
-                {t}
+                {t(`lecture.tab.${tabName.toLowerCase()}`)}
               </Text>
             </Pressable>
           );
@@ -265,7 +265,7 @@ export default function LectureDetailScreen() {
                 {transcriptEn ? (
                   <NativeLookupText style={styles.bodyText}>{transcriptEn}</NativeLookupText>
                 ) : (
-                  <Text style={styles.emptyInline}>Transcript is not ready yet.</Text>
+                  <Text style={styles.emptyInline}>{t('lecture.transcriptPending')}</Text>
                 )}
               </GlassCard>
               <GlassCard>
@@ -309,7 +309,7 @@ export default function LectureDetailScreen() {
                 </View>
               ) : (
                 <GlassCard>
-                  <Text style={styles.emptyInline}>Summary will appear after processing.</Text>
+                  <Text style={styles.emptyInline}>{t('lecture.summaryPending')}</Text>
                 </GlassCard>
               )}
             </>
@@ -318,7 +318,7 @@ export default function LectureDetailScreen() {
           {/* ---- Marked ---- */}
           {tab === 'Marked' && (
             <GlassCard>
-              <BlockHeader icon="star-outline" label="MARKED IMPORTANT" />
+              <BlockHeader icon="star-outline" label={t('lecture.marked')} />
               {lecture.markedTimestamps.length > 0 ? (
                 <View style={styles.momentList}>
                   {lecture.markedTimestamps.map((ms, i) => (
@@ -330,15 +330,15 @@ export default function LectureDetailScreen() {
                       style={({ pressed }) => [styles.momentRow, !audioAvailable && styles.momentRowDisabled, pressed && audioAvailable && styles.pressed]}
                     >
                       <View style={styles.momentTime}><Text style={styles.momentTimeText}>{formatClock(Math.floor(ms / 1000))}</Text></View>
-                      <Text style={styles.momentLabel}>Important moment</Text>
+                      <Text style={styles.momentLabel}>{t('lecture.importantMoment')}</Text>
                       <Ionicons name="star" size={15} color={colors.textPrimary} />
                     </Pressable>
                   ))}
                 </View>
               ) : (
-                <Text style={styles.emptyInline}>No important moments were marked during this lecture.</Text>
+                <Text style={styles.emptyInline}>{t('lecture.noMoments')}</Text>
               )}
-              {!audioAvailable ? <Text style={styles.markedHint}>Audio playback is not available for this lecture.</Text> : null}
+              {!audioAvailable ? <Text style={styles.markedHint}>{t('lecture.audioUnavailable')}</Text> : null}
             </GlassCard>
           )}
 
@@ -351,11 +351,11 @@ export default function LectureDetailScreen() {
                   <View style={styles.blockIcon}>
                     <Ionicons name="create-outline" size={15} color={colors.textPrimary} />
                   </View>
-                  <Text style={styles.blockLabel}>LECTURE NOTES</Text>
+                  <Text style={styles.blockLabel}>{t('lecture.notes')}</Text>
                 </View>
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel="Export lecture notes as PDF"
+                  accessibilityLabel={t('lecture.exportNotesA11y')}
                   onPress={() => void handleExportPdf()}
                   disabled={exportingPdf}
                   style={({ pressed }) => [
@@ -369,12 +369,12 @@ export default function LectureDetailScreen() {
                   ) : (
                     <Ionicons name="share-outline" size={16} color={colors.textPrimary} />
                   )}
-                  <Text style={styles.noteExportText}>{exportingPdf ? 'Exporting…' : 'Export PDF'}</Text>
+                  <Text style={styles.noteExportText}>{exportingPdf ? t('lecture.exporting') : t('lecture.exportPdf')}</Text>
                 </Pressable>
               </View>
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel="Open lecture notes"
+                accessibilityLabel={t('lecture.openNotes')}
                 onPress={openNotesEditor}
                 style={({ pressed }) => [styles.notePreviewPressable, pressed && styles.pressed]}
               >
@@ -396,10 +396,10 @@ export default function LectureDetailScreen() {
                         <HandwritingPreview strokes={lecture.noteStrokes ?? []} />
                       </View>
                     ) : null}
-                    <Text style={styles.noteEditHint}>Tap to open the full notebook editor.</Text>
+                    <Text style={styles.noteEditHint}>{t('lecture.editHint')}</Text>
                   </View>
                 ) : (
-                  <Text style={styles.notePreviewEmpty}>Tap to add notes for this lecture.</Text>
+                  <Text style={styles.notePreviewEmpty}>{t('lecture.addNotes')}</Text>
                 )}
               </Pressable>
             </View>
@@ -409,10 +409,10 @@ export default function LectureDetailScreen() {
 
       <RenameModal
         visible={renameVisible}
-        title="Rename Lecture"
-        label="Lecture title"
+        title={t('rename.lectureTitle')}
+        label={t('rename.lectureLabel')}
         initialValue={lecture.title}
-        placeholder="e.g. Week 3 — Cell Division"
+        placeholder={t('rename.lecturePlaceholder')}
         onCancel={() => setRenameVisible(false)}
         onSave={(title) => {
           renameLecture(lecture.id, title);
@@ -429,11 +429,11 @@ export default function LectureDetailScreen() {
         <SafeAreaView style={styles.modalRoot} edges={['top', 'bottom', 'left', 'right']}>
           <View style={styles.modalHeader}>
             <Pressable accessibilityRole="button" onPress={() => setNotesOpen(false)} style={styles.modalAction}>
-              <Text style={styles.modalActionText}>Cancel</Text>
+              <Text style={styles.modalActionText}>{t('common.cancel')}</Text>
             </Pressable>
-            <Text style={styles.modalTitle}>Lecture Notes</Text>
+            <Text style={styles.modalTitle}>{t('lecture.notesTitle')}</Text>
             <Pressable accessibilityRole="button" onPress={saveNotes} style={styles.modalAction}>
-              <Text style={styles.modalActionText}>Done</Text>
+              <Text style={styles.modalActionText}>{t('common.done')}</Text>
             </Pressable>
           </View>
           <NotebookCanvas

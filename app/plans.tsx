@@ -11,6 +11,7 @@ import { SecondaryButton } from '@/components/SecondaryButton';
 import { GlassIconButton } from '@/components/WorkspaceUI';
 import { colors, radius } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
+import { useT } from '@/lib/i18n';
 import { fetchPlanStatus, PlanStatus } from '@/lib/planStatus';
 import {
   purchaseService,
@@ -25,12 +26,13 @@ type StudentBasicStatus = 'Active' | 'Not active' | 'Expired' | 'Checking';
 // Three plain-language benefits — no quota table, no jargon. Each maps to a
 // protected paid limit (600 monthly minutes · 6 recordings/day · 10 jobs/day).
 const BENEFITS = [
-  '600 study minutes each month',
-  '6 recordings every day',
-  '10 study tasks every day',
+  'plans.benefit1',
+  'plans.benefit2',
+  'plans.benefit3',
 ] as const;
 
 export default function PlansScreen() {
+  const t = useT();
   const router = useRouter();
   const { session, user, isGuest, exitGuest } = useAuth();
   const accessToken = session?.access_token ?? null;
@@ -69,8 +71,10 @@ export default function PlansScreen() {
       setPlanStatusAccountId(requestedAccountId);
       return nextStatus;
     } catch (nextError) {
+      // Raw technical detail stays in logs; the user sees a localized generic message.
+      console.warn('[plans] plan status load failed', nextError);
       if (requestId === statusRequestRef.current && activeAccountRef.current === requestedAccountId) {
-        setError(nextError instanceof Error ? nextError.message : 'Account status is unavailable.');
+        setError(t('plans.statusUnavailable'));
       }
       return null;
     } finally {
@@ -78,7 +82,7 @@ export default function PlansScreen() {
         setStatusLoading(false);
       }
     }
-  }, [accessToken, accountId]);
+  }, [accessToken, accountId, t]);
   const loadProduct = useCallback(async () => {
     setProductLoading(true);
     try {
@@ -118,14 +122,14 @@ export default function PlansScreen() {
   const purchaseUnavailable = currentStatus?.studentPass?.isPurchasable === false;
   const purchaseDisabled = isGuest || !accessToken || !purchaseVisible || productLoading || !product || busy !== null;
   const purchaseButtonLabel = purchaseUnavailable
-    ? 'Coming soon'
+    ? t('plans.comingSoon')
     : productLoading
-      ? 'Loading…'
-      : 'Purchase Student Basic';
+      ? t('plans.loading')
+      : t('plans.purchase');
   const studentBasicStatus = getStudentBasicStatus(currentStatus, statusLoading);
 
   const handlePurchase = async () => {
-    if (isGuest || !accessToken) return Alert.alert('Sign in required', 'Sign in before purchasing Student Basic.');
+    if (isGuest || !accessToken) return Alert.alert(t('plans.signInRequired'), t('plans.signInPurchase'));
     if (purchaseLockRef.current || busy !== null || !purchaseVisible || !product) return;
     purchaseLockRef.current = true;
     setBusy('purchase');
@@ -134,21 +138,21 @@ export default function PlansScreen() {
       const result = await purchaseService.purchaseStudentPass(accessToken);
       if (result.code === 'cancelled') return;
       if (result.code === 'pending') {
-        Alert.alert('Purchase pending', result.message);
+        Alert.alert(t('plans.purchasePending'), result.message);
         return;
       }
       if (!result.ok) {
-        Alert.alert('Purchase not completed', result.message);
+        Alert.alert(t('plans.purchaseIncomplete'), result.message);
         return;
       }
 
       const refreshedStatus = await loadStatus();
       if (refreshedStatus && confirmsStudentBasicGrant(refreshedStatus)) {
-        Alert.alert('Student Basic active', 'Your verified purchase is active and your updated limits are ready.');
+        Alert.alert(t('plans.activeTitle'), t('plans.activeBody'));
       } else {
         Alert.alert(
-          'Access refresh needed',
-          'Apple payment was verified, but updated access could not be confirmed. Tap Refresh Access before trying again.',
+          t('plans.refreshNeeded'),
+          t('plans.refreshNeededBody'),
         );
       }
     } finally {
@@ -157,7 +161,7 @@ export default function PlansScreen() {
     }
   };
   const handleRefreshAccess = async () => {
-    if (isGuest || !accessToken) return Alert.alert('Sign in required', 'Sign in to refresh your purchase status.');
+    if (isGuest || !accessToken) return Alert.alert(t('plans.signInRequired'), t('plans.refreshSignIn'));
     if (busy !== null) return;
     setBusy('refresh');
     try {
@@ -165,12 +169,12 @@ export default function PlansScreen() {
       const refreshedStatus = await loadStatus();
       if (!refreshedStatus) {
         setAccessRefreshMessage(result.message || restoreMessageForCode(result.code));
-        Alert.alert('Access refresh failed', 'Quota and access status could not be refreshed. Check your connection and try again.');
+        Alert.alert(t('plans.refreshFailed'), t('plans.refreshFailedBody'));
         return;
       }
       const message = accessMessageForStatus(refreshedStatus);
       setAccessRefreshMessage(message);
-      Alert.alert('Access refreshed', message);
+      Alert.alert(t('plans.refreshed'), message);
     } finally {
       setBusy(null);
     }
@@ -184,7 +188,7 @@ export default function PlansScreen() {
         <View style={styles.content}>
           <View style={styles.topBar}>
             <GlassIconButton icon="chevron-back" onPress={() => router.back()} />
-            <Text style={styles.topTitle}>Student Access</Text>
+            <Text style={styles.topTitle}>{t('plans.studentAccess')}</Text>
           </View>
 
           {statusLoading && !currentStatus ? (
@@ -197,33 +201,33 @@ export default function PlansScreen() {
                 </View>
                 {studentBasicStatus === 'Active' ? (
                   <View style={[styles.pill, styles.pillActive]}>
-                    <Text style={[styles.pillText, styles.pillTextActive]}>ACTIVE</Text>
+                    <Text style={[styles.pillText, styles.pillTextActive]}>{t('plans.active')}</Text>
                   </View>
                 ) : studentBasicStatus === 'Expired' ? (
                   <View style={styles.pill}>
-                    <Text style={styles.pillText}>EXPIRED</Text>
+                    <Text style={styles.pillText}>{t('plans.expired')}</Text>
                   </View>
                 ) : null}
               </View>
 
-              <Text style={styles.title}>Student Basic</Text>
-              <Text style={styles.subtitle}>30 days of premium lecture support</Text>
+              <Text style={styles.title}>{t('plans.studentBasic')}</Text>
+              <Text style={styles.subtitle}>{t('plans.subtitle')}</Text>
 
               <View style={styles.priceRow}>
-                <Text style={styles.price}>{productLoading ? 'Loading…' : product?.displayPrice ?? 'App Store unavailable'}</Text>
-                <Text style={styles.priceTerm}>one-time · 30 days</Text>
+                <Text style={styles.price}>{productLoading ? t('plans.loading') : product?.displayPrice ?? t('plans.appStoreUnavailable')}</Text>
+                <Text style={styles.priceTerm}>{t('plans.term')}</Text>
               </View>
 
               <View style={styles.divider} />
 
-              <Text style={styles.lead}>More room for lectures, recordings, and study notes.</Text>
+              <Text style={styles.lead}>{t('plans.lead')}</Text>
               <View style={styles.benefits}>
                 {BENEFITS.map((benefit) => (
-                  <View key={benefit} style={styles.benefit}>
+                  <View key={t(benefit)} style={styles.benefit}>
                     <View style={styles.benefitCheck}>
                       <Ionicons name="checkmark" size={13} color={colors.accent} />
                     </View>
-                    <Text style={styles.benefitText}>{benefit}</Text>
+                    <Text style={styles.benefitText}>{t(benefit)}</Text>
                   </View>
                 ))}
               </View>
@@ -231,10 +235,10 @@ export default function PlansScreen() {
               {activeEntitlement ? (
                 <>
                   <View style={styles.accessEndsRow}>
-                    <Text style={styles.accessEndsLabel}>Access ends</Text>
+                    <Text style={styles.accessEndsLabel}>{t('plans.accessEnds')}</Text>
                     <Text style={styles.accessEndsValue}>{formatDate(activeEntitlement?.expiresAt)}</Text>
                   </View>
-                  <Text style={styles.activeNote}>Your active access remains visible even when new purchases are closed.</Text>
+                  <Text style={styles.activeNote}>{t('plans.activeNote')}</Text>
                 </>
               ) : null}
 
@@ -255,23 +259,23 @@ export default function PlansScreen() {
                   />
                 ) : null}
                 {purchaseUnavailable ? (
-                  <Text style={styles.unavailableNote}>New Student Basic purchases are currently unavailable.</Text>
+                  <Text style={styles.unavailableNote}>{t('plans.unavailable')}</Text>
                 ) : null}
 
                 <SecondaryButton
-                  label={busy === 'refresh' ? 'Refreshing…' : 'Refresh Access'}
+                  label={busy === 'refresh' ? t('plans.refreshing') : t('plans.refreshAccess')}
                   icon="refresh-outline"
                   onPress={() => void handleRefreshAccess()}
                   disabled={busy !== null || isGuest || !accessToken}
                 />
                 {isGuest ? (
-                  <SecondaryButton label="Sign in" icon="log-in-outline" onPress={() => void handleSignIn()} />
+                  <SecondaryButton label={t('common.signIn')} icon="log-in-outline" onPress={() => void handleSignIn()} />
                 ) : null}
               </View>
 
-              <Text style={styles.helper}>Checks your existing Apple purchase record.</Text>
+              <Text style={styles.helper}>{t('plans.purchaseCheck')}</Text>
               {accessRefreshMessage ? <Text style={styles.refreshMessage}>{accessRefreshMessage}</Text> : null}
-              <Text style={styles.fine}>One-time payment. Does not renew automatically.</Text>
+              <Text style={styles.fine}>{t('plans.fine')}</Text>
             </GlassCard>
           )}
         </View>

@@ -24,6 +24,8 @@ import { StatusPill } from '@/components/StatusPill';
 import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
 import { formatClock } from '@/lib/format';
+import { useT, localizeSystemDefaultTitle } from '@/lib/i18n';
+import { useWordLookupHint } from '@/lib/wordLookupHint';
 import { GUEST_MAX_RECORDING_SECONDS, incrementGuestRecordingsUsed } from '@/lib/guest';
 import { pickAndImportPdf } from '@/lib/importMaterial';
 import { logLiveCaptionEvent, logLiveCaptionUnavailable } from '@/lib/liveCaptionDiagnostics';
@@ -171,6 +173,12 @@ export default function RecordingScreen() {
     captionsConnecting: liveCaptionStatus === 'connecting',
   });
   const courseMaterials = course ? materialsForCourse(course.id) : [];
+
+  // Subtle one-time hint for double-tap word lookup, shown only while English
+  // captions are on screen (same condition the caption feed renders under).
+  const t = useT();
+  const captionsVisibleForHint = !isGuest && (captionAreaState === 'captions_visible' || isReviewingResume);
+  const showWordLookupHint = useWordLookupHint(captionsVisibleForHint);
 
   // ---- Resumable persistence: prior history + live session merged together ----
   // The caption feed and every save read the SAME merged source, so reopening a
@@ -557,8 +565,8 @@ export default function RecordingScreen() {
         setFinishing(false);
         router.back();
         Alert.alert(
-          'Recording not saved',
-          'We couldn’t capture any audio for this recording. Please check microphone access and try again.',
+          t('recording.notSavedTitle'),
+          t('recording.notSavedBody'),
         );
         return;
       }
@@ -578,11 +586,11 @@ export default function RecordingScreen() {
       await incrementGuestRecordingsUsed();
       router.replace('/');
       Alert.alert(
-        'Recording saved on this device',
-        'Sign in to generate transcripts and summaries.',
+        t('recording.savedOnDeviceTitle'),
+        t('recording.savedOnDeviceBody'),
         [
-          { text: 'Not now', style: 'cancel' },
-          { text: 'Sign In', onPress: () => { void exitGuest().then(() => router.replace('/auth')); } },
+          { text: t('common.notNow'), style: 'cancel' },
+          { text: t('common.signIn'), onPress: () => { void exitGuest().then(() => router.replace('/auth')); } },
         ],
       );
       return;
@@ -629,8 +637,8 @@ export default function RecordingScreen() {
       setFinishing(false);
       router.back();
       Alert.alert(
-        'Recording not saved',
-        'We couldn’t capture any audio for this recording. Please check microphone access and try again.',
+        t('recording.notSavedTitle'),
+        t('recording.notSavedBody'),
       );
       return;
     }
@@ -708,7 +716,7 @@ export default function RecordingScreen() {
       return;
     }
     if (!result.canceled) {
-      Alert.alert('Could not import material', result.reason);
+      Alert.alert(t('recording.importMaterialFailTitle'), result.reason);
     }
   };
 
@@ -718,7 +726,7 @@ export default function RecordingScreen() {
       <View style={styles.header}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Back"
+          accessibilityLabel={t('recording.back')}
           onPress={() => void handleBack()}
           hitSlop={10}
           style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
@@ -728,7 +736,7 @@ export default function RecordingScreen() {
 
         {granted ? (
           <StatusPill
-            label={isReviewingResume ? 'PAUSED' : isPaused ? 'PAUSED' : 'REC'}
+            label={isReviewingResume ? t('recording.pausedShort') : isPaused ? t('recording.pausedShort') : t('recording.recordingShort')}
             variant={isReviewingResume || isPaused ? 'paused' : 'recording'}
           />
         ) : null}
@@ -745,13 +753,13 @@ export default function RecordingScreen() {
             style={({ pressed }) => [styles.materialTopButton, pressed && styles.pressed]}
           >
             <Ionicons name="document-text-outline" size={14} color={colors.textSecondary} />
-            <Text style={styles.materialTopText}>Course material</Text>
+            <Text style={styles.materialTopText}>{t('recording.materialTop')}</Text>
           </Pressable>
         ) : null}
         {granted && !isGuest ? (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Mini caption mode"
+            accessibilityLabel={t('recording.miniCaption')}
             onPress={openMiniCaption}
             hitSlop={10}
             style={({ pressed }) => [
@@ -761,7 +769,7 @@ export default function RecordingScreen() {
             ]}
           >
             <Ionicons name="contract-outline" size={19} color={colors.textPrimary} />
-            <Text style={styles.iconBtnLabel}>Mini</Text>
+            <Text style={styles.iconBtnLabel}>{t('recording.miniLabel')}</Text>
           </Pressable>
         ) : (
           <View style={styles.headerSpacer} />
@@ -781,16 +789,16 @@ export default function RecordingScreen() {
           <View style={styles.permIcon}>
             <Ionicons name="mic-outline" size={36} color={colors.textPrimary} />
           </View>
-          <Text style={styles.permTitle}>Microphone access needed</Text>
+          <Text style={styles.permTitle}>{t('recording.permissionTitle')}</Text>
           <Text style={styles.permBody}>
-            Youmi Lens uses the microphone to record lectures and generate transcripts.
+            {t('recording.permissionBody')}
             {permissionStatus === 'denied'
-              ? ' Turn it on for Youmi Lens in your iPad Settings.'
+              ? t('recording.permissionDeniedDetail')
               : ''}
           </Text>
           {error ? <Text style={styles.errorText}>{error}</Text> : null}
           <PrimaryButton
-            label={permissionStatus === 'denied' ? 'Open Settings' : 'Continue'}
+            label={permissionStatus === 'denied' ? t('recording.openSettings') : t('common.continue')}
             icon={permissionStatus === 'denied' ? 'settings-outline' : 'mic'}
             onPress={
               permissionStatus === 'denied'
@@ -809,7 +817,7 @@ export default function RecordingScreen() {
           <Animated.View pointerEvents="none" style={[styles.toast, { opacity: toast }]}>
             <Ionicons name="star" size={15} color={colors.pearlWhite} />
             <Text style={styles.toastText}>
-              Important moment marked at {formatClock(seconds)}
+              {t('recording.markedMoment', { time: formatClock(seconds) })}
             </Text>
           </Animated.View>
 
@@ -826,11 +834,14 @@ export default function RecordingScreen() {
                   latestFinalLine && !latestFinalLine.translationZh && !partialCaption,
                 )}
               />
-              {marks.length > 0 || (error && audioActive) ? (
+              {showWordLookupHint || marks.length > 0 || (error && audioActive) ? (
                 <View style={styles.feedInfoBar}>
+                  {showWordLookupHint ? (
+                    <Text style={styles.markHint}>{t('recording.wordLookupHint')}</Text>
+                  ) : null}
                   {marks.length > 0 ? (
                     <Text style={styles.markHint}>
-                      {marks.length} important moment{marks.length > 1 ? 's' : ''} marked
+                      {t(marks.length === 1 ? 'recording.marksCountOne' : 'recording.marksCountOther', { count: marks.length })}
                     </Text>
                   ) : null}
                   {error && audioActive ? <Text style={styles.errorText}>{error}</Text> : null}
@@ -854,19 +865,18 @@ export default function RecordingScreen() {
                       />
                     </View>
                     <View style={styles.stateHeaderText}>
-                      <Text style={styles.stateTitle}>Local recording</Text>
+                      <Text style={styles.stateTitle}>{t('recording.localRecording')}</Text>
                       <Text style={styles.stateStatus}>
                         {isPaused
-                          ? 'Paused'
+                          ? t('recording.paused')
                           : recordingSessionActive
-                            ? 'Recording to this device…'
-                            : 'Preparing microphone…'}
+                            ? t('recording.recordingToDevice')
+                            : t('recording.preparingMic')}
                       </Text>
                     </View>
                   </View>
                   <Text style={styles.stateBody}>
-                    Sign in to generate transcripts and summaries. Guest recordings are stored only
-                    on this device.
+                    {t('recording.guestBody')}
                   </Text>
                 </GlassCard>
               ) : (
@@ -877,34 +887,34 @@ export default function RecordingScreen() {
                   // whole start, or use Finish to leave cleanly.
                   <View style={styles.captionFallback}>
                     <Text style={styles.stateBody}>
-                      {error ?? 'Could not start the recording. Please try again.'}
+                      {error ?? t('recording.couldNotStart')}
                     </Text>
                     <SecondaryButton
-                      label="Retry Start Lecture"
+                      label={t('recording.retryStart')}
                       icon="refresh-outline"
                       onPress={() => void retryStart()}
                       style={styles.retryCaptionsButton}
                     />
                   </View>
                 ) : captionAreaState === 'captions_connecting' ? (
-                  <Text style={styles.stateBody}>Connecting live captions…</Text>
+                  <Text style={styles.stateBody}>{t('recording.connectingCaptions')}</Text>
                 ) : captionAreaState === 'captions_unavailable' ? (
                   // Only reachable while audio is active — the copy is accurate.
                   <View style={styles.captionFallback}>
                     <Text style={styles.stateBody}>
-                      {micStreamError ?? liveCaptionError ?? LIVE_CAPTIONS_UNAVAILABLE_MESSAGE}
+                      {micStreamError ?? liveCaptionError ?? t('recording.captionsUnavailable')}
                     </Text>
                     <SecondaryButton
-                      label="Retry captions"
+                      label={t('recording.retryCaptions')}
                       icon="refresh-outline"
                       onPress={() => void startCaptionPipeline()}
                       style={styles.retryCaptionsButton}
                     />
                   </View>
                 ) : (
-                  <Text style={styles.stateBody}>Preparing microphone…</Text>
+                  <Text style={styles.stateBody}>{t('recording.preparingMic')}</Text>
                 )}
-                {marks.length > 0 ? <Text style={styles.markHint}>{marks.length} important moment{marks.length > 1 ? 's' : ''} marked</Text> : null}
+                {marks.length > 0 ? <Text style={styles.markHint}>{t(marks.length === 1 ? 'recording.marksCountOne' : 'recording.marksCountOther', { count: marks.length })}</Text> : null}
                 {/* The start error owns the failed_start block above; only show
                     other recorder errors (pause/resume/finish) alongside a live session. */}
                 {error && audioActive ? <Text style={styles.errorText}>{error}</Text> : null}
@@ -917,7 +927,7 @@ export default function RecordingScreen() {
           {/* Actions — Mark Important · Pause/Resume · Finish */}
           <View style={styles.actions}>
             <SecondaryButton
-              label="Mark Important"
+              label={t('recording.markImportant')}
               icon="star"
               onPress={markImportant}
               disabled={!controlsEnabled}
@@ -926,7 +936,7 @@ export default function RecordingScreen() {
 
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={isReviewingResume || isPaused ? 'Resume recording' : 'Pause recording'}
+              accessibilityLabel={isReviewingResume || isPaused ? t('recording.resume') : t('recording.pause')}
               accessibilityState={{ disabled: !centralControlEnabled }}
               disabled={!centralControlEnabled}
               onPress={togglePause}
@@ -946,7 +956,7 @@ export default function RecordingScreen() {
               style={({ pressed }) => [styles.finishButton, finishing && styles.disabled, pressed && styles.pressed]}
             >
               <Ionicons name="checkmark-done" size={18} color={colors.pearlWhite} />
-              <Text style={styles.finishText}>{finishing ? 'Finishing…' : 'Finish lecture'}</Text>
+              <Text style={styles.finishText}>{finishing ? t('recording.finishing') : t('recording.finish')}</Text>
             </Pressable>
           </View>
 
@@ -961,14 +971,14 @@ export default function RecordingScreen() {
               <View style={styles.materialModalCard}>
                 <View style={styles.materialModalHeader}>
                   <View>
-                    <Text style={styles.materialModalTitle}>Use course material</Text>
+                    <Text style={styles.materialModalTitle}>{t('recording.materialPickerTitle')}</Text>
                     <Text style={styles.materialModalSubtitle} numberOfLines={1}>
-                      {course?.name ?? 'Current course'}
+                      {course?.name ? localizeSystemDefaultTitle(t, course.name) : t('recording.currentCourse')}
                     </Text>
                   </View>
                   <Pressable
                     accessibilityRole="button"
-                    accessibilityLabel="Close material picker"
+                    accessibilityLabel={t('recording.closeMaterialPicker')}
                     onPress={() => setMaterialPickerVisible(false)}
                     style={({ pressed }) => [styles.materialModalClose, pressed && styles.pressed]}
                   >
@@ -989,9 +999,9 @@ export default function RecordingScreen() {
                           <Ionicons name="document-text-outline" size={19} color={colors.textPrimary} />
                         </View>
                         <View style={styles.materialPickerBody}>
-                          <Text style={styles.materialPickerTitle} numberOfLines={1}>{material.title}</Text>
+                          <Text style={styles.materialPickerTitle} numberOfLines={1}>{localizeSystemDefaultTitle(t, material.title)}</Text>
                           <Text style={styles.materialPickerMeta}>
-                            {material.pageCount ? `${material.pageCount} pages` : 'PDF material'}
+                            {material.pageCount ? t('recording.pagesValue', { count: material.pageCount }) : t('recording.pdfMaterial')}
                           </Text>
                         </View>
                         <Ionicons name="chevron-forward" size={18} color={colors.textTertiary} />
@@ -1001,15 +1011,15 @@ export default function RecordingScreen() {
                 ) : (
                   <View style={styles.materialEmptyState}>
                     <Ionicons name="folder-open-outline" size={34} color={colors.mutedBlueGray} />
-                    <Text style={styles.materialEmptyTitle}>No materials in this course yet.</Text>
+                    <Text style={styles.materialEmptyTitle}>{t('recording.noMaterialsTitle')}</Text>
                     <Text style={styles.materialEmptyBody}>
-                      Import a PDF into this course, then use it during this lecture.
+                      {t('recording.noMaterialsBody')}
                     </Text>
                   </View>
                 )}
 
                 <SecondaryButton
-                  label={importingMaterial ? 'Importing…' : 'Import PDF'}
+                  label={importingMaterial ? t('recording.importing') : t('recording.importPdf')}
                   icon="cloud-upload-outline"
                   disabled={importingMaterial}
                   onPress={importAndOpenMaterial}

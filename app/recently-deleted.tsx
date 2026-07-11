@@ -14,6 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlassCard } from '@/components/GlassCard';
 import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
 import { formatShortDate } from '@/lib/format';
+import { useT, localizeSystemDefaultTitle } from '@/lib/i18n';
 import { useData } from '@/lib/store';
 
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
@@ -33,6 +34,7 @@ function DeletedItem({
   onRestore: () => void;
   onPermanentDelete: () => void;
 }) {
+  const t = useT();
   return (
     <GlassCard style={styles.itemCard}>
       <View style={styles.itemHeader}>
@@ -52,21 +54,21 @@ function DeletedItem({
       <View style={styles.itemActions}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={`Restore ${title}`}
+          accessibilityLabel={t('deleted.restoreItem', { title })}
           onPress={onRestore}
           style={({ pressed }) => [styles.actionBtn, styles.restoreBtn, pressed && styles.pressed]}
         >
           <Ionicons name="arrow-undo-outline" size={16} color={colors.deepNavy} />
-          <Text style={styles.restoreLabel}>Restore</Text>
+          <Text style={styles.restoreLabel}>{t('deleted.restore')}</Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={`Permanently delete ${title}`}
+          accessibilityLabel={t('deleted.deleteItem', { title })}
           onPress={onPermanentDelete}
           style={({ pressed }) => [styles.actionBtn, styles.deleteBtn, pressed && styles.pressed]}
         >
           <Ionicons name="trash-outline" size={16} color={colors.recordingRed} />
-          <Text style={styles.deleteLabel}>Delete Permanently</Text>
+          <Text style={styles.deleteLabel}>{t('deleted.deletePermanently')}</Text>
         </Pressable>
       </View>
     </GlassCard>
@@ -74,6 +76,7 @@ function DeletedItem({
 }
 
 export default function RecentlyDeletedScreen() {
+  const t = useT();
   const router = useRouter();
   const {
     deletedCourses,
@@ -96,12 +99,12 @@ export default function RecentlyDeletedScreen() {
 
   const confirmPermanentDelete = (kind: 'course' | 'lecture', id: string, title: string) => {
     Alert.alert(
-      'Permanently delete?',
-      `“${title}” will be permanently deleted. This cannot be undone.`,
+      t('deleted.confirmTitle'),
+      t('deleted.confirmBody', { title }),
       [
-        { text: 'Cancel', style: 'cancel' },
+        { text: t('common.cancel'), style: 'cancel' },
         {
-          text: 'Delete Permanently',
+          text: t('deleted.deletePermanently'),
           style: 'destructive',
           onPress: () => {
             if (kind === 'course') permanentlyDeleteCourse(id);
@@ -117,14 +120,14 @@ export default function RecentlyDeletedScreen() {
       <View style={styles.header}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Back"
+          accessibilityLabel={t('common.back')}
           onPress={() => router.back()}
           hitSlop={10}
           style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}
         >
           <Ionicons name="chevron-back" size={24} color={colors.deepNavy} />
         </Pressable>
-        <Text style={styles.headerTitle}>Recently Deleted</Text>
+        <Text style={styles.headerTitle}>{t('deleted.title')}</Text>
         <View style={styles.headerSpacer} />
       </View>
 
@@ -135,25 +138,25 @@ export default function RecentlyDeletedScreen() {
               <View style={styles.emptyIcon}>
                 <Ionicons name="trash-outline" size={30} color={colors.deepNavy} />
               </View>
-              <Text style={styles.emptyTitle}>No recently deleted items.</Text>
+              <Text style={styles.emptyTitle}>{t('deleted.empty')}</Text>
               <Text style={styles.emptyBody}>
-                Deleted courses and lectures appear here and can be restored.
+                {t('deleted.emptyBody')}
               </Text>
             </GlassCard>
           ) : (
             <>
               <Text style={styles.retentionNote}>
-                Items in Recently Deleted can be restored or permanently deleted.
+                {t('deleted.retentionNote')}
               </Text>
 
               {sortedCourses.length > 0 ? (
                 <View style={styles.section}>
-                  <Text style={styles.sectionTitle}>DELETED COURSES</Text>
+                  <Text style={styles.sectionTitle}>{t('deleted.courses')}</Text>
                   {sortedCourses.map((course) => (
                     <DeletedItem
                       key={course.id}
                       icon="library-outline"
-                      title={course.name}
+                      title={localizeSystemDefaultTitle(t, course.name)}
                       typeLabel="Course"
                       deletedAt={course.deletedAt ?? null}
                       onRestore={() => restoreCourse(course.id)}
@@ -167,12 +170,12 @@ export default function RecentlyDeletedScreen() {
 
               {sortedLectures.length > 0 ? (
                 <View style={styles.section}>
-                  <Text style={styles.sectionTitle}>DELETED LECTURES</Text>
+                  <Text style={styles.sectionTitle}>{t('deleted.lectures')}</Text>
                   {sortedLectures.map((lecture) => (
                     <DeletedItem
                       key={lecture.id}
                       icon="document-text-outline"
-                      title={lecture.title}
+                      title={localizeSystemDefaultTitle(t, lecture.title)}
                       typeLabel="Lecture"
                       deletedAt={lecture.deletedAt ?? null}
                       onRestore={() => restoreLecture(lecture.id)}

@@ -12,6 +12,7 @@ import { NativeLookupText } from '@/components/NativeLookupText';
 import { colors } from '@/constants/theme';
 import { historyLineCount, isNearBottom } from '@/lib/captionFeed.mjs';
 import type { LiveCaptionLine } from '@/lib/liveCaptions';
+import { useT } from '@/lib/i18n';
 
 export type CaptionHistoryFeedProps = {
   /** Finalized caption segments (oldest → newest), each optionally translated. */
@@ -46,6 +47,7 @@ export function CaptionHistoryFeed({
   partialTranslationZh,
   translatingPending,
 }: CaptionHistoryFeedProps) {
+  const t = useT();
   const listRef = useRef<FlatList<LiveCaptionLine>>(null);
   const [autoFollow, setAutoFollow] = useState(true);
 
@@ -126,11 +128,11 @@ export function CaptionHistoryFeed({
                 {currentZh}
               </Text>
             ) : translatingPending ? (
-              <Text style={styles.translating}>Translating…</Text>
+              <Text style={styles.translating}>{t('captions.translating')}</Text>
             ) : null}
           </>
         ) : (
-          <Text style={styles.listening}>Listening for speech…</Text>
+          <Text style={styles.listening}>{t('captions.listening')}</Text>
         )}
       </View>
     </View>

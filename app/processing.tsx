@@ -1,6 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -11,11 +10,8 @@ import { SecondaryButton } from '@/components/SecondaryButton';
 import { WorkspaceSidebar } from '@/components/WorkspaceSidebar';
 import { colors, fontSize, radius, spacing } from '@/constants/theme';
 import { formatDuration } from '@/lib/format';
-import { useAuth } from '@/lib/auth';
-import { startRemoteProcessing } from '@/lib/processRecording';
+import { useT, localizeSystemDefaultTitle } from '@/lib/i18n';
 import { useData } from '@/lib/store';
-import { fetchRemoteRecording } from '@/lib/syncRecording';
-import { uploadLectureAudio } from '@/lib/uploadRecording';
 
 type IndicatorState = 'done' | 'active' | 'pending' | 'failed';
 
@@ -32,14 +28,14 @@ function StepIndicator({ state }: { state: IndicatorState }) {
   return <View style={[styles.indicator, styles.indicatorPending]}><View style={styles.pendingDot} /></View>;
 }
 
-function remoteStatusLabel(status?: string) {
+function remoteStatusKey(status?: string) {
   switch (status) {
-    case 'queued': return 'Starting AI processing…';
-    case 'transcribing': return 'Transcribing lecture…';
-    case 'transcript_ready': return 'Generating summary…';
-    case 'done': return 'Processing complete';
-    case 'failed': return 'Processing failed';
-    default: return 'Waiting to start processing';
+    case 'queued': return 'processing.remote.queued';
+    case 'transcribing': return 'processing.remote.transcribing';
+    case 'transcript_ready': return 'processing.remote.transcriptReady';
+    case 'done': return 'processing.remote.done';
+    case 'failed': return 'processing.remote.failed';
+    default: return 'processing.remote.waiting';
   }
 }
 
@@ -47,166 +43,15 @@ export default function ProcessingScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ lectureId?: string }>();
   const { getLecture, getCourse, updateLecture } = useData();
-  const { session } = useAuth();
+  const t = useT();
 
+  // This screen is a viewer only. The durable upload → backend-processing →
+  // status-poll chain is owned by the app-level orchestrator (see
+  // lib/useProcessingOrchestrator.ts), so leaving this screen never abandons
+  // processing. The Retry buttons below just reset the relevant status; the
+  // orchestrator observes the change and re-drives the pending step.
   const lecture = getLecture(params.lectureId);
   const course = getCourse(lecture?.courseId);
-  const [uploadRetryCount, setUploadRetryCount] = useState(0);
-  const [processingRetryCount, setProcessingRetryCount] = useState(0);
-  const attemptedUploadFor = useRef<string | null>(null);
-  const startedProcessingFor = useRef<string | null>(null);
-
-  useEffect(() => {
-    if (!lecture) return;
-    if (lecture.uploadStatus === 'uploaded' || lecture.uploadStatus === 'uploading') return;
-    const attemptKey = `${lecture.id}:${uploadRetryCount}`;
-    if (attemptedUploadFor.current === attemptKey) return;
-    attemptedUploadFor.current = attemptKey;
-
-    if (!lecture.localAudioUri) {
-      updateLecture(lecture.id, { uploadStatus: 'upload_failed', uploadError: 'No local audio file is available for upload.' });
-      return;
-    }
-    if (!session?.access_token) {
-      updateLecture(lecture.id, { uploadStatus: 'upload_failed', uploadError: 'Please sign in to upload this recording.' });
-      return;
-    }
-    if (!lecture.remoteRecordingId) {
-      updateLecture(lecture.id, { uploadStatus: 'upload_failed', uploadError: 'Missing remote recording id. Create a new recording and try again.' });
-      return;
-    }
-
-    updateLecture(lecture.id, { uploadStatus: 'uploading', uploadError: undefined });
-    if (__DEV__) {
-      console.info('[processing] audio upload started', {
-        hasLocalAudio: Boolean(lecture.localAudioUri),
-        durationMillis: lecture.durationMillis,
-      });
-    }
-    void uploadLectureAudio({
-      localUri: lecture.localAudioUri,
-      lectureId: lecture.id,
-      recordingId: lecture.remoteRecordingId,
-      mimeType: 'audio/m4a',
-      accessToken: session.access_token,
-      durationMillis: lecture.durationMillis,
-      course: course?.name,
-      title: lecture.title,
-      liveTranscript: lecture.liveTranscript,
-    })
-      .then((result) => {
-        if (__DEV__) {
-          console.info('[processing] audio upload completed', {
-            size: result.size,
-            mime: result.mime,
-          });
-        }
-        updateLecture(lecture.id, {
-          uploadStatus: 'uploaded',
-          storagePath: result.storagePath,
-          uploadError: undefined,
-          uploadedAt: new Date().toISOString(),
-        });
-      })
-      .catch((error: unknown) => {
-        if (__DEV__) {
-          console.warn('[processing] audio upload failed', {
-            message: error instanceof Error ? error.message : 'unknown',
-          });
-        }
-        updateLecture(lecture.id, {
-          uploadStatus: 'upload_failed',
-          uploadError: error instanceof Error ? error.message : 'Upload failed.',
-        });
-      });
-  }, [course?.name, lecture, session?.access_token, updateLecture, uploadRetryCount]);
-
-  useEffect(() => {
-    if (!lecture || lecture.uploadStatus !== 'uploaded') return;
-    if (!session?.access_token || !lecture.remoteRecordingId) return;
-    if (lecture.processingStatus === 'ready') return;
-    const attemptKey = `${lecture.id}:${processingRetryCount}`;
-    if (startedProcessingFor.current === attemptKey) return;
-    startedProcessingFor.current = attemptKey;
-
-    updateLecture(lecture.id, { processingStatus: 'processing', processingError: undefined });
-    if (__DEV__) console.info('[processing] backend processing requested');
-    void startRemoteProcessing({
-      remoteRecordingId: lecture.remoteRecordingId,
-      accessToken: session.access_token,
-    }).catch((error: unknown) => {
-      if (__DEV__) {
-        console.warn('[processing] backend processing request failed', {
-          message: error instanceof Error ? error.message : 'unknown',
-        });
-      }
-      updateLecture(lecture.id, {
-        processingStatus: 'failed',
-        processingError: error instanceof Error ? error.message : 'Could not start processing.',
-      });
-    });
-  }, [lecture, processingRetryCount, session?.access_token, updateLecture]);
-
-  useEffect(() => {
-    if (!lecture || lecture.processingStatus !== 'processing') return;
-    if (!session?.access_token || !lecture.remoteRecordingId) return;
-
-    let cancelled = false;
-    let attempts = 0;
-    const maxAttempts = 80;
-
-    const poll = async () => {
-      attempts += 1;
-      try {
-        const remote = await fetchRemoteRecording({
-          remoteRecordingId: lecture.remoteRecordingId!,
-          accessToken: session.access_token,
-          userId: session.user.id,
-        });
-        if (cancelled) return;
-
-        const patch = {
-          transcript: remote.transcript ?? '',
-          transcriptZh: remote.transcript_zh ?? '',
-          summaryEn: remote.summary_en ?? '',
-          summaryZh: remote.summary_zh ?? '',
-          remoteAiStatus: remote.ai_status ?? undefined,
-          remoteAiError: remote.ai_error ?? undefined,
-          processingError: remote.ai_error ?? undefined,
-          lastSyncedAt: new Date().toISOString(),
-        };
-
-        if (remote.ai_status === 'failed') {
-          updateLecture(lecture.id, { ...patch, processingStatus: 'failed' });
-          return;
-        }
-
-        if (remote.ai_status === 'done' || (remote.transcript && remote.summary_en && remote.summary_zh)) {
-          updateLecture(lecture.id, { ...patch, processingStatus: 'ready' });
-          return;
-        }
-
-        updateLecture(lecture.id, patch);
-        if (attempts >= maxAttempts) {
-          updateLecture(lecture.id, {
-            processingStatus: 'failed',
-            processingError: 'Processing is taking longer than expected. Please retry in a moment.',
-          });
-          return;
-        }
-        setTimeout(poll, 3000);
-      } catch (error) {
-        if (cancelled) return;
-        updateLecture(lecture.id, {
-          processingStatus: 'failed',
-          processingError: error instanceof Error ? error.message : 'Could not sync processing status.',
-        });
-      }
-    };
-
-    void poll();
-    return () => { cancelled = true; };
-  }, [lecture, session?.access_token, session?.user.id, updateLecture]);
 
   const uploadStatus = lecture?.uploadStatus ?? 'not_uploaded';
   const processingStatus = lecture?.processingStatus ?? 'not_started';
@@ -228,56 +73,56 @@ export default function ProcessingScreen() {
             <View style={[styles.headerIcon, processingDone && styles.headerIconDone]}>
               <Ionicons name={processingDone ? 'checkmark-done' : 'sparkles-outline'} size={30} color={processingDone ? colors.pearlWhite : colors.deepNavy} />
             </View>
-            <Text style={styles.title}>{processingDone ? 'Lecture ready' : 'Processing your lecture'}</Text>
-            <Text style={styles.subtitle}>{processingDone ? 'Your transcript and summaries are ready to review.' : 'You can return later to check the result.'}</Text>
+            <Text style={styles.title}>{processingDone ? t('processing.titleDone') : t('processing.title')}</Text>
+            <Text style={styles.subtitle}>{processingDone ? t('processing.subtitleDone') : t('processing.subtitle')}</Text>
           </View>
 
           <GlassCard elevated>
             <View style={styles.capturedHeader}>
-              <Text style={styles.capturedTitle}>{lecture?.title ?? 'Untitled Lecture'}</Text>
-              <View style={styles.localPill}><Text style={styles.localPillText}>Saved on device</Text></View>
+              <Text style={styles.capturedTitle}>{localizeSystemDefaultTitle(t, lecture?.title) ?? t('processing.untitledLecture')}</Text>
+              <View style={styles.localPill}><Text style={styles.localPillText}>{t('processing.savedOnDevice')}</Text></View>
             </View>
             <View style={styles.metaGrid}>
-              <View style={styles.meta}><Text style={styles.metaLabel}>COURSE</Text><Text style={styles.metaValue}>{course?.name ?? 'Lecture'}</Text></View>
-              <View style={styles.meta}><Text style={styles.metaLabel}>DURATION</Text><Text style={styles.metaValue}>{formatDuration(lecture?.durationMillis ?? 0)}</Text></View>
-              <View style={styles.meta}><Text style={styles.metaLabel}>MARKED MOMENTS</Text><Text style={styles.metaValue}>{lecture?.markedTimestamps.length ?? 0}</Text></View>
-              <View style={styles.meta}><Text style={styles.metaLabel}>RECORDED</Text><Text style={styles.metaValue}>{lecture ? new Date(lecture.date).toLocaleString([], { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}</Text></View>
+              <View style={styles.meta}><Text style={styles.metaLabel}>{t('processing.meta.course')}</Text><Text style={styles.metaValue}>{course?.name ? localizeSystemDefaultTitle(t, course.name) : t('processing.defaultCourse')}</Text></View>
+              <View style={styles.meta}><Text style={styles.metaLabel}>{t('processing.meta.duration')}</Text><Text style={styles.metaValue}>{formatDuration(lecture?.durationMillis ?? 0)}</Text></View>
+              <View style={styles.meta}><Text style={styles.metaLabel}>{t('processing.meta.markedMoments')}</Text><Text style={styles.metaValue}>{lecture?.markedTimestamps.length ?? 0}</Text></View>
+              <View style={styles.meta}><Text style={styles.metaLabel}>{t('processing.meta.recorded')}</Text><Text style={styles.metaValue}>{lecture ? new Date(lecture.date).toLocaleString([], { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}</Text></View>
             </View>
           </GlassCard>
 
           <GlassCard padding={spacing.xs}>
             <View style={styles.stepRow}>
               <StepIndicator state="done" />
-              <View style={styles.stepText}><Text style={styles.stepTitle}>Recording captured</Text><Text style={styles.stepSubtitle}>Audio saved on this iPad.</Text></View>
+              <View style={styles.stepText}><Text style={styles.stepTitle}>{t('processing.step.capturedTitle')}</Text><Text style={styles.stepSubtitle}>{t('processing.step.capturedSubtitle')}</Text></View>
             </View>
             <View style={styles.stepDivider} />
             <View style={styles.stepRow}>
               <StepIndicator state={uploadStatus === 'uploaded' ? 'done' : uploadStatus === 'uploading' ? 'active' : uploadStatus === 'upload_failed' ? 'failed' : 'pending'} />
               <View style={styles.stepText}>
-                <Text style={styles.stepTitle}>{uploadStatus === 'uploaded' ? 'Audio uploaded' : uploadStatus === 'uploading' ? 'Uploading audio…' : uploadStatus === 'upload_failed' ? 'Upload failed' : 'Waiting to upload audio'}</Text>
-                <Text style={styles.stepSubtitle}>{uploadStatus === 'uploaded' ? 'Sent to secure storage.' : uploadStatus === 'upload_failed' ? lecture?.uploadError ?? 'Please try again.' : 'Sending the local recording to secure storage.'}</Text>
-                {uploadStatus === 'upload_failed' ? <SecondaryButton label="Retry Upload" icon="refresh-outline" onPress={() => { if (lecture) updateLecture(lecture.id, { uploadStatus: 'not_uploaded', uploadError: undefined }); setUploadRetryCount((count) => count + 1); }} style={styles.retryButton} /> : null}
+                <Text style={styles.stepTitle}>{uploadStatus === 'uploaded' ? t('processing.step.audioUploaded') : uploadStatus === 'uploading' ? t('processing.step.uploadingAudio') : uploadStatus === 'upload_failed' ? t('processing.step.uploadFailed') : t('processing.step.waitingUpload')}</Text>
+                <Text style={styles.stepSubtitle}>{uploadStatus === 'uploaded' ? t('processing.step.sentSecure') : uploadStatus === 'upload_failed' ? lecture?.uploadError ?? t('processing.step.tryAgain') : t('processing.step.sendingSecure')}</Text>
+                {uploadStatus === 'upload_failed' ? <SecondaryButton label={t('processing.step.retryUpload')} icon="refresh-outline" onPress={() => { if (lecture) updateLecture(lecture.id, { uploadStatus: 'not_uploaded', uploadError: undefined }); }} style={styles.retryButton} /> : null}
               </View>
             </View>
             <View style={styles.stepDivider} />
             <View style={styles.stepRow}>
               <StepIndicator state={remoteStepState} />
               <View style={styles.stepText}>
-                <Text style={styles.stepTitle}>{processingStatus === 'failed' ? 'Processing failed' : remoteStatusLabel(lecture?.remoteAiStatus)}</Text>
-                <Text style={styles.stepSubtitle}>{processingStatus === 'failed' ? lecture?.processingError ?? 'Please retry processing.' : processingStatus === 'ready' ? 'Transcript and summaries are ready.' : lecture?.remoteAiError ?? 'Waiting for backend processing updates'}</Text>
-                {processingStatus === 'failed' ? <SecondaryButton label="Retry Processing" icon="refresh-outline" onPress={() => { if (lecture) updateLecture(lecture.id, { processingStatus: 'not_started', processingError: undefined }); setProcessingRetryCount((count) => count + 1); }} style={styles.retryButton} /> : null}
+                <Text style={styles.stepTitle}>{processingStatus === 'failed' ? t('processing.remote.failed') : t(remoteStatusKey(lecture?.remoteAiStatus))}</Text>
+                <Text style={styles.stepSubtitle}>{processingStatus === 'failed' ? lecture?.processingError ?? t('processing.step.retryProcessingBody') : processingStatus === 'ready' ? t('processing.step.readyBody') : lecture?.remoteAiError ?? t('processing.step.waitingUpdates')}</Text>
+                {processingStatus === 'failed' ? <SecondaryButton label={t('processing.step.retryProcessing')} icon="refresh-outline" onPress={() => { if (lecture) updateLecture(lecture.id, { processingStatus: 'not_started', processingError: undefined }); }} style={styles.retryButton} /> : null}
               </View>
             </View>
             <View style={styles.stepDivider} />
             <View style={styles.stepRow}>
               <StepIndicator state={processingDone ? 'done' : 'pending'} />
-              <View style={styles.stepText}><Text style={styles.stepTitle}>Ready to review</Text><Text style={styles.stepSubtitle}>Summary, key terms and bilingual notes.</Text></View>
+              <View style={styles.stepText}><Text style={styles.stepTitle}>{t('processing.step.readyTitle')}</Text><Text style={styles.stepSubtitle}>{t('processing.step.readySubtitle')}</Text></View>
             </View>
           </GlassCard>
 
           <View style={styles.actions}>
-            {processingDone ? <PrimaryButton label="View Lecture" icon="document-text" onPress={viewLecture} /> : null}
-            <SecondaryButton label="Back to Lectures" icon="chevron-back" onPress={backToLectures} />
+            {processingDone ? <PrimaryButton label={t('processing.viewLecture')} icon="document-text" onPress={viewLecture} /> : null}
+            <SecondaryButton label={t('processing.backToLectures')} icon="chevron-back" onPress={backToLectures} />
           </View>
         </View>
       </ScrollView>
