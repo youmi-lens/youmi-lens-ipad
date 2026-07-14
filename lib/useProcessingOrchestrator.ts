@@ -75,6 +75,9 @@ export function useProcessingOrchestrator(): void {
         course: getCourse(lecture.courseId)?.name,
         title: lecture.title,
         liveTranscript: lecture.liveTranscript,
+        translatedLiveTranscript: lecture.translatedLiveTranscript,
+        sourceLanguage: lecture.sourceLanguage ?? 'en',
+        translationLanguage: lecture.translationLanguage ?? 'zh-Hans',
       })
         .then((result) => {
           updateLecture(lectureId, {

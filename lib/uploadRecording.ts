@@ -10,6 +10,9 @@ type UploadLectureAudioInput = {
   course?: string;
   title?: string;
   liveTranscript?: string;
+  translatedLiveTranscript?: string;
+  sourceLanguage?: string;
+  translationLanguage?: string;
 };
 
 type UploadLectureAudioResult = {
@@ -35,6 +38,9 @@ export async function uploadLectureAudio({
   course,
   title,
   liveTranscript,
+  translatedLiveTranscript,
+  sourceLanguage,
+  translationLanguage,
 }: UploadLectureAudioInput): Promise<UploadLectureAudioResult> {
   if (!API_BASE_URL) throw new Error('Missing API base URL.');
   if (!localUri) throw new Error('No local audio file is available for upload.');
@@ -57,6 +63,9 @@ export async function uploadLectureAudio({
     formData.append('live_transcript', liveTranscript);
     formData.append('live_transcript_raw', liveTranscript);
   }
+  if (translatedLiveTranscript) formData.append('translated_live_transcript', translatedLiveTranscript);
+  if (sourceLanguage) formData.append('source_language', sourceLanguage);
+  if (translationLanguage) formData.append('translation_language', translationLanguage);
 
   const response = await fetch(`${API_BASE_URL}/api/upload-audio`, {
     method: 'POST',

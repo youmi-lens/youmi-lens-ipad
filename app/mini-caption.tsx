@@ -314,7 +314,7 @@ export default function MiniCaptionScreen() {
         : status === 'error' || status === 'unavailable'
           ? t('mini.unavailable')
           : t('mini.listeningStatus');
-  const translationLine = partialTranslationZh || latestFinalLine?.translationZh;
+  const translationLine = partialTranslationZh || latestFinalLine?.translatedText || latestFinalLine?.translationZh;
   const translationPending = Boolean(latestFinalLine && !translationLine && !partialCaption);
   const displayMillis = currentDurationMillis > 0 ? currentDurationMillis : fallbackMillis;
   const seconds = Math.floor(displayMillis / 1000);
@@ -384,6 +384,7 @@ export default function MiniCaptionScreen() {
     ? {
         id: partialCaption ? 'active_interim' : latestFinalLine?.id ?? 'active_current',
         text: currentActiveEnglish,
+        translatedText: translationLine,
         translationZh: translationLine,
         isActive: true,
       }
@@ -392,6 +393,7 @@ export default function MiniCaptionScreen() {
     ...finalizedFeedLines.map((line) => ({
       id: line.id,
       text: line.text,
+      translatedText: line.translatedText ?? line.translationZh,
       translationZh: line.translationZh,
       isActive: false,
     })),
@@ -611,7 +613,7 @@ export default function MiniCaptionScreen() {
                     >
                       {line.text}
                     </NativeLookupText>
-                    {line.translationZh ? (
+                    {(line.translatedText ?? line.translationZh) ? (
                       <Text
                         style={[
                           styles.captionTranslation,
@@ -622,7 +624,7 @@ export default function MiniCaptionScreen() {
                           },
                         ]}
                       >
-                        {line.translationZh}
+                        {line.translatedText ?? line.translationZh}
                       </Text>
                     ) : line.isActive && translationPending ? (
                       <Text style={[styles.captionTranslationPending, { fontSize: scaled.chinese }]}>{t('mini.translating')}</Text>

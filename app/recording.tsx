@@ -30,6 +30,8 @@ import { GUEST_MAX_RECORDING_SECONDS, incrementGuestRecordingsUsed } from '@/lib
 import { pickAndImportPdf } from '@/lib/importMaterial';
 import { logLiveCaptionEvent, logLiveCaptionUnavailable } from '@/lib/liveCaptionDiagnostics';
 import type { PersistedCaptionLine } from '@/lib/models';
+import { loadContentLanguagePreferences } from '@/lib/contentLanguagePreferences';
+import { resolveLectureLanguagePair } from '@/lib/contentLanguages.mjs';
 import { useLiveCaptions } from '@/lib/liveCaptions';
 import { getLiveMicStreamStatus, startMicStream, stopMicStream } from '@/lib/liveMicStream';
 import { useRecordingNotes } from '@/lib/recordingNotes';
@@ -82,6 +84,16 @@ export default function RecordingScreen() {
   const resumeLectureId = (params.lectureId ?? '').trim() || null;
   const resumeLecture = resumeLectureId ? getLecture(resumeLectureId) : undefined;
   const isResume = Boolean(resumeLecture);
+  const initialLanguagePair = resolveLectureLanguagePair(resumeLecture);
+  const [sourceLanguage, setSourceLanguage] = useState(initialLanguagePair.sourceLanguage);
+  const [translationLanguage, setTranslationLanguage] = useState(initialLanguagePair.translationLanguage);
+  const [contentPreferencesLoaded, setContentPreferencesLoaded] = useState(Boolean(resumeLecture));
+  useEffect(() => {
+    if (resumeLecture) { setContentPreferencesLoaded(true); return; }
+    void loadContentLanguagePreferences().then((pair) => {
+      setSourceLanguage(pair.sourceLanguage); setTranslationLanguage(pair.translationLanguage);
+    }).finally(() => setContentPreferencesLoaded(true));
+  }, [resumeLecture]);
   const course = getCourse(resumeLecture?.courseId ?? params.courseId);
   const courseName = course?.name ?? 'Lecture';
 
@@ -186,6 +198,7 @@ export default function RecordingScreen() {
   const priorFinalizedAsLive = priorCaptionLinesRef.current.map((line) => ({
     id: line.id,
     text: line.text,
+    translatedText: line.translatedText ?? line.translationZh,
     translationZh: line.translationZh,
     isFinal: true,
     createdAt: '',
@@ -220,9 +233,10 @@ export default function RecordingScreen() {
       const lines: PersistedCaptionLine[] = feedLinesRef.current.map((line) => ({
         id: line.id,
         text: line.text,
+        translatedText: line.translatedText ?? line.translationZh,
         translationZh: line.translationZh,
       }));
-      const { en, zh } = captionsToTranscript(lines);
+      const { en, zh, translated } = captionsToTranscript(lines);
       const mergedMarks = [
         ...priorMarksRef.current,
         ...marksRef.current.map((mark) => mark.timestampMillis),
@@ -257,6 +271,9 @@ export default function RecordingScreen() {
         markedTimestamps: mergedMarks,
         liveTranscript: en,
         liveTranscriptZh: zh,
+        translatedLiveTranscript: translated,
+        sourceLanguage,
+        translationLanguage,
         liveCaptionLines: lines,
         notes: draftNotesRef.current,
         noteStrokes: draftStrokesRef.current,
@@ -267,7 +284,7 @@ export default function RecordingScreen() {
       lastProgressSaveRef.current = Date.now();
       return true;
     },
-    [isGuest, pendingLectureId, saveInProgressLecture],
+    [isGuest, pendingLectureId, saveInProgressLecture, sourceLanguage, translationLanguage],
   );
   const persistProgressRef = useRef(persistProgress);
   persistProgressRef.current = persistProgress;
@@ -341,7 +358,7 @@ export default function RecordingScreen() {
     resetCaptions();
     setMicStreamError(null);
     firstPcmFrameLoggedRef.current = false;
-    await startLiveCaptions(48_000);
+    await startLiveCaptions(48_000, sourceLanguage, translationLanguage);
     const micStatus = await startMicStream({
       sampleRate: 48_000,
       onPcm16Frame: (frame) => {
@@ -425,7 +442,7 @@ export default function RecordingScreen() {
   // granted. The local recorder starts first so it owns the audio session;
   // the live caption mic stream then attaches on top without being clobbered.
   useEffect(() => {
-    if (autoStarted.current || !granted) return;
+    if (autoStarted.current || !granted || !contentPreferencesLoaded) return;
     // Resumed lecture: wait for the existing central Pause/Continue control
     // before the recorder/mic/captions start, so opening it is a safe review.
     if (isResume && !continueRequested) return;
@@ -438,7 +455,7 @@ export default function RecordingScreen() {
     });
   // The recorder and caption starters intentionally run once after permission resolves.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [granted, isGuest, isResume, continueRequested]);
+  }, [granted, isGuest, isResume, continueRequested, contentPreferencesLoaded]);
 
   // Keep this fresh for the mount-once AppState listener below.
   isRecordingRef.current = isRecording;
@@ -603,9 +620,10 @@ export default function RecordingScreen() {
     const lines: PersistedCaptionLine[] = feedLinesRef.current.map((line) => ({
       id: line.id,
       text: line.text,
+      translatedText: line.translatedText ?? line.translationZh,
       translationZh: line.translationZh,
     }));
-    const { en, zh } = captionsToTranscript(lines);
+    const { en, zh, translated } = captionsToTranscript(lines);
     const mergedMarks = [
       ...priorMarksRef.current,
       ...marks.map((mark) => mark.timestampMillis),
@@ -652,6 +670,9 @@ export default function RecordingScreen() {
         markedTimestamps: mergedMarks,
         liveTranscript: en,
         liveTranscriptZh: zh,
+        translatedLiveTranscript: translated,
+        sourceLanguage,
+        translationLanguage,
         liveCaptionLines: lines,
         notes: draftNotes,
         noteStrokes: draftStrokes,
@@ -667,6 +688,9 @@ export default function RecordingScreen() {
         markedTimestamps: mergedMarks,
         liveTranscript: en,
         liveTranscriptZh: zh,
+        translatedLiveTranscript: translated,
+        sourceLanguage,
+        translationLanguage,
         liveCaptionLines: lines,
         notes: draftNotes,
         noteStrokes: draftStrokes,

@@ -27,11 +27,14 @@ import { exportLectureNotesPdf, hasExportableLectureNotes } from '@/lib/exportLe
 import { formatClock, formatDate, formatDuration } from '@/lib/format';
 import { useT, localizeSystemDefaultTitle } from '@/lib/i18n';
 import {
-  getLectureSummaryByLanguage,
-  getLectureTranscriptByLanguage,
+  getSourceSummary,
+  getSourceTranscript,
   getSummarySectionLabel,
   getTranscriptSectionLabel,
+  getTranslatedSummary,
+  getTranslatedTranscript,
 } from '@/lib/languageContent';
+import { resolveLectureLanguagePair, shouldTranslate } from '@/lib/contentLanguages.mjs';
 import type { NoteStroke } from '@/lib/models';
 import { useData } from '@/lib/store';
 
@@ -94,11 +97,14 @@ export default function LectureDetailScreen() {
     );
   }
 
-  // V1 transcript + summary are fixed English-first / Chinese-second.
-  const transcriptEn = getLectureTranscriptByLanguage(lecture, 'en');
-  const transcriptZh = getLectureTranscriptByLanguage(lecture, 'zh');
-  const summaryEn = getLectureSummaryByLanguage(lecture, 'en');
-  const summaryZh = getLectureSummaryByLanguage(lecture, 'zh');
+  // Transcript + summary follow the lecture's persisted source/translation pair.
+  const { sourceLanguage, translationLanguage } = resolveLectureLanguagePair(lecture);
+  const hasTranslation = shouldTranslate(sourceLanguage, translationLanguage);
+  const sourceTranscript = getSourceTranscript(lecture);
+  const translatedTranscript = getTranslatedTranscript(lecture);
+  const sourceSummary = getSourceSummary(lecture);
+  const translatedSummary = getTranslatedSummary(lecture);
+  const cjk = (lang: string) => lang === 'zh-Hans' || lang === 'ja' || lang === 'ko';
   const typedNotes = lecture.notes.trim();
   const strokeCount = lecture.noteStrokes?.length ?? 0;
   const notesHasContent = typedNotes.length > 0 || strokeCount > 0;
@@ -260,52 +266,44 @@ export default function LectureDetailScreen() {
               <GlassCard>
                 <BlockHeader
                   icon="document-text-outline"
-                  label={getTranscriptSectionLabel('en')}
+                  label={getTranscriptSectionLabel(sourceLanguage)}
                 />
-                {transcriptEn ? (
-                  <NativeLookupText style={styles.bodyText}>{transcriptEn}</NativeLookupText>
+                {sourceTranscript ? (
+                  <NativeLookupText style={styles.bodyText}>{sourceTranscript}</NativeLookupText>
                 ) : (
                   <Text style={styles.emptyInline}>{t('lecture.transcriptPending')}</Text>
                 )}
               </GlassCard>
-              <GlassCard>
-                <BlockHeader icon="language-outline" label={getTranscriptSectionLabel('zh')} />
-                {transcriptZh ? (
-                  <Text style={[styles.bodyText, styles.bodyZh]}>{transcriptZh}</Text>
-                ) : (
-                  <Text style={styles.emptyInline}>
-                    Chinese transcript has not been generated yet.
+              {hasTranslation && translatedTranscript ? (
+                <GlassCard>
+                  <BlockHeader icon="language-outline" label={getTranscriptSectionLabel(translationLanguage)} />
+                  <Text style={[styles.bodyText, cjk(translationLanguage) && styles.bodyZh]}>
+                    {translatedTranscript}
                   </Text>
-                )}
-              </GlassCard>
+                </GlassCard>
+              ) : null}
             </>
           )}
 
-          {/* ---- Summary — English then Chinese (fixed for V1) ---- */}
+          {/* ---- Summary — source language, then translation when source != target ---- */}
           {tab === 'Summary' && (
             <>
-              {summaryEn || summaryZh ? (
+              {sourceSummary || translatedSummary ? (
                 <View style={[styles.summaryGrid, compactLayout && styles.summaryGridCompact]}>
                   <GlassCard>
-                    <BlockHeader icon="language-outline" label={getSummarySectionLabel('en')} />
-                    {summaryEn ? (
-                      <Text style={styles.bodyText}>{summaryEn}</Text>
+                    <BlockHeader icon="language-outline" label={getSummarySectionLabel(sourceLanguage)} />
+                    {sourceSummary ? (
+                      <Text style={[styles.bodyText, cjk(sourceLanguage) && styles.bodyZh]}>{sourceSummary}</Text>
                     ) : (
-                      <Text style={styles.emptyInline}>
-                        English summary has not been generated yet.
-                      </Text>
+                      <Text style={styles.emptyInline}>{t('lecture.summaryPending')}</Text>
                     )}
                   </GlassCard>
-                  <GlassCard>
-                    <BlockHeader icon="chatbubbles-outline" label={getSummarySectionLabel('zh')} />
-                    {summaryZh ? (
-                      <Text style={[styles.bodyText, styles.bodyZh]}>{summaryZh}</Text>
-                    ) : (
-                      <Text style={styles.emptyInline}>
-                        Chinese summary has not been generated yet.
-                      </Text>
-                    )}
-                  </GlassCard>
+                  {hasTranslation && translatedSummary ? (
+                    <GlassCard>
+                      <BlockHeader icon="chatbubbles-outline" label={getSummarySectionLabel(translationLanguage)} />
+                      <Text style={[styles.bodyText, cjk(translationLanguage) && styles.bodyZh]}>{translatedSummary}</Text>
+                    </GlassCard>
+                  ) : null}
                 </View>
               ) : (
                 <GlassCard>

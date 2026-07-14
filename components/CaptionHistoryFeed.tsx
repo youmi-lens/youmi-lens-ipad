@@ -58,7 +58,7 @@ export function CaptionHistoryFeed({
   const currentFinal = !hasLive && lines.length > 0 ? lines[lines.length - 1] : null;
 
   const currentEnglish = hasLive ? partialEnglish : (currentFinal?.text ?? '');
-  const currentZh = hasLive ? partialTranslationZh : (currentFinal?.translationZh ?? '');
+  const currentZh = hasLive ? partialTranslationZh : (currentFinal?.translatedText ?? currentFinal?.translationZh ?? '');
   const hasCurrent = currentEnglish.trim().length > 0;
 
   const scrollHistoryToEnd = useCallback((animated: boolean) => {
@@ -84,9 +84,9 @@ export function CaptionHistoryFeed({
       <NativeLookupText style={styles.enHistory}>
         {item.text}
       </NativeLookupText>
-      {item.translationZh ? (
+      {(item.translatedText ?? item.translationZh) ? (
         <Text selectable style={styles.zhHistory}>
-          {item.translationZh}
+          {item.translatedText ?? item.translationZh}
         </Text>
       ) : null}
     </View>

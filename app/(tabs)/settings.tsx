@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import Constants from 'expo-constants';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { ComponentProps, useCallback, useState } from 'react';
+import { ComponentProps, useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -15,6 +15,10 @@ import { useI18n } from '@/lib/i18n';
 import { fetchPlanStatus, PlanStatus, safeAccessLabel } from '@/lib/planStatus';
 import { purchaseService } from '@/lib/purchases';
 import { useData } from '@/lib/store';
+import { loadContentLanguagePreferences, saveSourceLanguage, saveTranslationLanguage } from '@/lib/contentLanguagePreferences';
+import type { ContentLanguage } from '@/lib/models';
+
+const contentLanguages: ContentLanguage[] = ['en', 'zh-Hans', 'ja', 'fr', 'es', 'ko'];
 
 type IconName = ComponentProps<typeof Ionicons>['name'];
 
@@ -61,6 +65,23 @@ export default function SettingsScreen() {
   const { user, username, signOut, session, updateUsername, clearLocalSession, isGuest, exitGuest } = useAuth();
   const { t, language, setLanguage, languages } = useI18n();
   const [langModalVisible, setLangModalVisible] = useState(false);
+  const [contentModal, setContentModal] = useState<'source' | 'translation' | null>(null);
+  const [sourceLanguage, setSourceLanguage] = useState<ContentLanguage>('en');
+  const [translationLanguage, setTranslationLanguage] = useState<ContentLanguage>('zh-Hans');
+  useEffect(() => { void loadContentLanguagePreferences().then((value) => {
+    setSourceLanguage(value.sourceLanguage); setTranslationLanguage(value.translationLanguage);
+  }); }, []);
+  const contentLabel = (code: ContentLanguage) => t(`settings.language.content.${code}`);
+  const selectContentLanguage = async (kind: 'source' | 'translation', option: ContentLanguage) => {
+    if (kind === 'source') {
+      await saveSourceLanguage(option);
+      setSourceLanguage(option);
+    } else {
+      await saveTranslationLanguage(option);
+      setTranslationLanguage(option);
+    }
+    setContentModal(null);
+  };
   const currentLanguageLabel = languages.find((option) => option.code === language)?.nativeLabel ?? 'English';
   // App version read from config (never hardcoded); '' if unavailable.
   const appVersion = Constants.expoConfig?.version ?? '';
@@ -274,8 +295,8 @@ export default function SettingsScreen() {
             <View style={styles.column}>
               <GlassCard padding={0}>
                 <Text style={styles.cardHeading}>{t('settings.language.heading')}</Text>
-                <SettingRow icon="mic-outline" label={t('settings.language.caption')} value={t('settings.language.english')} onPress={() => Alert.alert(t('settings.language.captionAlertTitle'), t('settings.language.captionAlertBody'))} />
-                <SettingRow icon="language-outline" label={t('settings.language.translation')} value="中文（简体）" />
+                <SettingRow icon="mic-outline" label={t('settings.language.caption')} value={contentLabel(sourceLanguage)} onPress={() => setContentModal('source')} />
+                <SettingRow icon="language-outline" label={t('settings.language.translation')} value={contentLabel(translationLanguage)} onPress={() => setContentModal('translation')} />
                 <SettingRow icon="globe-outline" label={t('settings.language.app')} value={currentLanguageLabel} onPress={() => setLangModalVisible(true)} last />
               </GlassCard>
 
@@ -327,6 +348,21 @@ export default function SettingsScreen() {
                 last={index === languages.length - 1}
               />
             ))}
+          </Pressable>
+        </Pressable>
+      </Modal>
+      <Modal visible={contentModal !== null} transparent animationType="fade" onRequestClose={() => setContentModal(null)}>
+        <Pressable style={styles.langOverlay} onPress={() => setContentModal(null)}>
+          <Pressable style={styles.langSheet} onPress={() => {}}>
+            <View style={styles.langSheetHeader}>
+              <Text style={styles.langSheetTitle}>{contentModal === 'source' ? t('settings.language.caption') : t('settings.language.translation')}</Text>
+            </View>
+            {contentLanguages.map((option, index) => {
+              const selected = contentModal === 'source' ? sourceLanguage === option : translationLanguage === option;
+              return <SettingRow key={option} icon={selected ? 'checkmark-circle' : 'ellipse-outline'} label={contentLabel(option)} onPress={() => {
+                if (contentModal) void selectContentLanguage(contentModal, option);
+              }} last={index === contentLanguages.length - 1} />;
+            })}
           </Pressable>
         </Pressable>
       </Modal>

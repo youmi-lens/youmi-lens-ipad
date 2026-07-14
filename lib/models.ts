@@ -17,6 +17,8 @@ export type LectureStatus =
   /** Mock processing finished — sample notes available. */
   | 'ready_mock';
 
+export type ContentLanguage = 'en' | 'zh-Hans' | 'ja' | 'fr' | 'es' | 'ko';
+
 /**
  * A finalized bilingual caption line persisted so an in-progress lecture can be
  * reopened and its history shown again (and appended to). Mirrors the live
@@ -25,6 +27,7 @@ export type LectureStatus =
 export type PersistedCaptionLine = {
   id: string;
   text: string;
+  translatedText?: string;
   translationZh?: string;
 };
 
@@ -124,6 +127,8 @@ export type Lecture = {
   /** Important moments, as millisecond offsets into the recording. */
   markedTimestamps: number[];
   status: LectureStatus;
+  sourceLanguage?: ContentLanguage;
+  translationLanguage?: ContentLanguage;
 
   // ---- Remote study content (filled in after backend processing) ----
   // Youmi Lens V1: English lecture audio with Chinese study support. The
@@ -134,15 +139,21 @@ export type Lecture = {
   transcript?: string;
   /** Chinese transcript, translated backend-side from the English transcript. */
   transcriptZh?: string;
-  /** English summary. */
+  translatedTranscript?: string;
+  /** Summary in the lecture's source language (authoritative for multilingual lectures). */
+  sourceSummary?: string;
+  /** Summary in the lecture's translation language; absent when source === target. */
+  translatedSummary?: string;
+  /** Legacy English summary (kept for backward compatibility + language-based mirroring). */
   summaryEn?: string;
-  /** Chinese summary. */
+  /** Legacy Chinese summary (kept for backward compatibility + language-based mirroring). */
   summaryZh?: string;
   keyPoints: string[];
   /** Draft transcript captured from live captions during recording, when available. */
   liveTranscript?: string;
   /** Draft Chinese translation captured from live captions during recording. */
   liveTranscriptZh?: string;
+  translatedLiveTranscript?: string;
   /**
    * Persisted bilingual caption history for an in-progress lecture (local only),
    * so it can be reopened, shown, and appended to when recording continues.

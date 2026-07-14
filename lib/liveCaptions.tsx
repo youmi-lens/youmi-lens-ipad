@@ -9,6 +9,8 @@ import {
 } from './liveCaptionDiagnostics';
 import { getLiveMicStreamStatus, isLiveMicAvailable } from './liveMicStream';
 import { supabase } from './supabase';
+import type { ContentLanguage } from './models';
+import { resolveIncomingTranslation } from './contentLanguages.mjs';
 
 type LiveCaptionStatus =
   | 'idle'
@@ -26,10 +28,11 @@ type LiveCaptionsContextValue = {
   latestCaption: string;
   partialCaption: string;
   partialTranslationZh: string;
+  partialTranslatedText: string;
   captionLines: LiveCaptionLine[];
   latestFinalLine: LiveCaptionLine | null;
   finalCaptions: string[];
-  startLiveCaptions: (sampleRate?: number) => Promise<void>;
+  startLiveCaptions: (sampleRate?: number, sourceLanguage?: ContentLanguage, translationLanguage?: ContentLanguage) => Promise<void>;
   stopLiveCaptions: () => void;
   sendAudioChunk: (chunk: ArrayBuffer) => void;
   resetCaptions: () => void;
@@ -40,6 +43,7 @@ export type LiveCaptionLine = {
   id: string;
   text: string;
   translationZh?: string;
+  translatedText?: string;
   isFinal: boolean;
   createdAt: string;
 };
@@ -126,6 +130,8 @@ export function LiveCaptionsProvider({ children }: { children: ReactNode }) {
   const socketRef = useRef<WebSocket | null>(null);
   const intentionalCloseRef = useRef(false);
   const sampleRateRef = useRef(48_000);
+  const sourceLanguageRef = useRef<ContentLanguage>('en');
+  const translationLanguageRef = useRef<ContentLanguage>('zh-Hans');
 
   // WebSocket recovery state.
   const reconnectAttemptsRef = useRef(0);
@@ -150,12 +156,14 @@ export function LiveCaptionsProvider({ children }: { children: ReactNode }) {
   const [latestCaption, setLatestCaption] = useState('');
   const [partialCaption, setPartialCaption] = useState('');
   const [partialTranslationZh, setPartialTranslationZh] = useState('');
+  const [partialTranslatedText, setPartialTranslatedText] = useState('');
   const [captionLines, setCaptionLines] = useState<LiveCaptionLine[]>([]);
 
   const resetCaptions = useCallback(() => {
     setLatestCaption('');
     setPartialCaption('');
     setPartialTranslationZh('');
+    setPartialTranslatedText('');
     setCaptionLines([]);
   }, []);
 
@@ -298,7 +306,11 @@ export function LiveCaptionsProvider({ children }: { children: ReactNode }) {
         }
         lastWsEventRef.current = 'open';
         try {
-          socket.send(JSON.stringify({ type: 'stream_start', sampleRate: sampleRateRef.current, token }));
+          socket.send(JSON.stringify({
+            type: 'stream_start', sampleRate: sampleRateRef.current, token,
+            sourceLanguage: sourceLanguageRef.current,
+            translationLanguage: translationLanguageRef.current,
+          }));
         } catch {
           // ignore — onclose will handle it
         }
@@ -329,6 +341,7 @@ export function LiveCaptionsProvider({ children }: { children: ReactNode }) {
           transcript?: string;
           caption?: string;
           translation_zh?: string;
+          translated_text?: string;
           is_final?: boolean;
           message?: string;
           code?: string;
@@ -371,6 +384,7 @@ export function LiveCaptionsProvider({ children }: { children: ReactNode }) {
           setStatus('active');
           setPartialCaption('');
           setPartialTranslationZh('');
+          setPartialTranslatedText('');
           setLatestCaption(rawCaptionText);
           const id = message.id ?? `final_${Date.now()}`;
           setCaptionLines((current) =>
@@ -379,23 +393,39 @@ export function LiveCaptionsProvider({ children }: { children: ReactNode }) {
               { id, text: rawCaptionText, isFinal: true, createdAt: new Date().toISOString() },
             ].slice(-RECENT_FINAL_CAPTION_LIMIT),
           );
-        } else if (message.type === 'stream_translation' && message.id && message.translation_zh) {
-          const translation = message.translation_zh;
+        } else if (message.type === 'stream_translation' && message.id) {
+          // The lecture snapshot is authoritative. Ignore stale/legacy backend
+          // translations when source === target, and never treat a legacy
+          // Chinese-only event as another target language's generic output.
+          const translation = resolveIncomingTranslation(
+            sourceLanguageRef.current,
+            translationLanguageRef.current,
+            message.translated_text,
+            message.translation_zh,
+          );
+          if (!translation) return;
           const translationId = message.id;
           if (message.is_final === false) {
             setPartialTranslationZh(translation);
+            setPartialTranslatedText(translation);
             return;
           }
           setCaptionLines((current) => {
             if (current.some((line) => line.id === translationId)) {
               return current.map((line) =>
-                line.id === translationId ? { ...line, translationZh: translation } : line,
+                line.id === translationId ? {
+                  ...line, translatedText: translation,
+                  ...(translationLanguageRef.current === 'zh-Hans' ? { translationZh: translation } : {}),
+                } : line,
               );
             }
             const lastIndex = current.length - 1;
             if (lastIndex >= 0) {
               return current.map((line, index) =>
-                index === lastIndex ? { ...line, translationZh: translation } : line,
+                index === lastIndex ? {
+                  ...line, translatedText: translation,
+                  ...(translationLanguageRef.current === 'zh-Hans' ? { translationZh: translation } : {}),
+                } : line,
               );
             }
             return current;
@@ -489,7 +519,7 @@ export function LiveCaptionsProvider({ children }: { children: ReactNode }) {
   }, [clearTimers]);
 
   const startLiveCaptions = useCallback(
-    async (sampleRate = 48_000) => {
+    async (sampleRate = 48_000, sourceLanguage: ContentLanguage = 'en', translationLanguage: ContentLanguage = 'zh-Hans') => {
       if (!isLiveMicAvailable()) {
         setStatus('unavailable');
         setError(EXPO_GO_LIMITATION);
@@ -513,6 +543,8 @@ export function LiveCaptionsProvider({ children }: { children: ReactNode }) {
       lastCloseCodeRef.current = null;
       lastCloseReasonRef.current = null;
       sampleRateRef.current = sampleRate;
+      sourceLanguageRef.current = sourceLanguage;
+      translationLanguageRef.current = translationLanguage;
 
       // Part 7: always connect with a fresh token (Supabase refreshes if stale).
       const token = await getFreshAccessToken();
@@ -551,6 +583,7 @@ export function LiveCaptionsProvider({ children }: { children: ReactNode }) {
       latestCaption,
       partialCaption,
       partialTranslationZh,
+      partialTranslatedText,
       captionLines,
       latestFinalLine,
       finalCaptions: captionLines.map((line) => line.text),
@@ -566,6 +599,7 @@ export function LiveCaptionsProvider({ children }: { children: ReactNode }) {
     latestCaption,
     partialCaption,
     partialTranslationZh,
+    partialTranslatedText,
     resetCaptions,
     sendAudioChunk,
     startLiveCaptions,

@@ -22,6 +22,7 @@ import { useAuth } from './auth';
 import { GUEST_STORAGE_SCOPE } from './guest';
 import {
   COURSE_PRESETS,
+  type ContentLanguage,
   type Course,
   type CourseMaterial,
   type Lecture,
@@ -34,6 +35,10 @@ import {
   type PersistedCaptionLine,
 } from './models';
 import { supabase } from './supabase';
+import {
+  REMOTE_RECORDING_COLUMNS,
+  remoteRecordingFallbackColumns,
+} from './remoteRecordingColumns.mjs';
 
 // Legacy global keys from pre-account-isolation builds. Deliberately never
 // loaded now because they have no trustworthy owner user id.
@@ -45,11 +50,6 @@ const scopedMaterialsKey = (userId: string) => `youmi.materials.v1.${userId}`;
 const scopedMaterialLinksKey = (userId: string) => `youmi.materialLinks.v1.${userId}`;
 const scopedMaterialAnnotationsKey = (userId: string) => `youmi.materialAnnotations.v1.${userId}`;
 const UNFILED_COURSE_NAME = 'Unfiled';
-const REMOTE_RECORDING_COLUMNS =
-  'id, user_id, course, title, duration_sec, ai_status, ai_error, created_at, updated_at, storage_path, transcript, transcript_zh, summary_en, summary_zh, live_transcript';
-const REMOTE_RECORDING_COLUMNS_LEGACY =
-  'id, user_id, course, title, duration_sec, ai_status, ai_error, created_at, storage_path, transcript, summary_en, summary_zh, live_transcript';
-
 export type NewCourseInput = {
   name: string;
   icon: string;
@@ -68,6 +68,9 @@ export type NewLectureInput = {
   liveTranscript?: string;
   /** Draft Chinese translation captured from live captions during recording. */
   liveTranscriptZh?: string;
+  translatedLiveTranscript?: string;
+  sourceLanguage?: ContentLanguage;
+  translationLanguage?: ContentLanguage;
   /** Persisted bilingual caption history for an in-progress/resumable lecture. */
   liveCaptionLines?: PersistedCaptionLine[];
   /** Lifecycle status; defaults to 'local_recorded' when omitted (a finished save). */
@@ -210,13 +213,19 @@ type RemoteRecordingRow = {
   ai_status: string | null;
   ai_error: string | null;
   created_at: string | null;
-  updated_at: string | null;
+  updated_at?: string | null;
   storage_path: string | null;
   transcript: string | null;
   transcript_zh?: string | null;
+  translated_transcript?: string | null;
   summary_en: string | null;
   summary_zh: string | null;
+  source_summary?: string | null;
+  translated_summary?: string | null;
   live_transcript: string | null;
+  translated_live_transcript?: string | null;
+  source_language?: ContentLanguage | null;
+  translation_language?: ContentLanguage | null;
 };
 
 const DataContext = createContext<DataContextValue | null>(null);
@@ -313,14 +322,18 @@ async function fetchRemoteRecordingsForUser(userId: string): Promise<RemoteRecor
   let data: unknown = initial.data;
   let error = initial.error;
 
-  if (error && /transcript_zh|updated_at/i.test(error.message)) {
-    const legacy = await supabase
+  let attemptedColumns = REMOTE_RECORDING_COLUMNS;
+  for (let attempt = 0; error && attempt < 2; attempt += 1) {
+    const fallbackColumns = remoteRecordingFallbackColumns(error.message, attemptedColumns);
+    if (!fallbackColumns) break;
+    const fallback = await supabase
       .from('recordings')
-      .select(REMOTE_RECORDING_COLUMNS_LEGACY)
+      .select(fallbackColumns)
       .eq('user_id', userId)
       .order('created_at', { ascending: false });
-    data = legacy.data;
-    error = legacy.error;
+    attemptedColumns = fallbackColumns;
+    data = fallback.data;
+    error = fallback.error;
   }
 
   if (error) {
@@ -384,9 +397,13 @@ function mergeRemoteRecordingsIntoStore(
 
     const transcript = keepLocalIfRemoteMissing(row.transcript, local?.transcript);
     const transcriptZh = keepLocalIfRemoteMissing(row.transcript_zh, local?.transcriptZh);
+    const translatedTranscript = keepLocalIfRemoteMissing(row.translated_transcript, local?.translatedTranscript);
     const summaryEn = keepLocalIfRemoteMissing(row.summary_en, local?.summaryEn);
     const summaryZh = keepLocalIfRemoteMissing(row.summary_zh, local?.summaryZh);
+    const sourceSummary = keepLocalIfRemoteMissing(row.source_summary, local?.sourceSummary);
+    const translatedSummary = keepLocalIfRemoteMissing(row.translated_summary, local?.translatedSummary);
     const liveTranscript = keepLocalIfRemoteMissing(row.live_transcript, local?.liveTranscript);
+    const translatedLiveTranscript = keepLocalIfRemoteMissing(row.translated_live_transcript, local?.translatedLiveTranscript);
 
     // Title freshness: if the local lecture has been renamed more recently
     // than this remote row was updated, keep the local title — otherwise the
@@ -426,10 +443,16 @@ function mergeRemoteRecordingsIntoStore(
       status: local?.status ?? 'local_recorded',
       transcript,
       transcriptZh,
+      translatedTranscript,
       summaryEn,
       summaryZh,
+      sourceSummary,
+      translatedSummary,
       keyPoints: local?.keyPoints ?? [],
       liveTranscript,
+      translatedLiveTranscript,
+      sourceLanguage: row.source_language ?? local?.sourceLanguage ?? 'en',
+      translationLanguage: row.translation_language ?? local?.translationLanguage ?? 'zh-Hans',
       notes: local?.notes ?? '',
       noteStrokes: local?.noteStrokes ?? [],
       noteUpdatedAt: local?.noteUpdatedAt,
@@ -678,6 +701,9 @@ export function DataProvider({ children }: { children: ReactNode }) {
       keyPoints: [],
       liveTranscript: input.liveTranscript ?? '',
       liveTranscriptZh: input.liveTranscriptZh ?? '',
+      translatedLiveTranscript: input.translatedLiveTranscript ?? '',
+      sourceLanguage: input.sourceLanguage ?? 'en',
+      translationLanguage: input.translationLanguage ?? 'zh-Hans',
       liveCaptionLines: input.liveCaptionLines ?? [],
       notes: input.notes ?? '',
       noteStrokes: input.noteStrokes ?? [],
@@ -728,6 +754,9 @@ export function DataProvider({ children }: { children: ReactNode }) {
           markedTimestamps: input.markedTimestamps,
           liveTranscript: input.liveTranscript ?? existing.liveTranscript,
           liveTranscriptZh: input.liveTranscriptZh ?? existing.liveTranscriptZh,
+          translatedLiveTranscript: input.translatedLiveTranscript ?? existing.translatedLiveTranscript,
+          sourceLanguage: existing.sourceLanguage ?? input.sourceLanguage ?? 'en',
+          translationLanguage: existing.translationLanguage ?? input.translationLanguage ?? 'zh-Hans',
           liveCaptionLines: input.liveCaptionLines ?? existing.liveCaptionLines,
           notes: nextNotes,
           noteStrokes: nextStrokes,
@@ -756,6 +785,9 @@ export function DataProvider({ children }: { children: ReactNode }) {
         keyPoints: [],
         liveTranscript: input.liveTranscript ?? '',
         liveTranscriptZh: input.liveTranscriptZh ?? '',
+        translatedLiveTranscript: input.translatedLiveTranscript ?? '',
+        sourceLanguage: input.sourceLanguage ?? 'en',
+        translationLanguage: input.translationLanguage ?? 'zh-Hans',
         liveCaptionLines: input.liveCaptionLines ?? [],
         notes: input.notes ?? '',
         noteStrokes: input.noteStrokes ?? [],
