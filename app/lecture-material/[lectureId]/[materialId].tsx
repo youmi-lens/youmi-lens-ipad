@@ -656,7 +656,7 @@ export default function LectureMaterialWorkspaceScreen() {
           <Ionicons name="construct-outline" size={36} color={colors.mutedBlueGray} />
           <Text style={styles.emptyTitle}>{t('material.viewerUnavailable')}</Text>
           <Text style={styles.emptyBody}>
-            Please rebuild the app from Xcode after running pod install.
+            {t('material.rebuildXcode')}
           </Text>
         </View>
       </View>

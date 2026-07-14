@@ -13,7 +13,7 @@ import { SwipeDeleteRow } from '@/components/SwipeDeleteRow';
 import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
 import { formatDate, formatDuration, formatShortDate } from '@/lib/format';
 import { pickAndImportPdf } from '@/lib/importMaterial';
-import { useT, localizeSystemDefaultTitle } from '@/lib/i18n';
+import { useI18n, localizeSystemDefaultTitle } from '@/lib/i18n';
 import type { CourseMaterial, Lecture } from '@/lib/models';
 import { useData } from '@/lib/store';
 
@@ -38,7 +38,7 @@ function lectureStatus(lecture: Lecture, t: (key: string) => string): LectureSta
 }
 
 export default function CourseDetailScreen() {
-  const t = useT();
+  const { t, language } = useI18n();
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string }>();
   const {
@@ -217,7 +217,7 @@ export default function CourseDetailScreen() {
                   </Text>
                   <View style={styles.metaDot} />
                   <Text style={styles.metaText}>
-                    {latestLecture ? t('course.lastRecorded', { date: formatShortDate(latestLecture.date) }) : t('course.noRecordings')}
+                    {latestLecture ? t('course.lastRecorded', { date: formatShortDate(latestLecture.date, language) }) : t('course.noRecordings')}
                   </Text>
                 </View>
               </View>
@@ -276,7 +276,7 @@ export default function CourseDetailScreen() {
                             <>
                               <View style={styles.metaDot} />
                               <Text style={styles.lectureMeta}>
-                                {material.pageCount} {material.pageCount === 1 ? 'page' : 'pages'}
+                                {t(material.pageCount === 1 ? 'course.pageCountOne' : 'course.pageCount', { count: material.pageCount })}
                               </Text>
                             </>
                           ) : null}
@@ -289,14 +289,14 @@ export default function CourseDetailScreen() {
                           {material.lastOpenedPage ? (
                             <>
                               <View style={styles.metaDot} />
-                              <Text style={styles.lectureMeta}>Last opened page {material.lastOpenedPage}</Text>
+                              <Text style={styles.lectureMeta}>{t('course.lastOpenedPage', { page: material.lastOpenedPage })}</Text>
                             </>
                           ) : null}
                           {annotationCount > 0 ? (
                             <>
                               <View style={styles.metaDot} />
                               <Text style={styles.lectureMeta}>
-                                {annotationCount} {annotationCount === 1 ? 'annotation' : 'annotations'}
+                                {t(annotationCount === 1 ? 'course.annotationCountOne' : 'course.annotationCount', { count: annotationCount })}
                               </Text>
                             </>
                           ) : null}
@@ -333,7 +333,7 @@ export default function CourseDetailScreen() {
               <View style={styles.materialsImportingHint}>
                 <ActivityIndicator color={colors.deepNavy} />
                 <Text style={styles.materialsImportingLabel}>
-                  Reading from Files…
+                  {t('course.readingFiles')}
                 </Text>
               </View>
             ) : null}
@@ -343,7 +343,7 @@ export default function CourseDetailScreen() {
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>{t('course.lectures')}</Text>
             {latestLecture ? (
-              <Text style={styles.sectionMeta}>{t('course.latest', { date: formatDate(latestLecture.date) })}</Text>
+              <Text style={styles.sectionMeta}>{t('course.latest', { date: formatDate(latestLecture.date, language) })}</Text>
             ) : null}
           </View>
 
@@ -353,9 +353,7 @@ export default function CourseDetailScreen() {
                 <Ionicons name="mic-outline" size={28} color={colors.deepNavy} />
               </View>
               <Text style={styles.emptyTitle}>{t('course.noLectures')}</Text>
-              <Text style={styles.emptyBody}>
-                Record your first lecture to start building this course library.
-              </Text>
+              <Text style={styles.emptyBody}>{t('course.emptyLectureBody')}</Text>
               <PrimaryButton label={t('course.startFirst')} icon="mic" onPress={startLecture} style={styles.emptyButton} />
             </GlassCard>
           ) : (
@@ -382,7 +380,7 @@ export default function CourseDetailScreen() {
                       <View style={styles.lectureBody}>
                         <Text style={styles.lectureTitle} numberOfLines={1}>{localizeSystemDefaultTitle(t, lecture.title)}</Text>
                         <View style={styles.lectureMetaRow}>
-                          <Text style={styles.lectureMeta}>{formatDate(lecture.date)}</Text>
+                          <Text style={styles.lectureMeta}>{formatDate(lecture.date, language)}</Text>
                           <View style={styles.metaDot} />
                           <Text style={styles.lectureMeta}>{formatDuration(lecture.durationMillis)}</Text>
                         </View>

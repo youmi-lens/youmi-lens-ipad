@@ -43,11 +43,9 @@ import {
   hasMeaningfulRecordingContent,
 } from '@/lib/recordingPersistence.mjs';
 
-/** Calm, user-facing line shown when live captions cannot run. Diagnostics stay in the console. */
-const LIVE_CAPTIONS_UNAVAILABLE_MESSAGE = 'Live captions unavailable. Audio recording is still active.';
-
 export default function RecordingScreen() {
   const router = useRouter();
+  const t = useT();
   const params = useLocalSearchParams<{ courseId?: string; lectureTitle?: string; lectureId?: string }>();
   const { isGuest, exitGuest } = useAuth();
   const {
@@ -95,7 +93,7 @@ export default function RecordingScreen() {
     }).finally(() => setContentPreferencesLoaded(true));
   }, [resumeLecture]);
   const course = getCourse(resumeLecture?.courseId ?? params.courseId);
-  const courseName = course?.name ?? 'Lecture';
+  const courseName = course?.name ?? t('recording.defaultCourse');
 
   const {
     permissionChecked,
@@ -188,7 +186,6 @@ export default function RecordingScreen() {
 
   // Subtle one-time hint for double-tap word lookup, shown only while English
   // captions are on screen (same condition the caption feed renders under).
-  const t = useT();
   const captionsVisibleForHint = !isGuest && (captionAreaState === 'captions_visible' || isReviewingResume);
   const showWordLookupHint = useWordLookupHint(captionsVisibleForHint);
 
@@ -372,7 +369,7 @@ export default function RecordingScreen() {
       },
       onUnavailable: () => {
         stopLiveCaptions();
-        setMicStreamError(LIVE_CAPTIONS_UNAVAILABLE_MESSAGE);
+        setMicStreamError(t('recording.captionsUnavailable'));
         const mic = getLiveMicStreamStatus();
         logLiveCaptionUnavailable('no_pcm_callbacks', {
           micStarted: Boolean(mic.nativeRecorderStarted),
@@ -387,7 +384,7 @@ export default function RecordingScreen() {
       // The "needs a development build" note is fine to show as-is; any other
       // startup failure is collapsed to the calm user-facing line.
       setMicStreamError(
-        micStatus.isSupported ? LIVE_CAPTIONS_UNAVAILABLE_MESSAGE : micStatus.error,
+        micStatus.isSupported ? t('recording.captionsUnavailable') : micStatus.error,
       );
       if (__DEV__) {
         console.warn('[recording] live microphone unavailable', {

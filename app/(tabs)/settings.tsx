@@ -11,6 +11,7 @@ import { PageHeading, ProgressBar } from '@/components/WorkspaceUI';
 import { colors, layout, radius } from '@/constants/theme';
 import { deleteAccount } from '@/lib/account';
 import { useAuth } from '@/lib/auth';
+import { formatDate } from '@/lib/format';
 import { useI18n } from '@/lib/i18n';
 import { fetchPlanStatus, PlanStatus, safeAccessLabel } from '@/lib/planStatus';
 import { purchaseService } from '@/lib/purchases';
@@ -83,6 +84,9 @@ export default function SettingsScreen() {
     setContentModal(null);
   };
   const currentLanguageLabel = languages.find((option) => option.code === language)?.nativeLabel ?? 'English';
+  const localDataCountKey = courses.length === 1
+    ? lectures.length === 1 ? 'settings.storage.clearDetail.oneOne' : 'settings.storage.clearDetail.oneOther'
+    : lectures.length === 1 ? 'settings.storage.clearDetail.otherOne' : 'settings.storage.clearDetail';
   // App version read from config (never hardcoded); '' if unavailable.
   const appVersion = Constants.expoConfig?.version ?? '';
   // Map the neutral access label (from safeAccessLabel — an App-Store-safe UI
@@ -278,7 +282,7 @@ export default function SettingsScreen() {
                       </View>
                       <View style={styles.accessLine}>
                         <Text style={styles.accessName}>{t('settings.plan.accessEnds')}</Text>
-                        <Text style={styles.accessStatus}>{formatDate(planStatus.entitlement?.expiresAt)}</Text>
+                        <Text style={styles.accessStatus}>{formatDate(planStatus.entitlement?.expiresAt, language) || '—'}</Text>
                       </View>
                     </View>
                   ) : (
@@ -304,7 +308,7 @@ export default function SettingsScreen() {
                 <Text style={styles.cardHeading}>{t('settings.storage.heading')}</Text>
                 <SettingRow icon="cloud-outline" label={t('settings.storage.account')} detail={t('settings.storage.accountDetail')} />
                 <SettingRow icon="trash-bin-outline" label={t('settings.storage.recentlyDeleted')} onPress={() => router.push('/recently-deleted')} />
-                <SettingRow icon="folder-open-outline" label={t('settings.storage.clear')} detail={t('settings.storage.clearDetail', { courses: courses.length, lectures: lectures.length })} onPress={handleClearData} last />
+                <SettingRow icon="folder-open-outline" label={t('settings.storage.clear')} detail={t(localDataCountKey, { courses: courses.length, lectures: lectures.length })} onPress={handleClearData} last />
               </GlassCard>
 
               {!isGuest ? (
@@ -368,12 +372,6 @@ export default function SettingsScreen() {
       </Modal>
     </SafeAreaView>
   );
-}
-
-function formatDate(value: string | null | undefined) {
-  if (!value) return '—';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
 const styles = StyleSheet.create({

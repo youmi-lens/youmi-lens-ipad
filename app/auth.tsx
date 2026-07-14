@@ -6,7 +6,6 @@ import {
   Animated,
   Easing,
   KeyboardAvoidingView,
-  Image,
   Platform,
   Pressable,
   ScrollView,
@@ -20,6 +19,7 @@ import Svg, { Defs, LinearGradient, Path, Rect, Stop } from 'react-native-svg';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppBackground } from '@/components/AppBackground';
+import { LogoMark } from '@/components/BrandHeader';
 import { GlassCard } from '@/components/GlassCard';
 import { PrimaryButton } from '@/components/PrimaryButton';
 import { SecondaryButton } from '@/components/SecondaryButton';
@@ -159,8 +159,8 @@ export default function AuthScreen() {
   }, [resendCooldownUntil]);
 
   const validateEmail = (value: string) => {
-    if (!value.trim()) return 'Please enter your email.';
-    if (!EMAIL_PATTERN.test(value.trim())) return 'Please enter a valid email address.';
+    if (!value.trim()) return t('auth.emailRequired');
+    if (!EMAIL_PATTERN.test(value.trim())) return t('auth.emailInvalid');
     return null;
   };
 
@@ -699,7 +699,7 @@ export default function AuthScreen() {
                 </View>
                 <View style={styles.fieldGroup}>
                   <Text style={styles.label}>{t('auth.email')}</Text>
-                  <TextInput autoCapitalize="none" autoComplete="email" keyboardType="email-address" placeholder="student@example.com" placeholderTextColor={colors.textTertiary} style={styles.input} value={email} onChangeText={(value) => { setEmail(value); setError(null); setSuccessMessage(null); }} />
+                  <TextInput autoCapitalize="none" autoComplete="email" keyboardType="email-address" placeholder={t('auth.emailPlaceholder')} placeholderTextColor={colors.textTertiary} style={styles.input} value={email} onChangeText={(value) => { setEmail(value); setError(null); setSuccessMessage(null); }} />
                 </View>
                 {successMessage ? <Text style={styles.success}>{successMessage}</Text> : null}
                 {error ? <Text style={styles.error}>{error}</Text> : null}
@@ -786,7 +786,7 @@ export default function AuthScreen() {
                 </View>
                 <View style={styles.fieldGroup}>
                   <Text style={styles.label}>{t('auth.email')}</Text>
-                  <TextInput autoCapitalize="none" autoComplete="email" keyboardType="email-address" placeholder="student@example.com" placeholderTextColor={colors.textTertiary} style={styles.input} value={email} onChangeText={(value) => { setEmail(value); setError(null); }} />
+                  <TextInput autoCapitalize="none" autoComplete="email" keyboardType="email-address" placeholder={t('auth.emailPlaceholder')} placeholderTextColor={colors.textTertiary} style={styles.input} value={email} onChangeText={(value) => { setEmail(value); setError(null); }} />
                 </View>
                 {error ? <Text style={styles.error}>{error}</Text> : null}
                 <PrimaryButton label={t('auth.sendCode')} onPress={handleSendSignInCode} loading={busyAction === 'send'} disabled={busyAction !== null} />
@@ -970,26 +970,13 @@ export default function AuthScreen() {
   );
 }
 
-const CAPTION_PAIRS = [
-  {
-    en: "Today we'll look at how neural networks learn from data.",
-    zh: '今天我们来看看神经网络是如何从数据中学习的。',
-  },
-  {
-    en: 'Each layer extracts increasingly abstract features.',
-    zh: '每一层都会提取越来越抽象的特征。',
-  },
-  {
-    en: "Let's start with a simple example",
-    zh: '我们从一个简单的例子开始',
-  },
-] as const;
+const CAPTION_DEMO_KEYS = ['auth.demo.first', 'auth.demo.second', 'auth.demo.third'] as const;
 
 function BrandPanel() {
   const t = useT();
   const [reduceMotion, setReduceMotion] = useState(false);
   const [panelSize, setPanelSize] = useState({ width: 0, height: 0 });
-  const captionAnimations = useRef(CAPTION_PAIRS.map(() => new Animated.Value(0))).current;
+  const captionAnimations = useRef(CAPTION_DEMO_KEYS.map(() => new Animated.Value(0))).current;
   const pulse = useRef(new Animated.Value(1)).current;
   const cursor = useRef(new Animated.Value(1)).current;
 
@@ -1093,13 +1080,7 @@ function BrandPanel() {
 
       <View style={styles.brandContent}>
         <View style={styles.brandTop}>
-          <Image
-            accessibilityIgnoresInvertColors
-            accessibilityLabel="Youmi Lens"
-            resizeMode="contain"
-            source={require('../assets/images/youmi-mark-white.png')}
-            style={styles.brandMark}
-          />
+          <LogoMark size={46} onNavy />
           <Text style={styles.brandName}>Youmi Lens</Text>
         </View>
 
@@ -1116,11 +1097,11 @@ function BrandPanel() {
             />
             <Text style={styles.liveLabelText}>{t('auth.liveCaptions')}</Text>
           </View>
-          {CAPTION_PAIRS.map((pair, index) => {
+          {CAPTION_DEMO_KEYS.map((key, index) => {
             const animation = captionAnimations[index];
             return (
               <Animated.View
-                key={pair.en}
+                key={key}
                 style={[
                   styles.captionPair,
                   {
@@ -1130,10 +1111,9 @@ function BrandPanel() {
                 ]}
               >
                 <View style={styles.captionEnglishRow}>
-                  <Text style={styles.captionEnglish}>{pair.en}</Text>
-                  {index === CAPTION_PAIRS.length - 1 ? <Animated.View style={[styles.captionCursor, { opacity: cursor }]} /> : null}
+                  <Text style={styles.captionEnglish}>{t(key)}</Text>
+                  {index === CAPTION_DEMO_KEYS.length - 1 ? <Animated.View style={[styles.captionCursor, { opacity: cursor }]} /> : null}
                 </View>
-                <Text style={styles.captionChinese}>{pair.zh}</Text>
               </Animated.View>
             );
           })}

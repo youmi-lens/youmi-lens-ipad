@@ -11,14 +11,16 @@ type LogoMarkProps = {
 };
 
 /** Official Youmi Lens mark, rendered without recoloring or cropping. */
-export function LogoMark({ size = 44 }: LogoMarkProps) {
+export function LogoMark({ size = 44, onNavy = false }: LogoMarkProps) {
   return (
     <ExpoImage
       accessibilityIgnoresInvertColors
       accessibilityLabel="Youmi Lens"
       contentFit="contain"
       resizeMode="contain"
-      source={require('../assets/images/youmi-lens-mark-navy.png')}
+      source={onNavy
+        ? require('../assets/images/youmi-mark-white.png')
+        : require('../assets/images/youmi-lens-mark-navy.png')}
       style={{ width: size * 0.8, height: size }}
     />
   );

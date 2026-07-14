@@ -25,7 +25,7 @@ import { WorkspaceSidebar } from '@/components/WorkspaceSidebar';
 import { colors, fontSize, radius, spacing } from '@/constants/theme';
 import { exportLectureNotesPdf, hasExportableLectureNotes } from '@/lib/exportLectureNotesPdf';
 import { formatClock, formatDate, formatDuration } from '@/lib/format';
-import { useT, localizeSystemDefaultTitle } from '@/lib/i18n';
+import { useI18n, localizeSystemDefaultTitle } from '@/lib/i18n';
 import {
   getSourceSummary,
   getSourceTranscript,
@@ -56,7 +56,7 @@ function BlockHeader({ icon, label }: { icon: IoniconName; label: string }) {
 }
 
 export default function LectureDetailScreen() {
-  const t = useT();
+  const { t, language } = useI18n();
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string }>();
   const { getLecture, getCourse, updateLecture, renameLecture } = useData();
@@ -194,7 +194,7 @@ export default function LectureDetailScreen() {
             {localizeSystemDefaultTitle(t, lecture.title)}
           </Text>
           <Text style={styles.headerMeta} numberOfLines={1}>
-            {course?.name ? localizeSystemDefaultTitle(t, course.name) : t('lecture.defaultCourse')} · {formatDate(lecture.date)} ·{' '}
+            {course?.name ? localizeSystemDefaultTitle(t, course.name) : t('lecture.defaultCourse')} · {formatDate(lecture.date, language)} ·{' '}
             {formatDuration(lecture.durationMillis)}
           </Text>
         </View>
@@ -217,11 +217,11 @@ export default function LectureDetailScreen() {
               <Pressable accessibilityRole="button" onPress={() => audioStatus.playing ? player.pause() : player.play()} style={styles.playPauseButton}>
                 <Ionicons name={audioStatus.playing ? 'pause' : 'play'} size={20} color={colors.textOnNavy} />
               </Pressable>
-              <Pressable accessibilityRole="button" onPress={() => void skipBy(-10)} style={styles.skipButton}><Text style={styles.skipText}>↺ 10s</Text></Pressable>
+              <Pressable accessibilityRole="button" accessibilityLabel={t('lecture.skipBack')} onPress={() => void skipBy(-10)} style={styles.skipButton}><Text style={styles.skipText}>↺ 10s</Text></Pressable>
               <Text style={styles.playerTimeText}>{formatClock(Math.floor(audioStatus.currentTime))}</Text>
               <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${playbackProgress * 100}%` }]} /></View>
               <Text style={styles.playerTimeText}>{formatClock(Math.floor(playbackDuration))}</Text>
-              <Pressable accessibilityRole="button" onPress={() => void skipBy(10)} style={styles.skipButton}><Text style={styles.skipText}>10s ↻</Text></Pressable>
+              <Pressable accessibilityRole="button" accessibilityLabel={t('lecture.skipForward')} onPress={() => void skipBy(10)} style={styles.skipButton}><Text style={styles.skipText}>10s ↻</Text></Pressable>
             </View>
           ) : (
             <Text style={styles.emptyInline}>
@@ -387,9 +387,7 @@ export default function LectureDetailScreen() {
                       <View style={styles.handwritingBlock}>
                         <View style={styles.handwritingLabelRow}>
                           <Ionicons name="brush-outline" size={13} color={colors.textTertiary} />
-                          <Text style={styles.handwritingLabel}>
-                            Handwriting · {strokeCount} {strokeCount === 1 ? 'stroke' : 'strokes'}
-                          </Text>
+                          <Text style={styles.handwritingLabel}>{t(strokeCount === 1 ? 'lecture.handwritingCountOne' : 'lecture.handwritingCount', { count: strokeCount })}</Text>
                         </View>
                         <HandwritingPreview strokes={lecture.noteStrokes ?? []} />
                       </View>

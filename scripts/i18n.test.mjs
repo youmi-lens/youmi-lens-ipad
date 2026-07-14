@@ -15,6 +15,8 @@ assert.equal(translate('en', 'settings.title'), 'Settings');
 assert.equal(translate('zh-Hans', 'settings.title'), '设置');
 assert.equal(translate('ja', 'settings.title'), '設定');
 assert.equal(translate('fr', 'settings.title'), 'Réglages');
+assert.equal(translate('es', 'settings.title'), 'Ajustes');
+assert.equal(translate('ko', 'settings.title'), '설정');
 
 // ---- Fallback to English ----
 // Unknown language code → English source of truth.
@@ -137,7 +139,7 @@ for (const key of explicitlyTranslatedKeys) {
 // each source dictionary as text to catch duplicates before import evaluation.
 for (const { code } of LANGUAGES) {
   const source = readFileSync(new URL(`../lib/locales/${code}.mjs`, import.meta.url), 'utf8');
-  const keys = [...source.matchAll(/^\s*'([^']+)'\s*:/gm)].map((match) => match[1]);
+  const keys = [...source.matchAll(/['\"]([^'\"\n]+)['\"]\s*:/g)].map((match) => match[1]);
   assert.equal(keys.length, new Set(keys).size, `locale ${code} contains duplicate translation keys`);
 }
 

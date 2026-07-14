@@ -527,7 +527,7 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
                 numberOfLines={1}
                 ellipsizeMode="tail"
               >
-                Translating…
+                {t('mini.translating')}
               </Text>
             ) : null}
           </View>

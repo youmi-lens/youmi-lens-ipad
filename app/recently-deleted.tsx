@@ -14,7 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlassCard } from '@/components/GlassCard';
 import { colors, fontSize, layout, radius, spacing } from '@/constants/theme';
 import { formatShortDate } from '@/lib/format';
-import { useT, localizeSystemDefaultTitle } from '@/lib/i18n';
+import { useI18n, useT, localizeSystemDefaultTitle } from '@/lib/i18n';
 import { useData } from '@/lib/store';
 
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
@@ -34,7 +34,7 @@ function DeletedItem({
   onRestore: () => void;
   onPermanentDelete: () => void;
 }) {
-  const t = useT();
+  const { t, language } = useI18n();
   return (
     <GlassCard style={styles.itemCard}>
       <View style={styles.itemHeader}>
@@ -47,7 +47,7 @@ function DeletedItem({
           </Text>
           <Text style={styles.itemMeta}>
             {typeLabel}
-            {deletedAt ? ` · Deleted ${formatShortDate(deletedAt)}` : ''}
+            {deletedAt ? ` · ${t('deleted.deletedOn', { date: formatShortDate(deletedAt, language) })}` : ''}
           </Text>
         </View>
       </View>

@@ -742,7 +742,7 @@ export function MaterialFloatingToolbar({
   const widthNibs = widthOptions.map((option) =>
     renderNib(
       option.key,
-      t('tools.widthA11y', { tool: mode === 'highlighter' ? t('tools.highlight') : t('tools.pen'), width: option.key }),
+      t('tools.widthA11y', { tool: mode === 'highlighter' ? t('tools.highlight') : t('tools.pen'), width: t(`tools.size.${option.key}`) }),
       option.dot,
       activeWidth === option.value,
       () => onSelectWidth(option.value),
@@ -751,7 +751,7 @@ export function MaterialFloatingToolbar({
   const eraserNibs = eraserSizes.map((option) =>
     renderNib(
       option.key,
-      t('tools.eraserA11y', { size: option.key }),
+      t('tools.eraserA11y', { size: t(`tools.size.${option.key}`) }),
       option.dot,
       eraserSize === option.value,
       () => onSelectEraserSize(option.value),

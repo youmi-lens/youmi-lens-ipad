@@ -9,8 +9,8 @@ import { PrimaryButton } from '@/components/PrimaryButton';
 import { SecondaryButton } from '@/components/SecondaryButton';
 import { WorkspaceSidebar } from '@/components/WorkspaceSidebar';
 import { colors, fontSize, radius, spacing } from '@/constants/theme';
-import { formatDuration } from '@/lib/format';
-import { useT, localizeSystemDefaultTitle } from '@/lib/i18n';
+import { formatDateTime, formatDuration } from '@/lib/format';
+import { useI18n, localizeSystemDefaultTitle } from '@/lib/i18n';
 import { useData } from '@/lib/store';
 
 type IndicatorState = 'done' | 'active' | 'pending' | 'failed';
@@ -43,7 +43,7 @@ export default function ProcessingScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ lectureId?: string }>();
   const { getLecture, getCourse, updateLecture } = useData();
-  const t = useT();
+  const { t, language } = useI18n();
 
   // This screen is a viewer only. The durable upload → backend-processing →
   // status-poll chain is owned by the app-level orchestrator (see
@@ -86,7 +86,7 @@ export default function ProcessingScreen() {
               <View style={styles.meta}><Text style={styles.metaLabel}>{t('processing.meta.course')}</Text><Text style={styles.metaValue}>{course?.name ? localizeSystemDefaultTitle(t, course.name) : t('processing.defaultCourse')}</Text></View>
               <View style={styles.meta}><Text style={styles.metaLabel}>{t('processing.meta.duration')}</Text><Text style={styles.metaValue}>{formatDuration(lecture?.durationMillis ?? 0)}</Text></View>
               <View style={styles.meta}><Text style={styles.metaLabel}>{t('processing.meta.markedMoments')}</Text><Text style={styles.metaValue}>{lecture?.markedTimestamps.length ?? 0}</Text></View>
-              <View style={styles.meta}><Text style={styles.metaLabel}>{t('processing.meta.recorded')}</Text><Text style={styles.metaValue}>{lecture ? new Date(lecture.date).toLocaleString([], { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}</Text></View>
+              <View style={styles.meta}><Text style={styles.metaLabel}>{t('processing.meta.recorded')}</Text><Text style={styles.metaValue}>{lecture ? formatDateTime(lecture.date, language) : '—'}</Text></View>
             </View>
           </GlassCard>
 

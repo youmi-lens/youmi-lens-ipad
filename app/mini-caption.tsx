@@ -728,7 +728,7 @@ export default function MiniCaptionScreen() {
                   numberOfLines={1}
                   ellipsizeMode="tail"
                 >
-                  Translating…
+                  {t('mini.translating')}
                 </Text>
               ) : null}
             </View>

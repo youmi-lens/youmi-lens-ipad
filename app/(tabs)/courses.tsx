@@ -11,11 +11,11 @@ import { SwipeDeleteRow } from '@/components/SwipeDeleteRow';
 import { PageHeading } from '@/components/WorkspaceUI';
 import { colors, layout } from '@/constants/theme';
 import { formatDuration, formatShortDate } from '@/lib/format';
-import { useT } from '@/lib/i18n';
+import { useI18n } from '@/lib/i18n';
 import { useData } from '@/lib/store';
 
 export default function CoursesScreen() {
-  const t = useT();
+  const { t, language } = useI18n();
   const router = useRouter();
   const { loaded, courses, lectures, lecturesForCourse, setSelectedCourseId, deleteCourse } = useData();
   const [openCourseId, setOpenCourseId] = useState<string | null>(null);
@@ -58,6 +58,9 @@ export default function CoursesScreen() {
   };
 
   const totalDuration = lectures.reduce((total, lecture) => total + lecture.durationMillis, 0);
+  const countsKey = courses.length === 1
+    ? lectures.length === 1 ? 'courses.counts.oneOne' : 'courses.counts.oneOther'
+    : lectures.length === 1 ? 'courses.counts.otherOne' : 'courses.counts';
 
   return (
     <SafeAreaView style={styles.root} edges={['top', 'left', 'right']}>
@@ -70,8 +73,8 @@ export default function CoursesScreen() {
           <PageHeading
             eyebrow={t('courses.library')}
             title={t('courses.title')}
-            subtitle={`${t('courses.counts', { courses: courses.length, lectures: lectures.length })}${lectures.length ? ` · ${formatDuration(totalDuration)}` : ''}`}
-            action={loaded && courses.length ? (
+          subtitle={`${t(countsKey, { courses: courses.length, lectures: lectures.length })}${lectures.length ? ` · ${formatDuration(totalDuration)}` : ''}`}
+          action={loaded && courses.length ? (
               <View style={styles.headerActions}>
                 <PrimaryButton label={t('courses.new')} icon="add" onPress={() => router.push('/create-course')} style={styles.newButton} />
               </View>
@@ -80,12 +83,14 @@ export default function CoursesScreen() {
 
           {!loaded ? (
             <View style={styles.loading}><ActivityIndicator color={colors.accent} /></View>
-          ) : courses.length === 0 ? (
+      ) : courses.length === 0 ? (
             <GlassCard padding={36} style={styles.empty}>
-              <View style={styles.emptyIcon}><Ionicons name="library-outline" size={30} color={colors.navy} /></View>
-              <Text style={styles.emptyTitle}>{t('courses.emptyTitle')}</Text>
-              <Text style={styles.emptyBody}>{t('courses.emptyBody')}</Text>
-              <PrimaryButton label={t('home.createCourse')} icon="add" onPress={() => router.push('/create-course')} style={styles.emptyButton} />
+              <View style={styles.emptyGroup}>
+                <View style={styles.emptyIcon}><Ionicons name="library-outline" size={30} color={colors.navy} /></View>
+                <Text style={styles.emptyTitle}>{t('courses.emptyTitle')}</Text>
+                <Text style={styles.emptyBody}>{t('courses.emptyBody')}</Text>
+                <PrimaryButton label={t('home.createCourse')} icon="add" onPress={() => router.push('/create-course')} style={styles.emptyButton} />
+              </View>
             </GlassCard>
           ) : (
             <View style={styles.grid}>
@@ -107,7 +112,7 @@ export default function CoursesScreen() {
                       course={course}
                       lectureCount={courseLectures.length}
                       durationLabel={courseLectures.length ? formatDuration(duration) : undefined}
-                      lastActivity={latest ? t('courses.last', { date: formatShortDate(latest.date) }) : undefined}
+                      lastActivity={latest ? t('courses.last', { date: formatShortDate(latest.date, language) }) : undefined}
                       readyCount={ready}
                       onPress={() => openCourse(course.id)}
                     />
@@ -138,10 +143,11 @@ const styles = StyleSheet.create({
   ghostCard: { width: '31.8%', minWidth: 250, minHeight: 196, alignItems: 'center', justifyContent: 'center', gap: 10, borderWidth: 1.5, borderStyle: 'dashed', borderColor: colors.borderStrong, borderRadius: 20, backgroundColor: colors.glass },
   plus: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceMuted },
   ghostLabel: { color: colors.textSecondary, fontSize: 14, fontWeight: '700' },
-  empty: { alignItems: 'center', alignSelf: 'center', width: '100%', minHeight: 300, justifyContent: 'center' },
+  empty: { alignItems: 'center', alignSelf: 'center', width: '100%', minHeight: 260, justifyContent: 'center' },
+  emptyGroup: { width: '100%', maxWidth: 420, alignItems: 'center' },
   emptyIcon: { width: 62, height: 62, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border },
   emptyTitle: { color: colors.ink, fontSize: 22, fontWeight: '800', marginTop: 16 },
   emptyBody: { color: colors.textSecondary, fontSize: 13.5, lineHeight: 20, textAlign: 'center', maxWidth: 380, marginTop: 8 },
-  emptyButton: { marginTop: 20, minWidth: 260 },
+  emptyButton: { marginTop: 20, minWidth: 190, maxWidth: 260, alignSelf: 'center' },
   pressed: { opacity: 0.78, transform: [{ scale: 0.985 }] },
 });

@@ -12,16 +12,18 @@ export function PageHeading({
   title,
   subtitle,
   action,
+  preserveEyebrowCase = false,
 }: {
   eyebrow: string;
   title: string;
   subtitle?: string;
   action?: ReactNode;
+  preserveEyebrowCase?: boolean;
 }) {
   return (
     <View style={styles.heading}>
       <View style={styles.headingText}>
-        <Text style={styles.eyebrow}>{eyebrow}</Text>
+        <Text style={[styles.eyebrow, preserveEyebrowCase && styles.eyebrowCaseSensitive]}>{eyebrow}</Text>
         <Text style={styles.pageTitle}>{title}</Text>
         {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
       </View>
@@ -127,6 +129,7 @@ const styles = StyleSheet.create({
     letterSpacing: 1.54,
     textTransform: 'uppercase',
   },
+  eyebrowCaseSensitive: { textTransform: 'none' },
   pageTitle: {
     marginTop: 5,
     color: colors.ink,

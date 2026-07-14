@@ -11,7 +11,8 @@ import { SecondaryButton } from '@/components/SecondaryButton';
 import { GlassIconButton } from '@/components/WorkspaceUI';
 import { colors, radius } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
-import { useT } from '@/lib/i18n';
+import { formatDate as formatAppDate } from '@/lib/format';
+import { useI18n } from '@/lib/i18n';
 import { fetchPlanStatus, PlanStatus } from '@/lib/planStatus';
 import {
   purchaseService,
@@ -32,7 +33,8 @@ const BENEFITS = [
 ] as const;
 
 export default function PlansScreen() {
-  const t = useT();
+  const { t, language } = useI18n();
+  const formatDate = (value: string | null | undefined) => formatAppDate(value, language) || '—';
   const router = useRouter();
   const { session, user, isGuest, exitGuest } = useAuth();
   const accessToken = session?.access_token ?? null;
@@ -172,7 +174,7 @@ export default function PlansScreen() {
         Alert.alert(t('plans.refreshFailed'), t('plans.refreshFailedBody'));
         return;
       }
-      const message = accessMessageForStatus(refreshedStatus);
+      const message = accessMessageForStatus(refreshedStatus, t);
       setAccessRefreshMessage(message);
       Alert.alert(t('plans.refreshed'), message);
     } finally {
@@ -244,7 +246,7 @@ export default function PlansScreen() {
 
               {error ? (
                 <Pressable onPress={() => void loadStatus()}>
-                  <Text style={styles.errorText}>{error} Tap to retry.</Text>
+                  <Text style={styles.errorText}>{error} {t('settings.plan.tapToRetry')}</Text>
                 </Pressable>
               ) : null}
 
@@ -296,11 +298,11 @@ function getStudentBasicStatus(status: PlanStatus | null, loading: boolean): Stu
   return 'Not active';
 }
 
-function accessMessageForStatus(status: PlanStatus): string {
+function accessMessageForStatus(status: PlanStatus, t: (key: string) => string): string {
   const studentStatus = getStudentBasicStatus(status, false);
-  if (studentStatus === 'Active') return 'Student Basic access is active for this Youmi Lens account.';
-  if (studentStatus === 'Expired') return 'Student Basic access for this Youmi Lens account has expired.';
-  return 'No active Student Basic access is linked to this Youmi Lens account.';
+  if (studentStatus === 'Active') return t('plans.accessMessageActive');
+  if (studentStatus === 'Expired') return t('plans.accessMessageExpired');
+  return t('plans.accessMessageInactive');
 }
 
 function confirmsStudentBasicGrant(status: PlanStatus): boolean {
@@ -316,12 +318,6 @@ function confirmsStudentBasicGrant(status: PlanStatus): boolean {
     status.maxRecordingsPerDay === 6 &&
     status.maxProcessingJobsPerDay === 10
   );
-}
-
-function formatDate(value: string | null | undefined) {
-  if (!value) return '—';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
 const styles = StyleSheet.create({

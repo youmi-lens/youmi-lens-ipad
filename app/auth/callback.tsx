@@ -6,12 +6,14 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { colors, fontSize, spacing } from '@/constants/theme';
 import { applySessionFromCallbackUrl, useAuth } from '@/lib/auth';
+import { useT } from '@/lib/i18n';
 
 export default function AuthCallbackScreen() {
+  const t = useT();
   const router = useRouter();
   const incomingUrl = Linking.useURL();
   const { refreshSession } = useAuth();
-  const [message, setMessage] = useState('Completing sign in…');
+  const [message, setMessage] = useState(() => t('auth.completingSignIn'));
 
   useEffect(() => {
     let active = true;
@@ -30,7 +32,7 @@ export default function AuthCallbackScreen() {
         return;
       }
 
-      setMessage('We could not complete the app callback. Return to Youmi Lens and try the email link again.');
+      setMessage(t('auth.callbackError'));
     };
 
     finishCallback();
@@ -38,7 +40,7 @@ export default function AuthCallbackScreen() {
     return () => {
       active = false;
     };
-  }, [incomingUrl, refreshSession, router]);
+  }, [incomingUrl, refreshSession, router, t]);
 
   return (
     <SafeAreaView style={styles.root}>

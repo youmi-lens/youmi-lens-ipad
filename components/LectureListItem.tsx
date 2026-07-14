@@ -4,7 +4,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
 import { formatDuration, formatShortDate } from '@/lib/format';
-import { useT, localizeSystemDefaultTitle } from '@/lib/i18n';
+import { useI18n, localizeSystemDefaultTitle } from '@/lib/i18n';
 import type { Course, Lecture } from '@/lib/models';
 
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
@@ -34,7 +34,7 @@ export function LectureListItem({
   variant = 'card',
   last = false,
 }: LectureListItemProps) {
-  const t = useT();
+  const { t, language } = useI18n();
   const isRow = variant === 'row';
   const tint = course?.tint ?? colors.iceTint;
   const accent = course?.accent ?? colors.deepNavy;
@@ -65,7 +65,7 @@ export function LectureListItem({
       </View>
 
       <View style={styles.trailing}>
-        <Text style={styles.date}>{formatShortDate(lecture.date)}</Text>
+        <Text style={styles.date}>{formatShortDate(lecture.date, language)}</Text>
         <View style={styles.durationRow}>
           <Ionicons name="time-outline" size={12} color={colors.textTertiary} />
           <Text style={styles.duration}>{formatDuration(lecture.durationMillis)}</Text>

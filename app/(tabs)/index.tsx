@@ -23,7 +23,7 @@ import { user } from '@/data/mockData';
 import { useAuth } from '@/lib/auth';
 import { formatDuration, formatShortDate } from '@/lib/format';
 import { useGuestRecordingUsage } from '@/lib/guest';
-import { useT, localizeSystemDefaultTitle } from '@/lib/i18n';
+import { useI18n, localizeSystemDefaultTitle } from '@/lib/i18n';
 import { COURSE_PRESETS } from '@/lib/models';
 import { fetchPlanStatus, PlanStatus } from '@/lib/planStatus';
 import { useData } from '@/lib/store';
@@ -31,7 +31,7 @@ import { useData } from '@/lib/store';
 type IconName = ComponentProps<typeof Ionicons>['name'];
 
 export default function RecordHomeScreen() {
-  const t = useT();
+  const { t, language } = useI18n();
   const hour = new Date().getHours();
   const greeting = t(hour < 12 ? 'home.greetingMorning' : hour < 18 ? 'home.greetingAfternoon' : 'home.greetingEvening');
   const router = useRouter();
@@ -115,32 +115,32 @@ export default function RecordHomeScreen() {
         <View style={styles.content}>
           {!loaded ? (
             <View style={styles.loading}><ActivityIndicator color={colors.accent} /></View>
-          ) : courses.length === 0 ? (
+      ) : courses.length === 0 ? (
             <>
-              <PageHeading eyebrow={t('home.welcome')} title={t('home.title')} />
+              <PageHeading eyebrow={t('home.welcome')} title={t('home.title')} preserveEyebrowCase />
               <View style={styles.emptyGrid}>
                 <GlassCard elevated style={styles.emptyHero}>
-                  <LogoMark size={36} />
-                  <Text style={styles.emptyTitle}>{t('home.createFirstCourse')}</Text>
-                  <Text style={styles.emptyBody}>
-                    Courses keep every recording, transcript and summary organised. Add one, then record your first lecture.
-                  </Text>
-                  <View style={styles.emptyActions}>
-                    <PrimaryButton label={t('home.createCourse')} icon="add" onPress={openCreateCourse} />
-                    <SecondaryButton label={t('home.quickRecording')} icon="mic-outline" onPress={startQuickRecording} />
+                  <View style={styles.emptyHeroContent}>
+                    <LogoMark size={36} />
+                    <Text style={styles.emptyTitle}>{t('home.createFirstCourse')}</Text>
+                    <Text style={styles.emptyBody}>{t('home.emptyBody')}</Text>
+                    <View style={styles.emptyActions}>
+                      <PrimaryButton label={t('home.createCourse')} icon="add" onPress={openCreateCourse} />
+                      <SecondaryButton label={t('home.quickRecording')} icon="mic-outline" onPress={startQuickRecording} />
+                    </View>
                   </View>
                 </GlassCard>
                 <GlassCard style={styles.stepsCard}>
                   {[
-                    ['Record in class', 'Live English captions with instant Chinese translation while your professor speaks.'],
-                    ['Review the summary', 'AI outline, key terms and takeaways in both languages, ready after class.'],
-                    ['Keep your notes', 'Mark key moments and export everything as a PDF.'],
-                  ].map(([title, body], index) => (
-                    <View key={title} style={styles.step}>
+                    ['home.onboarding.recordTitle', 'home.onboarding.recordBody'],
+                    ['home.onboarding.reviewTitle', 'home.onboarding.reviewBody'],
+                    ['home.onboarding.notesTitle', 'home.onboarding.notesBody'],
+                  ].map(([titleKey, bodyKey], index) => (
+                    <View key={titleKey} style={styles.step}>
                       <View style={styles.stepNumber}><Text style={styles.stepNumberText}>{index + 1}</Text></View>
                       <View style={styles.stepText}>
-                        <Text style={styles.stepTitle}>{title}</Text>
-                        <Text style={styles.stepBody}>{body}</Text>
+                        <Text style={styles.stepTitle}>{t(titleKey)}</Text>
+                        <Text style={styles.stepBody}>{t(bodyKey)}</Text>
                       </View>
                     </View>
                   ))}
@@ -212,7 +212,7 @@ export default function RecordHomeScreen() {
                         <ProgressBar value={usageProgress} />
                         <View style={styles.metricRow}>
                           <Text style={styles.metricLabel}>{t('home.maxLength')}</Text>
-                          <Text style={styles.metricValue}>{planStatus?.maxRecordingMinutes ?? '—'} min</Text>
+                          <Text style={styles.metricValue}>{t('home.minutesValue', { minutes: planStatus?.maxRecordingMinutes ?? '—' })}</Text>
                         </View>
                       </>
                     )}
@@ -246,7 +246,7 @@ export default function RecordHomeScreen() {
                                 </View>
                               ) : null}
                             </View>
-                            <Text numberOfLines={1} style={styles.lectureMeta}>{course?.name ? localizeSystemDefaultTitle(t, course.name) : t('lecture.defaultCourse')} · {formatShortDate(lecture.date)}</Text>
+                            <Text numberOfLines={1} style={styles.lectureMeta}>{course?.name ? localizeSystemDefaultTitle(t, course.name) : t('lecture.defaultCourse')} · {formatShortDate(lecture.date, language)}</Text>
                           </View>
                           <Text style={styles.duration}>{formatDuration(lecture.durationMillis)}</Text>
                         </Pressable>
@@ -319,12 +319,13 @@ const styles = StyleSheet.create({
   },
   duration: { color: colors.textSecondary, fontSize: 11.5, fontWeight: '700', fontVariant: ['tabular-nums'] },
   emptyRecent: { color: colors.textTertiary, fontSize: 12.5, marginTop: 18 },
-  emptyGrid: { flexDirection: 'row', gap: 16, minHeight: 440 },
+  emptyGrid: { flexDirection: 'row', gap: 16, minHeight: 410, alignItems: 'stretch' },
   emptyHero: { flex: 1, justifyContent: 'center', overflow: 'hidden' },
+  emptyHeroContent: { width: '100%', maxWidth: 430, alignSelf: 'center' },
   emptyTitle: { marginTop: 14, color: colors.ink, fontSize: 22, fontWeight: '800' },
   emptyBody: { marginTop: 8, maxWidth: 340, color: colors.textSecondary, fontSize: 13.5, lineHeight: 21 },
-  emptyActions: { flexDirection: 'row', gap: 10, marginTop: 22 },
-  stepsCard: { flex: 1, justifyContent: 'center', gap: 24 },
+  emptyActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 22 },
+  stepsCard: { flex: 1, justifyContent: 'center', gap: 22 },
   step: { flexDirection: 'row', gap: 14 },
   stepNumber: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceMuted },
   stepNumberText: { color: colors.accent, fontSize: 12, fontWeight: '800' },

@@ -22,7 +22,7 @@ import {
   translate,
 } from './i18nCore.mjs';
 
-export type AppLanguage = 'en' | 'zh-Hans' | 'ja' | 'fr';
+export type AppLanguage = 'en' | 'zh-Hans' | 'ja' | 'fr' | 'es' | 'ko';
 
 export type LanguageOption = { code: AppLanguage; label: string; nativeLabel: string };
 

@@ -21,23 +21,53 @@ export function formatDuration(ms: number): string {
   return `${minutes}:${pad(seconds)}`;
 }
 
-const MONTHS = [
-  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-];
+const APP_LANGUAGE_LOCALES: Record<string, string> = {
+  en: 'en-US',
+  'zh-Hans': 'zh-CN',
+  ja: 'ja-JP',
+  fr: 'fr-FR',
+  es: 'es-ES',
+  ko: 'ko-KR',
+};
+
+function localeFor(language?: string): string {
+  return APP_LANGUAGE_LOCALES[language ?? 'en'] ?? APP_LANGUAGE_LOCALES.en;
+}
 
 /** Format an ISO date as "May 16, 2026". */
-export function formatDate(iso: string): string {
+export function formatDate(iso: string | null | undefined, language = 'en'): string {
+  if (!iso) return '';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '';
-  return `${MONTHS[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
+  return new Intl.DateTimeFormat(localeFor(language), {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  }).format(d);
 }
 
 /** Format an ISO date compactly as "May 16". */
-export function formatShortDate(iso: string): string {
+export function formatShortDate(iso: string | null | undefined, language = 'en'): string {
+  if (!iso) return '';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '';
-  return `${MONTHS[d.getMonth()]} ${d.getDate()}`;
+  return new Intl.DateTimeFormat(localeFor(language), {
+    month: 'short',
+    day: 'numeric',
+  }).format(d);
+}
+
+export function formatDateTime(iso: string | null | undefined, language = 'en'): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return new Intl.DateTimeFormat(localeFor(language), {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(d);
 }
 
 /** Time-of-day greeting used on the Record home screen. */
