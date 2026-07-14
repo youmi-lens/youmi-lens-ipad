@@ -287,30 +287,26 @@ export default function LectureDetailScreen() {
 
           {/* ---- Summary — source language, then translation when source != target ---- */}
           {tab === 'Summary' && (
-            <>
-              {sourceSummary || translatedSummary ? (
-                <View style={[styles.summaryGrid, compactLayout && styles.summaryGridCompact]}>
-                  <GlassCard>
-                    <BlockHeader icon="language-outline" label={getSummarySectionLabel(sourceLanguage)} />
-                    {sourceSummary ? (
-                      <Text style={[styles.bodyText, cjk(sourceLanguage) && styles.bodyZh]}>{sourceSummary}</Text>
-                    ) : (
-                      <Text style={styles.emptyInline}>{t('lecture.summaryPending')}</Text>
-                    )}
-                  </GlassCard>
-                  {hasTranslation && translatedSummary ? (
-                    <GlassCard>
-                      <BlockHeader icon="chatbubbles-outline" label={getSummarySectionLabel(translationLanguage)} />
-                      <Text style={[styles.bodyText, cjk(translationLanguage) && styles.bodyZh]}>{translatedSummary}</Text>
-                    </GlassCard>
-                  ) : null}
-                </View>
-              ) : (
-                <GlassCard>
+            <View style={[styles.summaryGrid, compactLayout && styles.summaryGridCompact]}>
+              <GlassCard style={styles.summaryCard}>
+                <BlockHeader icon="language-outline" label={getSummarySectionLabel(sourceLanguage)} />
+                {sourceSummary ? (
+                  <Text style={[styles.bodyText, cjk(sourceLanguage) && styles.bodyZh]}>{sourceSummary}</Text>
+                ) : (
                   <Text style={styles.emptyInline}>{t('lecture.summaryPending')}</Text>
+                )}
+              </GlassCard>
+              {hasTranslation ? (
+                <GlassCard style={styles.summaryCard}>
+                  <BlockHeader icon="chatbubbles-outline" label={getSummarySectionLabel(translationLanguage)} />
+                  {translatedSummary ? (
+                    <Text style={[styles.bodyText, cjk(translationLanguage) && styles.bodyZh]}>{translatedSummary}</Text>
+                  ) : (
+                    <Text style={styles.emptyInline}>{t('lecture.summaryPending')}</Text>
+                  )}
                 </GlassCard>
-              )}
-            </>
+              ) : null}
+            </View>
           )}
 
           {/* ---- Marked ---- */}
@@ -610,6 +606,7 @@ const styles = StyleSheet.create({
   },
   summaryGrid: { flexDirection: 'row', gap: 16, alignItems: 'stretch' },
   summaryGridCompact: { flexDirection: 'column' },
+  summaryCard: { flex: 1 },
 
   // ---- Mock notice ----
   mockNotice: {

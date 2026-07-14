@@ -36,6 +36,7 @@ import {
 } from './models';
 import { supabase } from './supabase';
 import {
+  keepLocalIfRemoteContentEmpty,
   REMOTE_RECORDING_COLUMNS,
   remoteRecordingFallbackColumns,
 } from './remoteRecordingColumns.mjs';
@@ -282,10 +283,6 @@ function processingStatusFromRemote(status: string | null): Lecture['processingS
   }
 }
 
-function keepLocalIfRemoteMissing(remoteValue: string | null | undefined, localValue: string | undefined): string {
-  return remoteValue ?? localValue ?? '';
-}
-
 function makeUuid(): string {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (char) => {
     const random = Math.floor(Math.random() * 16);
@@ -395,15 +392,15 @@ function mergeRemoteRecordingsIntoStore(
     const processingStatus = processingStatusFromRemote(row.ai_status);
     const date = row.created_at ?? local?.date ?? new Date().toISOString();
 
-    const transcript = keepLocalIfRemoteMissing(row.transcript, local?.transcript);
-    const transcriptZh = keepLocalIfRemoteMissing(row.transcript_zh, local?.transcriptZh);
-    const translatedTranscript = keepLocalIfRemoteMissing(row.translated_transcript, local?.translatedTranscript);
-    const summaryEn = keepLocalIfRemoteMissing(row.summary_en, local?.summaryEn);
-    const summaryZh = keepLocalIfRemoteMissing(row.summary_zh, local?.summaryZh);
-    const sourceSummary = keepLocalIfRemoteMissing(row.source_summary, local?.sourceSummary);
-    const translatedSummary = keepLocalIfRemoteMissing(row.translated_summary, local?.translatedSummary);
-    const liveTranscript = keepLocalIfRemoteMissing(row.live_transcript, local?.liveTranscript);
-    const translatedLiveTranscript = keepLocalIfRemoteMissing(row.translated_live_transcript, local?.translatedLiveTranscript);
+    const transcript = keepLocalIfRemoteContentEmpty(row.transcript, local?.transcript);
+    const transcriptZh = keepLocalIfRemoteContentEmpty(row.transcript_zh, local?.transcriptZh);
+    const translatedTranscript = keepLocalIfRemoteContentEmpty(row.translated_transcript, local?.translatedTranscript);
+    const summaryEn = keepLocalIfRemoteContentEmpty(row.summary_en, local?.summaryEn);
+    const summaryZh = keepLocalIfRemoteContentEmpty(row.summary_zh, local?.summaryZh);
+    const sourceSummary = keepLocalIfRemoteContentEmpty(row.source_summary, local?.sourceSummary);
+    const translatedSummary = keepLocalIfRemoteContentEmpty(row.translated_summary, local?.translatedSummary);
+    const liveTranscript = keepLocalIfRemoteContentEmpty(row.live_transcript, local?.liveTranscript);
+    const translatedLiveTranscript = keepLocalIfRemoteContentEmpty(row.translated_live_transcript, local?.translatedLiveTranscript);
 
     // Title freshness: if the local lecture has been renamed more recently
     // than this remote row was updated, keep the local title — otherwise the

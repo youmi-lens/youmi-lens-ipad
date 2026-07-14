@@ -4,6 +4,7 @@ import {
   REMOTE_RECORDING_COLUMNS,
   REMOTE_RECORDING_COLUMNS_LEGACY,
   REMOTE_RECORDING_COLUMNS_WITHOUT_UPDATED_AT,
+  keepLocalIfRemoteContentEmpty,
   remoteRecordingFallbackColumns,
 } from '../lib/remoteRecordingColumns.mjs';
 
@@ -30,5 +31,17 @@ assert.equal(
   REMOTE_RECORDING_COLUMNS_LEGACY,
 );
 assert.equal(remoteRecordingFallbackColumns('network timeout', REMOTE_RECORDING_COLUMNS), null);
+
+assert.equal(keepLocalIfRemoteContentEmpty('cloud summary', 'cached summary'), 'cloud summary');
+assert.equal(
+  keepLocalIfRemoteContentEmpty('', 'cached translated summary'),
+  'cached translated summary',
+  'empty reload must not erase cached translated content',
+);
+assert.equal(
+  keepLocalIfRemoteContentEmpty('   ', 'cached translated summary'),
+  'cached translated summary',
+  'whitespace-only reload must not erase cached translated content',
+);
 
 console.log('remote recording column fallback tests passed');

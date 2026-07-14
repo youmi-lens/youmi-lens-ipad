@@ -77,6 +77,21 @@ test('generic authoritative over legacy when both present', () => {
   assert.equal(getTranslatedSummary(lec), 'GENERIC ZH');
 });
 
+test('fr -> zh survives ready-state reload and empty generic values use the language fallback', () => {
+  const complete = {
+    sourceLanguage: 'fr', translationLanguage: 'zh-Hans',
+    sourceSummary: 'Résumé français', translatedSummary: '中文摘要', summaryZh: '旧中文摘要',
+  };
+  assert.equal(getSourceSummary(complete), 'Résumé français');
+  assert.equal(getTranslatedSummary(complete), '中文摘要');
+
+  const legacyDuringRace = {
+    sourceLanguage: 'fr', translationLanguage: 'zh-Hans',
+    sourceSummary: 'Résumé français', translatedSummary: '   ', summaryZh: '中文摘要',
+  };
+  assert.equal(getTranslatedSummary(legacyDuringRace), '中文摘要');
+});
+
 test('non-zh translated transcript does not fall back to transcriptZh', () => {
   const lec = { sourceLanguage: 'ja', translationLanguage: 'en', transcript: 'JA', transcriptZh: 'should-not-use' };
   assert.equal(getTranslatedTranscript(lec), undefined);

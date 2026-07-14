@@ -80,6 +80,42 @@ assert.equal(done.summaryEn, 'E');
 assert.equal(done.summaryZh, 'S');
 assert.equal(done.transcriptZh, 'Z');
 
+// A multilingual `done` snapshot without the complete generic pair is a race,
+// not readiness. Keep polling until the authoritative fields arrive.
+const frenchChineseRace = mergeProcessingSnapshot(
+  {},
+  {
+    source_language: 'fr', translation_language: 'zh-Hans',
+    transcript: 'FR transcript', translated_transcript: '中文转录',
+    summary_zh: '中文摘要', source_summary: null, translated_summary: null,
+    ai_status: 'done',
+  },
+);
+assert.equal(frenchChineseRace.processingStatus, 'processing');
+
+const frenchChineseComplete = mergeProcessingSnapshot(
+  {},
+  {
+    source_language: 'fr', translation_language: 'zh-Hans',
+    transcript: 'FR transcript', translated_transcript: '中文转录',
+    source_summary: 'Résumé français', translated_summary: '中文摘要',
+    ai_status: 'done',
+  },
+);
+assert.equal(frenchChineseComplete.processingStatus, 'ready');
+assert.equal(frenchChineseComplete.sourceSummary, 'Résumé français');
+assert.equal(frenchChineseComplete.translatedSummary, '中文摘要');
+
+const koreanOnlyComplete = mergeProcessingSnapshot(
+  {},
+  {
+    source_language: 'ko', translation_language: 'ko',
+    transcript: '한국어 전사', source_summary: '한국어 요약', translated_summary: null,
+    ai_status: 'done',
+  },
+);
+assert.equal(koreanOnlyComplete.processingStatus, 'ready', 'source == target needs only one content set');
+
 // Backend failed → failed, error surfaced (not silently dropped).
 const failed = mergeProcessingSnapshot({}, { ai_status: 'failed', ai_error: 'model error' });
 assert.equal(failed.processingStatus, 'failed');
