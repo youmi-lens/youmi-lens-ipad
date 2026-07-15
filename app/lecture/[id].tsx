@@ -36,6 +36,11 @@ import {
 } from '@/lib/languageContent';
 import { resolveLectureLanguagePair, shouldTranslate } from '@/lib/contentLanguages.mjs';
 import type { NoteStroke } from '@/lib/models';
+import {
+  SUMMARY_CARD_STYLE,
+  SUMMARY_PAGE_SCROLL_STYLE,
+  SUMMARY_STACK_STYLE,
+} from '@/lib/summaryLayout.mjs';
 import { useData } from '@/lib/store';
 
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
@@ -104,6 +109,7 @@ export default function LectureDetailScreen() {
   const translatedTranscript = getTranslatedTranscript(lecture);
   const sourceSummary = getSourceSummary(lecture);
   const translatedSummary = getTranslatedSummary(lecture);
+  const summariesReady = Boolean(sourceSummary && (!hasTranslation || translatedSummary));
   const cjk = (lang: string) => lang === 'zh-Hans' || lang === 'ja' || lang === 'ko';
   const typedNotes = lecture.notes.trim();
   const strokeCount = lecture.noteStrokes?.length ?? 0;
@@ -255,6 +261,7 @@ export default function LectureDetailScreen() {
       </View>
 
       <ScrollView
+        style={styles.pageScroll}
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
@@ -274,12 +281,16 @@ export default function LectureDetailScreen() {
                   <Text style={styles.emptyInline}>{t('lecture.transcriptPending')}</Text>
                 )}
               </GlassCard>
-              {hasTranslation && translatedTranscript ? (
+              {hasTranslation ? (
                 <GlassCard>
                   <BlockHeader icon="language-outline" label={getTranscriptSectionLabel(translationLanguage)} />
-                  <Text style={[styles.bodyText, cjk(translationLanguage) && styles.bodyZh]}>
-                    {translatedTranscript}
-                  </Text>
+                  {translatedTranscript ? (
+                    <Text style={[styles.bodyText, cjk(translationLanguage) && styles.bodyZh]}>
+                      {translatedTranscript}
+                    </Text>
+                  ) : (
+                    <Text style={styles.emptyInline}>{t('lecture.transcriptPending')}</Text>
+                  )}
                 </GlassCard>
               ) : null}
             </>
@@ -287,10 +298,10 @@ export default function LectureDetailScreen() {
 
           {/* ---- Summary — source language, then translation when source != target ---- */}
           {tab === 'Summary' && (
-            <View style={[styles.summaryGrid, compactLayout && styles.summaryGridCompact]}>
+            <View style={styles.summaryStack}>
               <GlassCard style={styles.summaryCard}>
                 <BlockHeader icon="language-outline" label={getSummarySectionLabel(sourceLanguage)} />
-                {sourceSummary ? (
+                {summariesReady && sourceSummary ? (
                   <Text style={[styles.bodyText, cjk(sourceLanguage) && styles.bodyZh]}>{sourceSummary}</Text>
                 ) : (
                   <Text style={styles.emptyInline}>{t('lecture.summaryPending')}</Text>
@@ -299,7 +310,7 @@ export default function LectureDetailScreen() {
               {hasTranslation ? (
                 <GlassCard style={styles.summaryCard}>
                   <BlockHeader icon="chatbubbles-outline" label={getSummarySectionLabel(translationLanguage)} />
-                  {translatedSummary ? (
+                  {summariesReady && translatedSummary ? (
                     <Text style={[styles.bodyText, cjk(translationLanguage) && styles.bodyZh]}>{translatedSummary}</Text>
                   ) : (
                     <Text style={styles.emptyInline}>{t('lecture.summaryPending')}</Text>
@@ -593,6 +604,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
 
+  pageScroll: SUMMARY_PAGE_SCROLL_STYLE,
   scroll: {
     paddingHorizontal: 38,
     paddingTop: spacing.sm,
@@ -604,9 +616,8 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     gap: spacing.md,
   },
-  summaryGrid: { flexDirection: 'row', gap: 16, alignItems: 'stretch' },
-  summaryGridCompact: { flexDirection: 'column' },
-  summaryCard: { flex: 1 },
+  summaryStack: { ...SUMMARY_STACK_STYLE, gap: spacing.lg },
+  summaryCard: SUMMARY_CARD_STYLE,
 
   // ---- Mock notice ----
   mockNotice: {
