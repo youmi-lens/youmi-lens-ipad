@@ -76,6 +76,8 @@ export type NewLectureInput = {
   liveCaptionLines?: PersistedCaptionLine[];
   /** Lifecycle status; defaults to 'local_recorded' when omitted (a finished save). */
   status?: LectureStatus;
+  /** Which recorder produced the audio. Local-only; absent on older lectures. */
+  recordingEngine?: 'legacy' | 'nativeDurable';
   /** Typed notes captured during recording (Mini Workspace). */
   notes?: string;
   /** Handwritten strokes captured during recording (Mini Workspace). */
@@ -692,6 +694,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
       processingStatus: 'not_started',
       markedTimestamps: input.markedTimestamps,
       status: input.status ?? 'local_recorded',
+      ...(input.recordingEngine ? { recordingEngine: input.recordingEngine } : {}),
       transcript: '',
       summaryEn: '',
       summaryZh: '',
@@ -760,6 +763,9 @@ export function DataProvider({ children }: { children: ReactNode }) {
           noteImages: nextImages,
           noteUpdatedAt: notesChanged && hasNoteContent ? new Date().toISOString() : existing.noteUpdatedAt,
           status: 'in_progress',
+          // Provenance is set once by the engine that started the capture and is
+          // never downgraded by a later autosave.
+          recordingEngine: existing.recordingEngine ?? input.recordingEngine,
         };
         saved = patched;
         return prev.map((l) => (l.id === id ? patched : l));
@@ -776,6 +782,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
         processingStatus: 'not_started',
         markedTimestamps: input.markedTimestamps,
         status: 'in_progress',
+        ...(input.recordingEngine ? { recordingEngine: input.recordingEngine } : {}),
         transcript: '',
         summaryEn: '',
         summaryZh: '',

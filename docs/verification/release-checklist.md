@@ -33,8 +33,12 @@ preserves committed audio.
 
 ### Setup
 
+Either flip the compile-time gate, or use the Phase 3 dogfood flag:
+
 1. In `lib/recording/featureGate.ts` set `CONFIGURED_RECORDING_ENGINE` to
-   `'nativeDurable'`.
+   `'nativeDurable'` — **or** build with `EXPO_PUBLIC_NATIVE_RECORDER_DOGFOOD=1`
+   (see [phase-3-dogfood.md](phase-3-dogfood.md), which leaves the committed
+   default untouched and is the preferred route).
 2. Install a signed build on a physical iPad and sign in (guests always use the
    legacy recorder).
 

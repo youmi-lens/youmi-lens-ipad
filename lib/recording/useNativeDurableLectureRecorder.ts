@@ -19,6 +19,7 @@ import {
   type DurableRecordingSession,
 } from '@/modules/expo-durable-recorder';
 
+import { durationBucket, logRecordingEvent } from './diagnostics';
 import { finalizedDurationMillis, recoverableSessionsForLecture } from './policy.mjs';
 import type { LectureRecorder, RecorderPermission } from './types';
 
@@ -70,12 +71,25 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
       const match = recoverableSessionsForLecture(sessions, lectureId)[0] ?? null;
       setRecoverableSession(match);
       if (match) applySession(match);
-      if (__DEV__) console.info('[recorder] engine selected', { engine: 'nativeDurable', recoverable: Boolean(match) });
+      logRecordingEvent('recorder_engine_selected', {
+        engine: 'nativeDurable',
+        hasRecoverableSession: Boolean(match),
+        recoverableSessionCount: recoverableSessionsForLecture(sessions, lectureId).length,
+      });
+      if (match) {
+        logRecordingEvent('native_recovery_offered', {
+          sessionState: match.state,
+          segmentCount: match.segments.length,
+          durationBucket: durationBucket(finalizedDurationMillis(match)),
+          handoffCompleted: Boolean(match.handoffCompletedAt),
+        });
+      }
     }).catch((failure: unknown) => {
       if (!mounted) return;
       const detail = failure instanceof Error ? failure.message : String(failure);
       setError('Could not inspect durable recordings.'); setErrorDetail(detail);
       setPermissionChecked(true);
+      logRecordingEvent('native_initialization_failed', { reason: 'native_storage_unavailable' });
     }).finally(() => { if (mounted) setRecoveryChecked(true); });
     return () => { mounted = false; };
   }, [applySession, enabled, lectureId]);
@@ -119,8 +133,13 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
       const started = await startNative({ recordingSessionId: session.recordingSessionId });
       if (started.session) sessionRef.current = started.session;
       activeStartedAtRef.current = Date.now(); activeRef.current = true; setIsPaused(false); setIsRecording(true);
+      logRecordingEvent('native_recording_started', { engine: 'nativeDurable' });
       return true;
-    } catch (failure) { fail('Could not start the recording. Please try again.', failure); return false; }
+    } catch (failure) {
+      fail('Could not start the recording. Please try again.', failure);
+      logRecordingEvent('native_initialization_failed', { reason: 'native_initialization_failed' });
+      return false;
+    }
   }, [applySession, enabled, fail, lectureId, recoverableSession]);
 
   const pauseRecording = useCallback(async () => {
@@ -128,6 +147,9 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
     try {
       const status = await pauseNative({ recordingSessionId: session.recordingSessionId });
       if (status.session) applySession(status.session);
+      logRecordingEvent('native_recording_paused', {
+        segmentCount: status.session?.segments.length ?? session.segments.length,
+      });
     } catch (failure) { fail('Could not pause the recording.', failure); }
   }, [applySession, fail, isRecording]);
 
@@ -147,6 +169,9 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
       if (status.session) sessionRef.current = status.session;
       baseDurationRef.current = finalizedDurationMillis(status.session ?? session);
       activeStartedAtRef.current = Date.now(); activeRef.current = true; setIsPaused(false); setIsRecording(true);
+      logRecordingEvent('native_recording_resumed', {
+        segmentCount: (status.session ?? session).segments.length,
+      });
     } catch (failure) { fail('Could not resume the recording.', failure); }
   }, [fail]);
 
@@ -168,7 +193,13 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
       }
       const output = await exportFinalizedAsset({ recordingSessionId: finalSession.recordingSessionId });
       applySession(output.session); activeRef.current = false; setIsRecording(false); setIsPaused(false);
-      setRecordingUri(output.fileUri); return output.fileUri;
+      setRecordingUri(output.fileUri);
+      logRecordingEvent('native_recording_finalized', {
+        segmentCount: output.session.segments.length,
+        durationBucket: durationBucket(output.session.finalAsset?.durationMs ?? null),
+        sessionState: output.session.state,
+      });
+      return output.fileUri;
     } catch (failure) { fail('Could not finish the recording.', failure); return null; }
   }, [applySession, fail]);
 
@@ -183,6 +214,9 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
     const session = recoverableSession; if (!session) return false;
     try {
       const recovered = await recoverRecordingSession({ recordingSessionId: session.recordingSessionId });
+      for (const issue of recovered.issues) {
+        logRecordingEvent('native_reconciliation_issue', { issueCode: issue.code });
+      }
       if (recovered.issues.some((issue) => [
         'missing_referenced_file',
         'invalid_referenced_file',
@@ -191,7 +225,12 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
       ].includes(issue.code))) {
         throw new Error('A durable source segment is incomplete, missing, or invalid.');
       }
-      applySession(recovered.session); setRecoverableSession(null); setIsPaused(true); return true;
+      applySession(recovered.session); setRecoverableSession(null); setIsPaused(true);
+      logRecordingEvent('native_recovery_resumed', {
+        segmentCount: recovered.session.segments.length,
+        durationBucket: durationBucket(finalizedDurationMillis(recovered.session)),
+      });
+      return true;
     } catch (failure) { fail('Could not recover the unfinished recording.', failure); return false; }
   }, [applySession, fail, recoverableSession]);
   const finishRecoverableRecording = useCallback(async () => {
@@ -208,6 +247,10 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
         recordingSessionId: session.recordingSessionId,
       });
       applySession(acknowledged);
+      logRecordingEvent('native_handoff_completed', {
+        segmentCount: acknowledged.segments.length,
+        handoffCompleted: Boolean(acknowledged.handoffCompletedAt),
+      });
       return true;
     } catch (failure) {
       fail('The lecture was saved, but recording completion could not be confirmed.', failure);
@@ -224,6 +267,7 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
       if (session.state === 'ready' || session.state === 'paused') session = await abandonSession({ recordingSessionId: session.recordingSessionId });
       await deleteSession(session.recordingSessionId);
       sessionRef.current = null; setRecoverableSession(null); setDurationMillis(0); setIsPaused(false); setIsRecording(false);
+      logRecordingEvent('native_recovery_discarded', { sessionState: session.state });
     } catch (failure) { fail('Could not discard the unfinished recording.', failure); throw failure; }
   }, [fail, recoverableSession]);
 

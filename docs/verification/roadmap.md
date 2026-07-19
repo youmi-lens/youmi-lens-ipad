@@ -11,23 +11,22 @@ committed; native recording remains gated off by default.
 | 2A | Durable native session layer | `b8d53dc` |
 | 2B | Durable foreground audio engine, segments, pause/resume | `0c57581` |
 | 2C | Feature-gated adapter, recovery, discard, handoff | `e3af1e7` |
+| 3 | Controlled dogfooding: runtime selection policy, fallback reasons, provenance, privacy-minimal diagnostics | see `phase-3-dogfood.md` |
 
-## Phase 3 — recommended next scope
+## Phase 3 — delivered
 
-**Goal: earn the right to make native the default.** No new capability.
+Runtime selection policy, build-time internal cohort eligibility, deterministic
+fallback reason codes, local engine provenance, and privacy-minimal console
+diagnostics. Default remains legacy. Details in `phase-3-dogfood.md`.
 
-1. Close the deferred physical gates (resume-from-recovery and discard) from
-   `release-checklist.md`.
-2. Internal dogfooding with the gate flipped locally, not in a shipped build.
-3. Telemetry for durable outcomes — session created/finalized/recovered/discarded
-   counts and reconciliation issue codes. Counters only, no audio, no content.
-4. Recovery UX polish once real recovery frequency is known: currently the card
-   blocks starting a new recording, which is safe but blunt.
-5. A staged rollout mechanism, so the engine can be selected per user rather
-   than by a compile-time constant.
+**Deferred out of Phase 3:**
 
-Deliberately excluded: background recording, and any change to the immutable
-segment model.
+- **Per-user remote eligibility.** Eligibility is a build-time cohort flag, so
+  changing who is enrolled needs a rebuild. A per-user flag would require a
+  backend/schema decision that was deliberately out of scope.
+- Physical resume-from-recovery and discard gates.
+- Recovery UX polish: the recovery card still blocks starting a new recording,
+  which is safe but blunt. Revisit once real recovery frequency is known.
 
 ## Phase 4 — native recording becomes the default
 

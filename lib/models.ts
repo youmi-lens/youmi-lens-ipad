@@ -127,6 +127,13 @@ export type Lecture = {
   /** Important moments, as millisecond offsets into the recording. */
   markedTimestamps: number[];
   status: LectureStatus;
+  /**
+   * Which recorder produced this lecture's audio. Local-only and never sent to
+   * the backend (remote writes use an explicit column allowlist). Absent on
+   * lectures recorded before provenance existed — treat missing as unknown,
+   * which is handled exactly like legacy.
+   */
+  recordingEngine?: 'legacy' | 'nativeDurable';
   sourceLanguage?: ContentLanguage;
   translationLanguage?: ContentLanguage;
 
