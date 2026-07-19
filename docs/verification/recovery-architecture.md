@@ -69,6 +69,11 @@ If a match exists, the recording screen shows the recovery card and **blocks
 starting a new recording** until the user resumes, finishes, or discards. That
 block is deliberate: silently starting fresh would strand the old audio.
 
+**Finish does not require Resume.** After relaunch, tapping Finish claims
+finalization authority for a paused (or already-finalizing) session with
+committed segments, exports through the existing path, and leaves handoff
+acknowledgement unchanged.
+
 ### Reconciliation
 
 `reconcileSession` walks the session directory and reports issues rather than
@@ -110,6 +115,21 @@ recoverable, losing a lecture is not.
 Both `export` and `acknowledgeFinalAssetHandoff` are idempotent. Re-exporting
 returns the same stable URI without rewriting bytes; re-acknowledging keeps the
 original timestamp.
+
+### Finish after relaunch (no Resume)
+
+Ownership is **process-local** (`ownedSessionId` in the foreground engine). A
+cold relaunch therefore has no owner even when committed segments are intact.
+
+`recoverRecordingSession` remains inspection-only and does not claim. Resume
+claims when the user continues capture. **Finish claims for finalization only**
+when this process has no live owner and no active capture, and the session is
+`paused` or `finalizing`. It never starts the microphone or opens a new
+segment. A different live owner still returns `recorderBusy` without mutating
+the victim session.
+
+Prescribed recovery verification therefore includes: pause → kill → relaunch →
+**Finish** (without Resume) → export → handoff ack.
 
 ## Feature gate
 

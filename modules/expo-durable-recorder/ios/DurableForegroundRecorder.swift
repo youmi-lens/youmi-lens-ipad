@@ -271,7 +271,11 @@ final class DurableForegroundRecorder {
         if ownedSessionId == recordingSessionId { releaseOwnership() }
         return statusDictionary(session: existing)
       }
-      try requireOwner(recordingSessionId)
+      // Finish must work after cold recovery without Resume. Ownership is
+      // process-local, so a relaunch leaves no owner even when committed
+      // segments are intact. Claim for finalization only when this process has
+      // no live owner and no active capture; never start audio here.
+      try claimForFinalization(recordingSessionId, session: existing)
       runtimeState = .stopping
       do {
         var session = existing
@@ -331,9 +335,9 @@ final class DurableForegroundRecorder {
         (try? fileInspector.inspect(url: url)) != nil
       }
       if !session.state.isTerminal {
-        // Recovery is inspection-only. Resume claims ownership when the user
-        // explicitly chooses to continue; Finish/Discard must not strand the
-        // engine behind an otherwise idle recovered session.
+        // Recovery is inspection-only and does not claim ownership. Resume
+        // claims when the user continues capture; Finish claims via
+        // claimForFinalization when finalizing committed segments.
         runtimeState = session.state == .paused ? .paused : session.state == .ready ? .ready : .idle
       }
       return DurableRecoveryResult(session: session, issues: result.issues)
@@ -434,6 +438,43 @@ final class DurableForegroundRecorder {
     guard ownedSessionId == recordingSessionId else {
       if ownedSessionId != nil { throw DurableRecorderCoreError.recorderBusy }
       throw DurableRecorderCoreError.invalidRecorderState("The session does not own the native recorder.")
+    }
+  }
+
+  /// Acquire stop/finalize authority without starting capture.
+  ///
+  /// After a cold relaunch the process has no `ownedSessionId`, but a paused
+  /// (or already-finalizing) session may still have valid committed segments.
+  /// Finish must be able to claim those sessions. A different live owner, or
+  /// any active capture owned by another path, remains a hard conflict.
+  private func claimForFinalization(
+    _ recordingSessionId: String,
+    session: DurableRecordingSession
+  ) throws {
+    if ownedSessionId == recordingSessionId {
+      return
+    }
+    if ownedSessionId != nil {
+      throw DurableRecorderCoreError.recorderBusy
+    }
+    guard activeCapture == nil else {
+      throw DurableRecorderCoreError.recorderBusy
+    }
+    switch session.state {
+    case .paused, .finalizing:
+      ownedSessionId = recordingSessionId
+      if runtimeState == .idle {
+        runtimeState = session.state == .paused ? .paused : .idle
+      }
+    case .recording:
+      // Live capture finalization requires the owner that started the segment.
+      throw DurableRecorderCoreError.invalidRecorderState(
+        "The session does not own the native recorder."
+      )
+    default:
+      throw DurableRecorderCoreError.invalidRecorderState(
+        "The session does not own the native recorder."
+      )
     }
   }
 

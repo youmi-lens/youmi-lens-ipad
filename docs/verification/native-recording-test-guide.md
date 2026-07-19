@@ -53,6 +53,11 @@ Expected:
 - Resume appends segment 2; segment 1 stays immutable
 - Final asset contains both segments in order
 
+**Also required:** pause → force-quit → relaunch → **Finish without Resume**.
+Direct Finish must finalize and export committed segments, release ownership,
+and leave handoff acknowledgement unchanged. Covered by
+`durable-recorder-recovery-core.test.swift` scenario D.
+
 Entry point: the **in-progress lecture in the library**. A new recording never
 shows the recovery card.
 

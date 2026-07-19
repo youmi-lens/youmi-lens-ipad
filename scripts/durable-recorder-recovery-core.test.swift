@@ -73,6 +73,61 @@ private func alwaysValidAudio(_ url: URL) -> Bool {
   (try? SystemDurableAudioFileInspector().inspect(url: url)) != nil
 }
 
+private final class RecoveryFakeAudioSession: DurableAudioSessionManaging {
+  var permissionState: DurableRecorderPermissionState = .granted
+  var hasSuitableInput = true
+  var routeDescription = "builtInMic:Recovery test"
+  func requestPermission() async -> DurableRecorderPermissionState { permissionState }
+  func activateForRecording() throws {
+    if !hasSuitableInput { throw DurableRecorderCoreError.noAudioInput }
+  }
+  func deactivate() {}
+}
+
+private final class RecoveryFakeCapture: DurableAudioCapture {
+  private let url: URL
+  private(set) var isRecording = false
+  init(url: URL) { self.url = url }
+  func prepareToRecord() -> Bool { true }
+  func record() -> Bool {
+    isRecording = true
+    FileManager.default.createFile(atPath: url.path, contents: Data(repeating: 9, count: 4_096))
+    return true
+  }
+  func stop() { isRecording = false }
+}
+
+private final class RecoveryFakeCaptureFactory: DurableAudioCaptureFactory {
+  func makeCapture(url: URL) throws -> DurableAudioCapture { RecoveryFakeCapture(url: url) }
+}
+
+private struct RecoveryFakeFileInspector: DurableAudioFileInspecting {
+  func inspect(url: URL) throws -> DurableAudioFileInspection {
+    let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+    guard size > 0 else {
+      throw DurableRecorderCoreError.segmentValidationFailed("empty recovery test asset")
+    }
+    return DurableAudioFileInspection(
+      durationMs: 1_000,
+      byteLength: Int64(size),
+      sampleRate: 44_100,
+      channelCount: 1
+    )
+  }
+}
+
+private func makeRecoveryEngine(root: URL) throws -> (DurableRecorderStore, DurableForegroundRecorder) {
+  let store = try DurableRecorderStore(rootURL: root)
+  let engine = DurableForegroundRecorder(
+    store: store,
+    audioSession: RecoveryFakeAudioSession(),
+    captureFactory: RecoveryFakeCaptureFactory(),
+    fileInspector: RecoveryFakeFileInspector(),
+    observeSystemNotifications: false
+  )
+  return (store, engine)
+}
+
 @main
 private struct RecoveryTests {
   static func main() async throws {
@@ -83,6 +138,10 @@ private struct RecoveryTests {
     try await resumeAfterForcedRelaunch(root: root)
     try discardAfterForcedRelaunch(root: root)
     try interruptedCaptureKeepsEvidence(root: root)
+    try await finishDirectlyAfterForcedRelaunch(root: root)
+    try await finishRejectsCompetingLiveOwner(root: root)
+    try await finishIdempotentWhenAlreadyOwned(root: root)
+    try await finishReusesFinalizedAssetWithoutRecording(root: root)
 
     print("native recovery tests passed")
   }
@@ -331,5 +390,188 @@ private struct RecoveryTests {
       reconciled.session.segments.isEmpty,
       "An uncommitted capture must not appear as a committed segment"
     )
+  }
+
+  // MARK: Scenario D — Finish directly after relaunch (no Resume).
+
+  static func finishDirectlyAfterForcedRelaunch(root: URL) async throws {
+    let lectureId = "lecture-recovery-finish-direct"
+    var sessionId = ""
+    var firstSegmentId = ""
+    var firstDigest = ""
+    do {
+      let store = try DurableRecorderStore(rootURL: root)
+      var session = try store.createSession(lectureId: lectureId)
+      sessionId = session.recordingSessionId
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .preparing)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .ready)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .recording)
+      let first = try addSegment(store: store, sessionId: sessionId, frequency: 520)
+      session = first.session
+      firstSegmentId = session.segments[0].segmentId
+      firstDigest = digest(first.bytes)
+      _ = try store.transitionSession(recordingSessionId: sessionId, to: .paused)
+    }
+
+    // Cold relaunch: new engine, no prior claim, no Resume.
+    let (store, engine) = try makeRecoveryEngine(root: root)
+    let recovery = try engine.recoverRecordingSession(recordingSessionId: sessionId)
+    try require(recovery.session.state == .paused, "Recovered session must remain paused")
+    try require(recovery.session.segments.count == 1, "Committed segment must survive relaunch")
+    let recoveredDigest = digest(try Data(contentsOf: segmentURL(root: root, recovery.session, 0)))
+    try require(
+      recoveredDigest == firstDigest,
+      "Finish-after-relaunch must preserve committed segment bytes"
+    )
+
+    let stopped = try engine.stopRecording(recordingSessionId: sessionId)
+    let stoppedSession = stopped["session"] as! [String: Any]
+    try require((stoppedSession["state"] as? String) == "finalized", "Direct Finish must finalize without Resume")
+    try require((stopped["runtimeState"] as? String) == "idle", "Finish must release runtime ownership")
+
+    let exported = try await DurableFinalAssetExporter(store: store).export(recordingSessionId: sessionId)
+    let fileUri = exported["fileUri"] as! String
+    let finalURL = URL(string: fileUri)!
+    let finalBytes = try Data(contentsOf: finalURL)
+    try require(!finalBytes.isEmpty, "Direct Finish must produce a non-empty final asset")
+    let finalized = try store.getSession(recordingSessionId: sessionId)
+    try require(finalized.finalAsset != nil, "Final metadata must be present after export")
+    try require(
+      finalized.finalAsset?.sourceSegmentIds == [firstSegmentId],
+      "Final asset must reference the committed segment only"
+    )
+    let segmentAfterExport = digest(try Data(contentsOf: segmentURL(root: root, finalized, 0)))
+    try require(
+      segmentAfterExport == firstDigest,
+      "Export must leave committed segment bytes immutable"
+    )
+
+    // Repeated Finish / export must stay idempotent.
+    let stoppedAgain = try engine.stopRecording(recordingSessionId: sessionId)
+    try require(
+      ((stoppedAgain["session"] as? [String: Any])?["state"] as? String) == "finalized",
+      "Repeated Finish on a finalized session must remain safe"
+    )
+    let reExported = try await DurableFinalAssetExporter(store: store).export(recordingSessionId: sessionId)
+    try require((reExported["fileUri"] as? String) == fileUri, "Repeated export must return the same URI")
+    let finalAfterRepeat = digest(try Data(contentsOf: finalURL))
+    try require(
+      finalAfterRepeat == digest(finalBytes),
+      "Repeated export must not rewrite final asset bytes"
+    )
+
+    let acknowledged = try store.acknowledgeFinalAssetHandoff(recordingSessionId: sessionId)
+    try require(acknowledged.handoffCompletedAt != nil, "Handoff acknowledgement must still work after direct Finish")
+  }
+
+  // MARK: Scenario E — Finish must not steal a live competing owner.
+
+  static func finishRejectsCompetingLiveOwner(root: URL) async throws {
+    let (store, engine) = try makeRecoveryEngine(root: root)
+    let owned = try store.createSession(lectureId: "lecture-owner-live")
+    _ = try await engine.prepareRecording(recordingSessionId: owned.recordingSessionId, requestPermission: false)
+
+    var victim = try store.createSession(lectureId: "lecture-owner-victim")
+    victim = try store.transitionSession(recordingSessionId: victim.recordingSessionId, to: .preparing)
+    victim = try store.transitionSession(recordingSessionId: victim.recordingSessionId, to: .ready)
+    victim = try store.transitionSession(recordingSessionId: victim.recordingSessionId, to: .recording)
+    let committed = try addSegment(store: store, sessionId: victim.recordingSessionId, frequency: 610)
+    victim = committed.session
+    victim = try store.transitionSession(recordingSessionId: victim.recordingSessionId, to: .paused)
+    let beforeDigest = digest(committed.bytes)
+    let beforeState = victim.state
+
+    do {
+      _ = try engine.stopRecording(recordingSessionId: victim.recordingSessionId)
+      throw RecoveryTestFailure(description: "Finish stole a session while another live owner held the recorder")
+    } catch is RecoveryTestFailure {
+      throw RecoveryTestFailure(description: "Finish stole a session while another live owner held the recorder")
+    } catch let error as DurableRecorderCoreError {
+      try require(error == .recorderBusy, "Competing Finish must fail with recorderBusy")
+    }
+
+    let after = try store.getSession(recordingSessionId: victim.recordingSessionId)
+    try require(after.state == beforeState, "Rejected Finish must not mutate victim session state")
+    try require(after.segments.count == 1, "Rejected Finish must not delete committed segments")
+    try require(after.finalAsset == nil, "Rejected Finish must not create a final asset")
+    let afterDigest = digest(try Data(contentsOf: segmentURL(root: root, after, 0)))
+    try require(
+      afterDigest == beforeDigest,
+      "Rejected Finish must leave committed audio untouched"
+    )
+  }
+
+  // MARK: Scenario F — Finish still works when this process already owns the session.
+
+  static func finishIdempotentWhenAlreadyOwned(root: URL) async throws {
+    let (store, engine) = try makeRecoveryEngine(root: root)
+    var session = try store.createSession(lectureId: "lecture-already-owned")
+    let sessionId = session.recordingSessionId
+    session = try store.transitionSession(recordingSessionId: sessionId, to: .preparing)
+    session = try store.transitionSession(recordingSessionId: sessionId, to: .ready)
+    session = try store.transitionSession(recordingSessionId: sessionId, to: .recording)
+    session = try addSegment(store: store, sessionId: sessionId, frequency: 480).session
+    session = try store.transitionSession(recordingSessionId: sessionId, to: .paused)
+    try require(session.segments.count == 1, "Precondition: one committed segment")
+
+    // prepareRecording claims a paused session without opening a new segment.
+    _ = try await engine.prepareRecording(recordingSessionId: sessionId, requestPermission: false)
+    let stopped = try engine.stopRecording(recordingSessionId: sessionId)
+    try require(
+      ((stopped["session"] as? [String: Any])?["state"] as? String) == "finalized",
+      "Finish must succeed when the current process already owns the session"
+    )
+    let exported = try await DurableFinalAssetExporter(store: store).export(recordingSessionId: sessionId)
+    try require(((exported["fileUri"] as? String)?.isEmpty) == false, "Owned Finish must export a final asset")
+    let afterOwnedFinish = try store.getSession(recordingSessionId: sessionId)
+    try require(
+      afterOwnedFinish.segments.count == 1,
+      "Owned Finish must not invent extra segments"
+    )
+  }
+
+  // MARK: Scenario G — Finalized recovery reuses the asset; no new recording.
+
+  static func finishReusesFinalizedAssetWithoutRecording(root: URL) async throws {
+    let lectureId = "lecture-recovery-finalized"
+    var sessionId = ""
+    var fileUri = ""
+    var finalDigest = ""
+    do {
+      let store = try DurableRecorderStore(rootURL: root)
+      var session = try store.createSession(lectureId: lectureId)
+      sessionId = session.recordingSessionId
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .preparing)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .ready)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .recording)
+      session = try addSegment(store: store, sessionId: sessionId, frequency: 700).session
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .paused)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .finalizing)
+      session = try store.finalizeSession(recordingSessionId: sessionId)
+      let exported = try await DurableFinalAssetExporter(store: store).export(recordingSessionId: sessionId)
+      fileUri = exported["fileUri"] as! String
+      finalDigest = digest(try Data(contentsOf: URL(string: fileUri)!))
+    }
+
+    let (store, engine) = try makeRecoveryEngine(root: root)
+    let offered = try store.listRecoverableSessions()
+    try require(
+      offered.contains { $0.recordingSessionId == sessionId },
+      "Finalized-but-unacked sessions must remain recoverable"
+    )
+    let stopped = try engine.stopRecording(recordingSessionId: sessionId)
+    try require(
+      ((stopped["session"] as? [String: Any])?["state"] as? String) == "finalized",
+      "Finish on an already-finalized session must not restart recording"
+    )
+    let reExported = try await DurableFinalAssetExporter(store: store).export(recordingSessionId: sessionId)
+    try require((reExported["fileUri"] as? String) == fileUri, "Recovery Finish must reuse the existing final URI")
+    let reusedDigest = digest(try Data(contentsOf: URL(string: fileUri)!))
+    try require(
+      reusedDigest == finalDigest,
+      "Recovery Finish must not rewrite or duplicate the final asset"
+    )
+    let session = try store.getSession(recordingSessionId: sessionId)
+    try require(session.segments.count == 1, "Finalized recovery must not append new segments")
   }
 }
