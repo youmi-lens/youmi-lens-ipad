@@ -83,9 +83,11 @@ xcrun devicectl device process launch --device <udid> com.aydenz.youmilensipad
 - **Killed while paused** → all audio committed, cleanly resumable. This is the
   supported path.
 - **Killed while recording** → a `.partial.m4a` remains. That segment's audio is
-  **not recoverable** (no `moov` atom). The session is still offered and
-  reconciliation reports `incomplete_temporary_file`. Losing it is expected;
-  hiding it is a bug.
+  **not salvaged** (no `moov` atom). Store reconciliation still reports
+  `incomplete_temporary_file`. Engine recovery quarantines the partial under
+  `quarantine/` and must **not** hard-block Resume/Finish when prior committed
+  segments exist. Losing only the active partial is expected; stranding
+  committed audio behind it is a bug.
 
 ## Feature gate
 

@@ -217,10 +217,12 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
       for (const issue of recovered.issues) {
         logRecordingEvent('native_reconciliation_issue', { issueCode: issue.code });
       }
+      // incomplete_temporary_file is quarantined natively during recoverRecordingSession
+      // when no live capture owns the partial. It must not hard-block Resume/Finish
+      // when committed segments already exist (or when only a dead partial remains).
       if (recovered.issues.some((issue) => [
         'missing_referenced_file',
         'invalid_referenced_file',
-        'incomplete_temporary_file',
         'invalid_orphan_file',
       ].includes(issue.code))) {
         throw new Error('A durable source segment is incomplete, missing, or invalid.');

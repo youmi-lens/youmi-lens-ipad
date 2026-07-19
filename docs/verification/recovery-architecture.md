@@ -84,18 +84,26 @@ repairing destructively:
 | `missing_referenced_file` | metadata references a segment that is gone |
 | `invalid_referenced_file` | referenced segment is not readable audio |
 | `incomplete_temporary_file` | a `.partial.m4a` from a kill mid-capture |
+| `stale_temporary_file_quarantined` | informational: inactive partial moved to `quarantine/` |
 | `orphan_finalized_file` | valid audio on disk not referenced by metadata |
 | `invalid_orphan_file` | unreferenced file that is not valid audio |
 | `unsupported_segment_format` | unexpected file in `segments/` |
 
-Any of the four blocking codes causes resume to fail loudly instead of
-proceeding with incomplete audio.
+Hard-blocking codes for Resume are `missing_referenced_file`,
+`invalid_referenced_file`, and `invalid_orphan_file`.
 
-**A kill mid-capture loses that partial segment's audio.** An AAC/M4A file
-without its `moov` atom is not recoverable. The design surfaces this as an issue
-rather than deleting it silently — the session stays visible so the loss is
-never invisible. This is also why zero-segment sessions are still offered for
-recovery: filtering them out would hide exactly this case.
+**Stale partials do not strand committed audio.** When
+`recoverRecordingSession` runs with no live capture, any `.partial.m4a` under
+`segments/` is moved to `sessions/<id>/quarantine/` and the session is
+re-reconciled. Committed `.m4a` segments and `final/lecture.m4a` are never
+touched. A live `activeCapture` makes recovery return `recorderBusy` and leaves
+the partial alone.
+
+**A kill mid-capture still loses that partial segment's audio.** An AAC/M4A
+file without its `moov` atom is not salvaged here (that is later work). The
+partial is quarantined for evidence, not adopted as a committed segment.
+Zero-segment sessions remain listed for recovery so the loss stays visible;
+Finish must not invent an empty final asset when no committed segments exist.
 
 ## Handoff and idempotency
 

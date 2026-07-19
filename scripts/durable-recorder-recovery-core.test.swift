@@ -142,6 +142,12 @@ private struct RecoveryTests {
     try await finishRejectsCompetingLiveOwner(root: root)
     try await finishIdempotentWhenAlreadyOwned(root: root)
     try await finishReusesFinalizedAssetWithoutRecording(root: root)
+    try await recoverPastStalePartialWithCommittedSegments(root: root)
+    try await resumeAndFinishPastStalePartial(root: root)
+    try await stalePartialOnlyHasNoCommittedAudio(root: root)
+    try await liveCapturePartialIsNotQuarantined(root: root)
+    try await stalePartialQuarantineIsIdempotent(root: root)
+    try await discardStillRemovesQuarantinedPartial(root: root)
 
     print("native recovery tests passed")
   }
@@ -573,5 +579,339 @@ private struct RecoveryTests {
     )
     let session = try store.getSession(recordingSessionId: sessionId)
     try require(session.segments.count == 1, "Finalized recovery must not append new segments")
+  }
+
+  // MARK: Scenario H — committed segments + stale partial remain recoverable.
+
+  static func recoverPastStalePartialWithCommittedSegments(root: URL) async throws {
+    let lectureId = "lecture-stale-partial-committed"
+    var sessionId = ""
+    var firstDigest = ""
+    var firstSegmentId = ""
+    var partialFileName = ""
+    do {
+      let store = try DurableRecorderStore(rootURL: root)
+      var session = try store.createSession(lectureId: lectureId)
+      sessionId = session.recordingSessionId
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .preparing)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .ready)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .recording)
+      let first = try addSegment(store: store, sessionId: sessionId, frequency: 440)
+      session = first.session
+      firstDigest = digest(first.bytes)
+      firstSegmentId = session.segments[0].segmentId
+      // Start a second capture and die before commit — leave a dead partial.
+      let plan = try store.createSegmentPlan(recordingSessionId: sessionId)
+      try Data(repeating: 0xAB, count: 2_048).write(to: plan.activeURL)
+      partialFileName = plan.activeURL.lastPathComponent
+      _ = try store.transitionSession(recordingSessionId: sessionId, to: .paused)
+    }
+
+    let (store, engine) = try makeRecoveryEngine(root: root)
+    let inspected = try store.reconcileSession(
+      recordingSessionId: sessionId,
+      inspectAudioFile: alwaysValidAudio
+    )
+    try require(
+      inspected.issues.contains { $0.code == "incomplete_temporary_file" },
+      "Store reconcile must still surface the stale partial before repair"
+    )
+
+    let recovery = try engine.recoverRecordingSession(recordingSessionId: sessionId)
+    try require(recovery.session.segments.count == 1, "Committed segment must survive stale-partial recovery")
+    try require(recovery.session.segments[0].segmentId == firstSegmentId, "Committed segment identity must be unchanged")
+    try require(
+      !recovery.issues.contains { $0.code == "incomplete_temporary_file" },
+      "Engine recovery must clear the hard-blocking incomplete_temporary_file issue"
+    )
+    try require(
+      recovery.issues.contains { $0.code == "stale_temporary_file_quarantined" },
+      "Engine recovery must report quarantine of the stale partial"
+    )
+    let segmentBytes = try Data(contentsOf: segmentURL(root: root, recovery.session, 0))
+    try require(digest(segmentBytes) == firstDigest, "Committed audio bytes must remain immutable")
+
+    let partialInSegments = root
+      .appendingPathComponent(recovery.session.relativeSessionPath)
+      .appendingPathComponent("segments")
+      .appendingPathComponent(partialFileName)
+    try require(
+      !FileManager.default.fileExists(atPath: partialInSegments.path),
+      "Stale partial must leave segments/"
+    )
+    let quarantined = root
+      .appendingPathComponent(recovery.session.relativeSessionPath)
+      .appendingPathComponent("quarantine")
+      .appendingPathComponent(partialFileName)
+    try require(
+      FileManager.default.fileExists(atPath: quarantined.path),
+      "Stale partial must land in quarantine/"
+    )
+  }
+
+  // MARK: Scenario I — Resume and Finish after stale partial quarantine.
+
+  static func resumeAndFinishPastStalePartial(root: URL) async throws {
+    // --- Resume opens a new segment and never reuses the quarantined partial. ---
+    var resumeSessionId = ""
+    var resumeFirstDigest = ""
+    do {
+      let store = try DurableRecorderStore(rootURL: root)
+      var session = try store.createSession(lectureId: "lecture-stale-partial-resume")
+      resumeSessionId = session.recordingSessionId
+      session = try store.transitionSession(recordingSessionId: resumeSessionId, to: .preparing)
+      session = try store.transitionSession(recordingSessionId: resumeSessionId, to: .ready)
+      session = try store.transitionSession(recordingSessionId: resumeSessionId, to: .recording)
+      let first = try addSegment(store: store, sessionId: resumeSessionId, frequency: 500)
+      resumeFirstDigest = digest(first.bytes)
+      let plan = try store.createSegmentPlan(recordingSessionId: resumeSessionId)
+      try Data(repeating: 0xCD, count: 1_024).write(to: plan.activeURL)
+      _ = try store.transitionSession(recordingSessionId: resumeSessionId, to: .paused)
+    }
+
+    let (resumeStore, resumeEngine) = try makeRecoveryEngine(root: root)
+    _ = try resumeEngine.recoverRecordingSession(recordingSessionId: resumeSessionId)
+    _ = try await resumeEngine.prepareRecording(
+      recordingSessionId: resumeSessionId,
+      requestPermission: false
+    )
+    _ = try resumeEngine.resumeRecording(recordingSessionId: resumeSessionId)
+    _ = try resumeEngine.pauseRecording(recordingSessionId: resumeSessionId)
+    let afterResume = try resumeStore.getSession(recordingSessionId: resumeSessionId)
+    try require(afterResume.segments.count == 2, "Resume after stale partial must append a new segment")
+    let firstAfterResume = digest(try Data(contentsOf: segmentURL(root: root, afterResume, 0)))
+    try require(firstAfterResume == resumeFirstDigest, "Resume must leave prior committed audio immutable")
+    try require(
+      afterResume.segments[1].segmentId != afterResume.segments[0].segmentId,
+      "Resume must allocate a distinct new segment rather than revive the partial"
+    )
+
+    // --- Finish exports committed audio only (R1 direct-Finish, no Resume). ---
+    var finishSessionId = ""
+    var finishSegmentId = ""
+    do {
+      let store = try DurableRecorderStore(rootURL: root)
+      var session = try store.createSession(lectureId: "lecture-stale-partial-finish")
+      finishSessionId = session.recordingSessionId
+      session = try store.transitionSession(recordingSessionId: finishSessionId, to: .preparing)
+      session = try store.transitionSession(recordingSessionId: finishSessionId, to: .ready)
+      session = try store.transitionSession(recordingSessionId: finishSessionId, to: .recording)
+      let first = try addSegment(store: store, sessionId: finishSessionId, frequency: 620)
+      finishSegmentId = first.session.segments[0].segmentId
+      let plan = try store.createSegmentPlan(recordingSessionId: finishSessionId)
+      try Data(repeating: 0xCE, count: 1_024).write(to: plan.activeURL)
+      _ = try store.transitionSession(recordingSessionId: finishSessionId, to: .paused)
+    }
+
+    let (finishStore, finishEngine) = try makeRecoveryEngine(root: root)
+    _ = try finishEngine.recoverRecordingSession(recordingSessionId: finishSessionId)
+    let stopped = try finishEngine.stopRecording(recordingSessionId: finishSessionId)
+    try require(
+      ((stopped["session"] as? [String: Any])?["state"] as? String) == "finalized",
+      "Finish after stale-partial recovery must succeed without Resume"
+    )
+    let exported = try await DurableFinalAssetExporter(store: finishStore).export(
+      recordingSessionId: finishSessionId
+    )
+    let fileUri = exported["fileUri"] as! String
+    let finalBytes = try Data(contentsOf: URL(string: fileUri)!)
+    try require(!finalBytes.isEmpty, "Finish must export a non-empty final asset from committed segments")
+    let finalized = try finishStore.getSession(recordingSessionId: finishSessionId)
+    try require(
+      finalized.finalAsset?.sourceSegmentIds == [finishSegmentId],
+      "Final asset must include only committed segments, never the stale partial"
+    )
+    _ = try finishStore.acknowledgeFinalAssetHandoff(recordingSessionId: finishSessionId)
+  }
+
+  // MARK: Scenario J — partial-only session has no committed audio to finish.
+
+  static func stalePartialOnlyHasNoCommittedAudio(root: URL) async throws {
+    let lectureId = "lecture-stale-partial-only"
+    var sessionId = ""
+    do {
+      let store = try DurableRecorderStore(rootURL: root)
+      var session = try store.createSession(lectureId: lectureId)
+      sessionId = session.recordingSessionId
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .preparing)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .ready)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .recording)
+      let plan = try store.createSegmentPlan(recordingSessionId: sessionId)
+      try Data(repeating: 0xEF, count: 512).write(to: plan.activeURL)
+    }
+
+    let (store, engine) = try makeRecoveryEngine(root: root)
+    let recovery = try engine.recoverRecordingSession(recordingSessionId: sessionId)
+    try require(recovery.session.segments.isEmpty, "Partial-only recovery must not invent committed segments")
+    try require(
+      recovery.issues.contains { $0.code == "stale_temporary_file_quarantined" },
+      "Partial-only recovery must quarantine the dead partial"
+    )
+    try require(
+      !recovery.issues.contains { $0.code == "incomplete_temporary_file" },
+      "Partial-only recovery must not leave a blocking incomplete_temporary_file issue"
+    )
+
+    // Finish may mark the empty session finalized, but export must not invent audio.
+    _ = try engine.stopRecording(recordingSessionId: sessionId)
+    do {
+      _ = try await DurableFinalAssetExporter(store: store).export(recordingSessionId: sessionId)
+      throw RecoveryTestFailure(description: "Partial-only Finish must not produce a final asset")
+    } catch is RecoveryTestFailure {
+      throw RecoveryTestFailure(description: "Partial-only Finish must not produce a final asset")
+    } catch let error as DurableRecorderCoreError {
+      try require(error == .noFinalizableSegments, "Partial-only export must fail with noFinalizableSegments")
+    }
+    let session = try store.getSession(recordingSessionId: sessionId)
+    try require(session.finalAsset == nil, "Partial-only path must never create finalAsset metadata")
+    try require(session.segments.isEmpty, "Partial-only path must keep segments empty")
+    let finalDirectory = root
+      .appendingPathComponent(session.relativeSessionPath)
+      .appendingPathComponent("final", isDirectory: true)
+      .appendingPathComponent("lecture.m4a")
+    try require(
+      !FileManager.default.fileExists(atPath: finalDirectory.path),
+      "Partial-only path must not create a zero-byte final asset file"
+    )
+  }
+
+  // MARK: Scenario K — live capture partial must not be quarantined.
+
+  static func liveCapturePartialIsNotQuarantined(root: URL) async throws {
+    let (store, engine) = try makeRecoveryEngine(root: root)
+    let session = try store.createSession(lectureId: "lecture-live-partial")
+    _ = try await engine.prepareRecording(
+      recordingSessionId: session.recordingSessionId,
+      requestPermission: false
+    )
+    _ = try engine.startRecording(recordingSessionId: session.recordingSessionId)
+    let recording = try store.getSession(recordingSessionId: session.recordingSessionId)
+    try require(recording.state == .recording, "Precondition: live recording")
+
+    let segmentsDirectory = root
+      .appendingPathComponent(recording.relativeSessionPath)
+      .appendingPathComponent("segments", isDirectory: true)
+    let partials = try FileManager.default.contentsOfDirectory(
+      at: segmentsDirectory,
+      includingPropertiesForKeys: nil
+    ).filter { $0.lastPathComponent.hasSuffix(".partial.m4a") }
+    try require(partials.count == 1, "Live capture must own exactly one active partial")
+    let partialPath = partials[0].path
+    let beforeBytes = try Data(contentsOf: partials[0])
+
+    do {
+      _ = try engine.recoverRecordingSession(recordingSessionId: session.recordingSessionId)
+      throw RecoveryTestFailure(description: "Recovery stole a live active capture")
+    } catch is RecoveryTestFailure {
+      throw RecoveryTestFailure(description: "Recovery stole a live active capture")
+    } catch let error as DurableRecorderCoreError {
+      try require(error == .recorderBusy, "Live capture recovery must return recorderBusy")
+    }
+
+    try require(
+      FileManager.default.fileExists(atPath: partialPath),
+      "Live partial must remain in segments/"
+    )
+    let afterBytes = try Data(contentsOf: URL(fileURLWithPath: partialPath))
+    try require(afterBytes == beforeBytes, "Live partial bytes must be untouched")
+    let quarantineDirectory = root
+      .appendingPathComponent(recording.relativeSessionPath)
+      .appendingPathComponent("quarantine", isDirectory: true)
+    try require(
+      !FileManager.default.fileExists(atPath: quarantineDirectory.path),
+      "Live capture must not create a quarantine directory"
+    )
+    _ = try engine.pauseRecording(recordingSessionId: session.recordingSessionId)
+  }
+
+  // MARK: Scenario L — quarantine is idempotent across repeated recovery.
+
+  static func stalePartialQuarantineIsIdempotent(root: URL) async throws {
+    let lectureId = "lecture-stale-partial-idempotent"
+    var sessionId = ""
+    var partialFileName = ""
+    do {
+      let store = try DurableRecorderStore(rootURL: root)
+      var session = try store.createSession(lectureId: lectureId)
+      sessionId = session.recordingSessionId
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .preparing)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .ready)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .recording)
+      _ = try addSegment(store: store, sessionId: sessionId, frequency: 330)
+      let plan = try store.createSegmentPlan(recordingSessionId: sessionId)
+      try Data(repeating: 0x11, count: 256).write(to: plan.activeURL)
+      partialFileName = plan.activeURL.lastPathComponent
+      _ = try store.transitionSession(recordingSessionId: sessionId, to: .paused)
+    }
+
+    let (store, engine) = try makeRecoveryEngine(root: root)
+    let first = try engine.recoverRecordingSession(recordingSessionId: sessionId)
+    let second = try engine.recoverRecordingSession(recordingSessionId: sessionId)
+    try require(first.session.segments.count == 1, "First recovery must preserve committed audio")
+    try require(second.session.segments.count == 1, "Second recovery must preserve committed audio")
+    try require(
+      first.issues.filter { $0.code == "stale_temporary_file_quarantined" }.count == 1,
+      "First recovery quarantines exactly once"
+    )
+    try require(
+      second.issues.filter { $0.code == "stale_temporary_file_quarantined" }.isEmpty,
+      "Second recovery must not re-quarantine"
+    )
+
+    let quarantineDirectory = root
+      .appendingPathComponent(first.session.relativeSessionPath)
+      .appendingPathComponent("quarantine", isDirectory: true)
+    let quarantined = try FileManager.default.contentsOfDirectory(
+      at: quarantineDirectory,
+      includingPropertiesForKeys: nil
+    ).map(\.lastPathComponent)
+    try require(
+      quarantined.filter { $0.hasPrefix(partialFileName) }.count == 1,
+      "Idempotent recovery must not duplicate quarantine files"
+    )
+    _ = store
+  }
+
+  // MARK: Scenario M — Discard still removes the session including quarantine.
+
+  static func discardStillRemovesQuarantinedPartial(root: URL) async throws {
+    let lectureId = "lecture-stale-partial-discard"
+    var sessionId = ""
+    var sessionDirectory = URL(fileURLWithPath: "/")
+    do {
+      let store = try DurableRecorderStore(rootURL: root)
+      var session = try store.createSession(lectureId: lectureId)
+      sessionId = session.recordingSessionId
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .preparing)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .ready)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .recording)
+      _ = try addSegment(store: store, sessionId: sessionId, frequency: 360)
+      let plan = try store.createSegmentPlan(recordingSessionId: sessionId)
+      try Data(repeating: 0x22, count: 128).write(to: plan.activeURL)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .paused)
+      sessionDirectory = root.appendingPathComponent(session.relativeSessionPath)
+    }
+
+    let (store, engine) = try makeRecoveryEngine(root: root)
+    _ = try engine.recoverRecordingSession(recordingSessionId: sessionId)
+    try require(
+      FileManager.default.fileExists(
+        atPath: sessionDirectory.appendingPathComponent("quarantine", isDirectory: true).path
+      ),
+      "Precondition: quarantine directory exists before discard"
+    )
+    let abandoned = try store.abandonSession(recordingSessionId: sessionId)
+    try require(abandoned.state == .abandoned, "Discard must abandon the session")
+    let deleted = try store.deleteSession(recordingSessionId: sessionId)
+    try require(deleted, "Discard must delete durable state")
+    try require(
+      !FileManager.default.fileExists(atPath: sessionDirectory.path),
+      "Discard must remove segments, quarantine, and session metadata together"
+    )
+    let offered = try store.listRecoverableSessions()
+    try require(
+      !offered.contains { $0.recordingSessionId == sessionId },
+      "Discarded sessions must not remain recoverable"
+    )
   }
 }

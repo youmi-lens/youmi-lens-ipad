@@ -326,21 +326,38 @@ final class DurableForegroundRecorder {
 
   func recoverRecordingSession(recordingSessionId: String) throws -> DurableRecoveryResult {
     try queue.sync {
+      // Live capture owns its active `.partial.m4a`. Never quarantine while busy.
       guard activeCapture == nil else { throw DurableRecorderCoreError.recorderBusy }
       var session = try store.getSession(recordingSessionId: recordingSessionId)
       if session.state == .recording {
         session = try store.transitionSession(recordingSessionId: recordingSessionId, to: .paused)
       }
-      let result = try store.reconcileSession(recordingSessionId: recordingSessionId) { [fileInspector] url in
+      var result = try store.reconcileSession(recordingSessionId: recordingSessionId) { [fileInspector] url in
         (try? fileInspector.inspect(url: url)) != nil
       }
+      // Stale mid-capture partials must not strand committed segments. With no
+      // live owner, quarantine them, then re-reconcile so Resume/Finish see a
+      // clean segments directory. Quarantine issues are informational only.
+      let hasStalePartial = result.issues.contains { $0.code == "incomplete_temporary_file" }
+      var quarantineIssues: [DurableRecoveryIssue] = []
+      if hasStalePartial {
+        quarantineIssues = try store.quarantineInactivePartialFiles(
+          recordingSessionId: recordingSessionId
+        )
+        result = try store.reconcileSession(recordingSessionId: recordingSessionId) { [fileInspector] url in
+          (try? fileInspector.inspect(url: url)) != nil
+        }
+        session = result.session
+      }
       if !session.state.isTerminal {
-        // Recovery is inspection-only and does not claim ownership. Resume
-        // claims when the user continues capture; Finish claims via
-        // claimForFinalization when finalizing committed segments.
+        // Recovery does not claim ownership. Resume claims when the user
+        // continues capture; Finish claims via claimForFinalization.
         runtimeState = session.state == .paused ? .paused : session.state == .ready ? .ready : .idle
       }
-      return DurableRecoveryResult(session: session, issues: result.issues)
+      return DurableRecoveryResult(
+        session: session,
+        issues: result.issues + quarantineIssues
+      )
     }
   }
 

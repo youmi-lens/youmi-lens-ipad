@@ -415,6 +415,61 @@ final class DurableRecorderStore {
     }
   }
 
+  /// Move inactive `.partial.m4a` capture files out of `segments/` so they cannot
+  /// strand committed audio. Callers must ensure no live capture owns the session.
+  ///
+  /// Partials are never committed metadata and never the final asset. Quarantine
+  /// keeps bytes for later salvage (R5) without blocking Resume/Finish. Idempotent:
+  /// a second call finds nothing to move. Missing files between list and move are
+  /// skipped. Destination names never overwrite an existing quarantine entry.
+  func quarantineInactivePartialFiles(
+    recordingSessionId: String
+  ) throws -> [DurableRecoveryIssue] {
+    try synchronized {
+      let canonical = try requireCanonicalIdentifier(recordingSessionId)
+      let session = try readSession(canonicalIdentifier: canonical)
+      let sessionDirectory = sessionURL(forCanonicalIdentifier: canonical)
+      let segmentsDirectory = sessionDirectory.appendingPathComponent("segments", isDirectory: true)
+      let quarantineDirectory = sessionDirectory.appendingPathComponent("quarantine", isDirectory: true)
+      let referenced = Set(session.segments.map(\.relativePath))
+      let entries = (try? fileManager.contentsOfDirectory(
+        at: segmentsDirectory,
+        includingPropertiesForKeys: [.isRegularFileKey],
+        options: [.skipsHiddenFiles]
+      )) ?? []
+
+      var issues: [DurableRecoveryIssue] = []
+      for entry in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+        let fileName = entry.lastPathComponent
+        guard fileName.hasSuffix(".partial.m4a") else { continue }
+        let relativePath = "segments/\(fileName)"
+        // Never touch a path that somehow appears in committed metadata.
+        guard !referenced.contains(relativePath) else { continue }
+        guard fileManager.fileExists(atPath: entry.path) else { continue }
+
+        do {
+          try fileManager.createDirectory(at: quarantineDirectory, withIntermediateDirectories: true)
+          let destination = try uniqueQuarantineURL(
+            in: quarantineDirectory,
+            preferredFileName: fileName
+          )
+          try fileManager.moveItem(at: entry, to: destination)
+          issues.append(DurableRecoveryIssue(
+            code: "stale_temporary_file_quarantined",
+            relativePath: "quarantine/\(destination.lastPathComponent)",
+            segmentId: Self.segmentId(fromFileName: fileName)
+          ))
+        } catch {
+          // A race where the partial vanishes is success for recovery; other
+          // failures must surface so callers do not pretend the path is clean.
+          if !fileManager.fileExists(atPath: entry.path) { continue }
+          throw DurableRecorderCoreError.storageFailure(error.localizedDescription)
+        }
+      }
+      return issues
+    }
+  }
+
   func finalAssetPlan(recordingSessionId: String) throws -> DurableFinalAssetPlan {
     try synchronized {
       let canonical = try requireCanonicalIdentifier(recordingSessionId)
@@ -576,6 +631,23 @@ final class DurableRecorderStore {
 
   private func sessionURL(forCanonicalIdentifier identifier: String) -> URL {
     sessionsRootURL.appendingPathComponent(identifier, isDirectory: true)
+  }
+
+  private func uniqueQuarantineURL(in directory: URL, preferredFileName: String) throws -> URL {
+    let preferred = directory.appendingPathComponent(preferredFileName, isDirectory: false)
+    if !fileManager.fileExists(atPath: preferred.path) {
+      return preferred
+    }
+    for index in 1..<1_000 {
+      let candidate = directory.appendingPathComponent(
+        "\(preferredFileName).\(index)",
+        isDirectory: false
+      )
+      if !fileManager.fileExists(atPath: candidate.path) {
+        return candidate
+      }
+    }
+    throw DurableRecorderCoreError.storageFailure("Unable to allocate a quarantine file name.")
   }
 
   private static func canonicalIdentifier(_ rawIdentifier: String) -> String? {
