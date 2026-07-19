@@ -119,7 +119,12 @@ export type DurableRecordingStatus = {
   session?: DurableRecordingSession;
   interruptionState?: string;
   routeChangeState?: string;
+  /** Monotonic native revision; JS ignores events with a lower sequence. */
+  statusSequence?: number;
 };
+
+/** Native → JS lifecycle event. Payload matches `DurableRecordingStatus`. */
+export const RECORDING_STATUS_CHANGE_EVENT = 'onRecordingStatusChange';
 
 export type DurableRecoveryIssue = {
   code: string;
@@ -166,6 +171,8 @@ export class DurableRecorderError extends Error {
   }
 }
 
+type EventSubscription = { remove: () => void };
+
 type NativeDurableRecorderModule = {
   getCapabilities: () => Promise<unknown>;
   createSession: (input: CreateDurableSessionInput) => Promise<unknown>;
@@ -185,6 +192,10 @@ type NativeDurableRecorderModule = {
   recoverRecordingSession: (input: DurableSessionIdentifierInput) => Promise<unknown>;
   exportFinalizedAsset: (input: DurableSessionIdentifierInput) => Promise<unknown>;
   acknowledgeFinalAssetHandoff: (input: DurableSessionIdentifierInput) => Promise<unknown>;
+  addListener?: (
+    eventName: string,
+    listener: (event: unknown) => void,
+  ) => EventSubscription;
 };
 
 const stateSet = new Set<string>(DURABLE_RECORDING_STATES);
@@ -386,6 +397,7 @@ function validateStatus(value: unknown): DurableRecordingStatus | null {
     session,
     interruptionState,
     routeChangeState,
+    statusSequence,
   } = value;
   if (
     typeof runtimeState !== 'string' ||
@@ -398,7 +410,9 @@ function validateStatus(value: unknown): DurableRecordingStatus | null {
       (typeof activeSegmentId !== 'string' || !sessionIdPattern.test(activeSegmentId))) ||
     !Array.isArray(completedSegments) ||
     (interruptionState !== undefined && typeof interruptionState !== 'string') ||
-    (routeChangeState !== undefined && typeof routeChangeState !== 'string')
+    (routeChangeState !== undefined && typeof routeChangeState !== 'string') ||
+    (statusSequence !== undefined &&
+      !(typeof statusSequence === 'number' && Number.isInteger(statusSequence) && statusSequence >= 0))
   ) return null;
   const segments = completedSegments.map(validateSegment);
   if (segments.some((segment) => segment === null)) return null;
@@ -413,6 +427,7 @@ function validateStatus(value: unknown): DurableRecordingStatus | null {
     ...(validatedSession ? { session: validatedSession } : {}),
     ...(interruptionState === undefined ? {} : { interruptionState }),
     ...(routeChangeState === undefined ? {} : { routeChangeState }),
+    ...(statusSequence === undefined ? {} : { statusSequence: statusSequence as number }),
   };
 }
 
@@ -630,6 +645,35 @@ export async function stopRecording(input: DurableSessionIdentifierInput): Promi
 
 export async function getRecordingStatus(): Promise<DurableRecordingStatus> {
   return statusOperation(() => requireNativeModule().getRecordingStatus());
+}
+
+/**
+ * Subscribe to native durable-recorder status changes (forced pause, pause,
+ * resume, stop). Returns a no-op unsubscribe when the module is unavailable.
+ */
+export function addRecordingStatusListener(
+  listener: (status: DurableRecordingStatus) => void,
+): () => void {
+  const mod = nativeModule;
+  if (!mod || typeof mod.addListener !== 'function') return () => {};
+  try {
+    const subscription = mod.addListener(RECORDING_STATUS_CHANGE_EVENT, (event) => {
+      try {
+        listener(requireStatus(event));
+      } catch {
+        // Ignore malformed payloads rather than crashing the JS runtime.
+      }
+    });
+    return () => {
+      try {
+        subscription.remove();
+      } catch {
+        // Listener already removed / module torn down.
+      }
+    };
+  } catch {
+    return () => {};
+  }
 }
 
 export async function recoverRecordingSession(

@@ -10,6 +10,7 @@ const passed = await runSteps('Native recording verification', [
   nodeStep('native contract (JS <-> Swift)', 'scripts/durable-recorder-contract.test.mjs'),
   nodeStep('exporter (final asset assembly)', 'scripts/durable-recorder-finalization.test.mjs'),
   nodeStep('recovery / resume / discard / relaunch', 'scripts/durable-recorder-recovery.test.mjs'),
+  nodeStep('forced-pause status sync', 'scripts/durable-recorder-status-sync.test.mjs'),
   nodeStep('recorder adapter + feature gate', 'scripts/recording-adapter.test.mjs'),
   nodeStep('engine selection policy + fallback', 'scripts/recording-engine-policy.test.mjs'),
   nodeStep('rollout control + failure matrix', 'scripts/recording-rollout.test.mjs'),

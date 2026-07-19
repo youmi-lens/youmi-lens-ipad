@@ -193,8 +193,10 @@ assert.deepEqual(
     'DURABLE_RECORDER_RUNTIME_STATES',
     'DURABLE_RECORDING_STATES',
     'DurableRecorderError',
+    'RECORDING_STATUS_CHANGE_EVENT',
     'abandonSession',
     'acknowledgeFinalAssetHandoff',
+    'addRecordingStatusListener',
     'createSession',
     'deleteSession',
     'exportFinalizedAsset',
@@ -212,8 +214,12 @@ assert.deepEqual(
     'stopRecording',
     'transitionSession',
   ],
-  'Phase 2C preserves existing APIs and adds finalized-asset handoff APIs',
+  'Preserves existing APIs and exposes recording status change subscription',
 );
+
+assert.equal(linked.RECORDING_STATUS_CHANGE_EVENT, 'onRecordingStatusChange');
+assert.equal(typeof linked.addRecordingStatusListener, 'function');
+assert.equal(typeof linked.addRecordingStatusListener(() => {}), 'function', 'listener unsubscribe is always a function');
 
 await assert.rejects(
   unavailable.createSession({ lectureId: 'lecture-unavailable' }),

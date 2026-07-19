@@ -124,6 +124,17 @@ Both `export` and `acknowledgeFinalAssetHandoff` are idempotent. Re-exporting
 returns the same stable URI without rewriting bytes; re-acknowledging keeps the
 original timestamp.
 
+### Forced-pause UI synchronization
+
+Native runtime state is authoritative while a durable session is active. Forced
+pause paths (audio interruption, route loss, app background) publish
+`onRecordingStatusChange` with a monotonic `statusSequence`. The JS adapter
+applies paused status only for the current `recordingSessionId` and ignores
+stale or cross-session events. The recording timer is local JS driven by
+`isRecording`; once native pause is applied, the timer stops and Resume remains
+manual. A single AppState-foreground `getRecordingStatus` refresh is a safety
+net — there is no status polling interval.
+
 ### Finish after relaunch (no Resume)
 
 Ownership is **process-local** (`ownedSessionId` in the foreground engine). A

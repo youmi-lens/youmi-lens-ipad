@@ -328,6 +328,61 @@ private func testInvalidSegmentMetadataVersions() async throws {
   }
 }
 
+private func testForcedPausePublishesStatus() async throws {
+  let root = temporaryRoot("status-events")
+  defer { try? FileManager.default.removeItem(at: root) }
+  let (store, engine, _, _) = try makeEngine(root: root)
+  var payloads: [[String: Any]] = []
+  engine.onStatusChange = { payloads.append($0) }
+
+  let session = try store.createSession(lectureId: "lecture-status-events")
+  try await prepare(engine, sessionId: session.recordingSessionId)
+  _ = try engine.startRecording(recordingSessionId: session.recordingSessionId)
+  try require(!payloads.isEmpty, "Start must publish a status payload")
+  let startSequence = payloads.last?["statusSequence"] as? Int ?? 0
+  try require(startSequence > 0, "Published status must carry a positive statusSequence")
+
+  engine.simulateInterruptionBeganForTesting()
+  try require(payloads.count >= 2, "Interruption forced-pause must publish status")
+  let interrupted = payloads.last!
+  try require((interrupted["runtimeState"] as? String) == "interrupted", "Interruption runtime must be interrupted")
+  try require(
+    ((interrupted["session"] as? [String: Any])?["state"] as? String) == "paused",
+    "Forced pause must persist session state paused"
+  )
+  try require(
+    (interrupted["recordingSessionId"] as? String) == session.recordingSessionId,
+    "Forced-pause status must identify the active session"
+  )
+  let interruptedSequence = interrupted["statusSequence"] as? Int ?? 0
+  try require(interruptedSequence > startSequence, "Forced pause must advance statusSequence")
+
+  _ = try engine.resumeRecording(recordingSessionId: session.recordingSessionId)
+  let resumeSequence = payloads.last?["statusSequence"] as? Int ?? 0
+  try require(resumeSequence > interruptedSequence, "Resume must advance statusSequence")
+
+  engine.simulateRouteLossForTesting()
+  let routed = payloads.last!
+  try require((routed["runtimeState"] as? String) == "paused", "Route-loss runtime must be paused")
+  try require(
+    ((routed["session"] as? [String: Any])?["state"] as? String) == "paused",
+    "Route-loss must leave the session paused"
+  )
+  try require(
+    (routed["statusSequence"] as? Int ?? 0) > resumeSequence,
+    "Route-loss must advance statusSequence past Resume"
+  )
+
+  // Explicit pause after resume should publish once and remain idempotent on repeat.
+  _ = try engine.resumeRecording(recordingSessionId: session.recordingSessionId)
+  let beforeExplicitPause = payloads.count
+  _ = try engine.pauseRecording(recordingSessionId: session.recordingSessionId)
+  try require(payloads.count == beforeExplicitPause + 1, "Explicit pause must publish exactly one status")
+  let afterExplicit = payloads.count
+  _ = try engine.pauseRecording(recordingSessionId: session.recordingSessionId)
+  try require(payloads.count == afterExplicit, "Repeated pause must not republish")
+}
+
 @main
 private enum DurableRecorderAudioTestRunner {
   static func main() async throws {
@@ -337,6 +392,7 @@ private enum DurableRecorderAudioTestRunner {
     try await testReconciliationPolicies()
     try await testSeparateSessionBoundariesAndNoInput()
     try await testInvalidSegmentMetadataVersions()
+    try await testForcedPausePublishesStatus()
     print("Durable recorder native audio engine tests passed.")
   }
 }

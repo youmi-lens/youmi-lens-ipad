@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { AppState } from 'react-native';
 
 import {
   abandonSession,
   acknowledgeFinalAssetHandoff,
+  addRecordingStatusListener,
   createSession,
   deleteSession,
   exportFinalizedAsset,
   finalizeSession,
   getMicrophonePermissionStatus,
+  getRecordingStatus,
   listRecoverableSessions,
   pauseRecording as pauseNative,
   prepareRecording,
@@ -17,10 +20,12 @@ import {
   stopRecording as stopNative,
   transitionSession,
   type DurableRecordingSession,
+  type DurableRecordingStatus,
 } from '@/modules/expo-durable-recorder';
 
 import { durationBucket, logRecordingEvent } from './diagnostics';
 import { finalizedDurationMillis, recoverableSessionsForLecture } from './policy.mjs';
+import { evaluateNativeStatusUpdate } from './statusSync.mjs';
 import type { LectureRecorder, RecorderPermission } from './types';
 
 function permission(value: string): RecorderPermission {
@@ -42,6 +47,14 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
   const baseDurationRef = useRef(0);
   const activeStartedAtRef = useRef<number | null>(null);
   const activeRef = useRef(false);
+  const lastStatusSequenceRef = useRef(0);
+  const finishingRef = useRef(false);
+
+  const noteStatusSequence = useCallback((status: DurableRecordingStatus | null | undefined) => {
+    if (typeof status?.statusSequence === 'number' && status.statusSequence > lastStatusSequenceRef.current) {
+      lastStatusSequenceRef.current = status.statusSequence;
+    }
+  }, []);
 
   const applySession = useCallback((session: DurableRecordingSession) => {
     sessionRef.current = session;
@@ -53,6 +66,65 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
     activeRef.current = session.state === 'recording';
     setIsPaused(session.state === 'paused');
   }, []);
+
+  const applyNativeStatus = useCallback((status: DurableRecordingStatus) => {
+    const current = sessionRef.current;
+    const decision = evaluateNativeStatusUpdate({
+      currentSessionId: current?.recordingSessionId,
+      currentState: current?.state,
+      finishing: finishingRef.current,
+      lastSequence: lastStatusSequenceRef.current,
+      status,
+    });
+    if (
+      decision.reason === 'no_current_session' ||
+      decision.reason === 'session_mismatch' ||
+      decision.reason === 'stale_sequence'
+    ) {
+      return;
+    }
+    // Advance for accepted updates and for newer events rejected only because
+    // Finish/terminal already won — so a late pause cannot apply afterward.
+    lastStatusSequenceRef.current = decision.nextSequence;
+    if (!decision.accept || !current || !status.session) return;
+
+    const session = status.session;
+    if (session.state === 'paused') {
+      const wasRecording = activeRef.current || current.state === 'recording';
+      applySession(session);
+      if (wasRecording) {
+        logRecordingEvent('native_recording_paused', {
+          segmentCount: session.segments.length,
+          reason: status.interruptionState
+            ?? status.routeChangeState
+            ?? status.runtimeState
+            ?? 'native_status',
+        });
+      }
+      return;
+    }
+
+    if (session.state === 'recording') {
+      // Keep an already-running local timer intact; only correct a false paused UI.
+      sessionRef.current = session;
+      baseDurationRef.current = finalizedDurationMillis(session);
+      if (!activeRef.current) {
+        activeStartedAtRef.current = Date.now();
+        activeRef.current = true;
+        setIsPaused(false);
+        setIsRecording(true);
+        setDurationMillis(baseDurationRef.current);
+      }
+      return;
+    }
+
+    if (session.state === 'finalized') {
+      applySession(session);
+      activeRef.current = false;
+      setIsRecording(false);
+      setIsPaused(false);
+    }
+  }, [applySession]);
 
   useEffect(() => () => {
     const session = sessionRef.current;
@@ -94,6 +166,30 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
     return () => { mounted = false; };
   }, [applySession, enabled, lectureId]);
 
+  // Native is authoritative for forced-pause. One listener for the hook lifetime.
+  useEffect(() => {
+    if (!enabled) return;
+    return addRecordingStatusListener((status) => {
+      applyNativeStatus(status);
+    });
+  }, [applyNativeStatus, enabled]);
+
+  // Lifecycle safety net: refresh once on foreground (no interval polling).
+  useEffect(() => {
+    if (!enabled) return;
+    const subscription = AppState.addEventListener('change', (next) => {
+      if (next !== 'active') return;
+      const session = sessionRef.current;
+      if (!session) return;
+      if (session.state === 'finalized' || session.state === 'abandoned' || session.state === 'failed') return;
+      if (!activeRef.current && session.state !== 'paused' && session.state !== 'recording') return;
+      void getRecordingStatus()
+        .then((status) => { applyNativeStatus(status); })
+        .catch(() => {});
+    });
+    return () => subscription.remove();
+  }, [applyNativeStatus, enabled]);
+
   useEffect(() => {
     if (!isRecording) return;
     const timer = setInterval(() => {
@@ -115,22 +211,26 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
       if (!session) { session = await createSession({ lectureId }); applySession(session); }
       const status = await prepareRecording({ recordingSessionId: session.recordingSessionId, requestPermission: true });
       if (status.session) applySession(status.session);
+      noteStatusSequence(status);
       setPermissionStatus(permission(status.permission)); setPermissionChecked(true);
       return status.permission === 'granted';
     } catch (failure) { fail('Could not request microphone permission.', failure); return false; }
-  }, [applySession, fail, lectureId]);
+  }, [applySession, fail, lectureId, noteStatusSequence]);
 
   const startRecording = useCallback(async () => {
     if (!enabled || recoverableSession) return false;
     try {
       setError(null); setErrorDetail(null); setRecordingUri(null);
+      finishingRef.current = false;
       let session = sessionRef.current;
       if (!session || session.state === 'finalized' || session.state === 'abandoned' || session.state === 'failed') {
         session = await createSession({ lectureId }); applySession(session);
       }
       const prepared = await prepareRecording({ recordingSessionId: session.recordingSessionId, requestPermission: true });
+      noteStatusSequence(prepared);
       setPermissionStatus(permission(prepared.permission)); setPermissionChecked(true);
       const started = await startNative({ recordingSessionId: session.recordingSessionId });
+      noteStatusSequence(started);
       if (started.session) sessionRef.current = started.session;
       activeStartedAtRef.current = Date.now(); activeRef.current = true; setIsPaused(false); setIsRecording(true);
       logRecordingEvent('native_recording_started', { engine: 'nativeDurable' });
@@ -140,18 +240,19 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
       logRecordingEvent('native_initialization_failed', { reason: 'native_initialization_failed' });
       return false;
     }
-  }, [applySession, enabled, fail, lectureId, recoverableSession]);
+  }, [applySession, enabled, fail, lectureId, noteStatusSequence, recoverableSession]);
 
   const pauseRecording = useCallback(async () => {
     const session = sessionRef.current; if (!session || !isRecording) return;
     try {
       const status = await pauseNative({ recordingSessionId: session.recordingSessionId });
+      noteStatusSequence(status);
       if (status.session) applySession(status.session);
       logRecordingEvent('native_recording_paused', {
         segmentCount: status.session?.segments.length ?? session.segments.length,
       });
     } catch (failure) { fail('Could not pause the recording.', failure); }
-  }, [applySession, fail, isRecording]);
+  }, [applySession, fail, isRecording, noteStatusSequence]);
 
   const resumeRecording = useCallback(async () => {
     const session = sessionRef.current; if (!session) return;
@@ -163,9 +264,11 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
               recordingSessionId: session.recordingSessionId,
               requestPermission: true,
             });
+            noteStatusSequence(prepared);
             setPermissionStatus(permission(prepared.permission)); setPermissionChecked(true);
             return startNative({ recordingSessionId: session.recordingSessionId });
           })();
+      noteStatusSequence(status);
       if (status.session) sessionRef.current = status.session;
       baseDurationRef.current = finalizedDurationMillis(status.session ?? session);
       activeStartedAtRef.current = Date.now(); activeRef.current = true; setIsPaused(false); setIsRecording(true);
@@ -173,19 +276,22 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
         segmentCount: (status.session ?? session).segments.length,
       });
     } catch (failure) { fail('Could not resume the recording.', failure); }
-  }, [fail]);
+  }, [fail, noteStatusSequence]);
 
   const finishSession = useCallback(async (session: DurableRecordingSession): Promise<string | null> => {
+    finishingRef.current = true;
     try {
       let finalSession = session;
       if (finalSession.state === 'paused' || finalSession.state === 'recording') {
         try {
           const stopped = await stopNative({ recordingSessionId: finalSession.recordingSessionId });
+          noteStatusSequence(stopped);
           if (stopped.session) finalSession = stopped.session;
         } catch {
           const recovered = await recoverRecordingSession({ recordingSessionId: finalSession.recordingSessionId });
           finalSession = recovered.session;
           const stopped = await stopNative({ recordingSessionId: finalSession.recordingSessionId });
+          noteStatusSequence(stopped);
           if (stopped.session) finalSession = stopped.session;
         }
       } else if (finalSession.state === 'finalizing') {
@@ -200,8 +306,12 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
         sessionState: output.session.state,
       });
       return output.fileUri;
-    } catch (failure) { fail('Could not finish the recording.', failure); return null; }
-  }, [applySession, fail]);
+    } catch (failure) {
+      finishingRef.current = false;
+      fail('Could not finish the recording.', failure);
+      return null;
+    }
+  }, [applySession, fail, noteStatusSequence]);
 
   const stopRecording = useCallback(async () => {
     const session = sessionRef.current; return session ? finishSession(session) : null;
@@ -269,6 +379,8 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
       if (session.state === 'ready' || session.state === 'paused') session = await abandonSession({ recordingSessionId: session.recordingSessionId });
       await deleteSession(session.recordingSessionId);
       sessionRef.current = null; setRecoverableSession(null); setDurationMillis(0); setIsPaused(false); setIsRecording(false);
+      lastStatusSequenceRef.current = 0;
+      finishingRef.current = false;
       logRecordingEvent('native_recovery_discarded', { sessionState: session.state });
     } catch (failure) { fail('Could not discard the unfinished recording.', failure); throw failure; }
   }, [fail, recoverableSession]);

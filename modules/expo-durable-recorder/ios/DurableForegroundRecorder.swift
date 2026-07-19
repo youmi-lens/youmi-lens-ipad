@@ -143,6 +143,11 @@ final class DurableForegroundRecorder {
   private var routeAtSegmentStart: String?
   private var lastInterruption: String?
   private var lastRouteChange: String?
+  /// Monotonic revision included in every status payload so JS can ignore stale events.
+  private var statusSequence: Int = 0
+  /// Optional bridge to the Expo module. Invoked on the engine queue after
+  /// meaningful lifecycle transitions (forced pause, pause, resume, start, stop).
+  var onStatusChange: (([String: Any]) -> Void)?
 
   init(
     store: DurableRecorderStore,
@@ -215,7 +220,7 @@ final class DurableForegroundRecorder {
         throw DurableRecorderCoreError.invalidRecorderState("Start requires a prepared ready session.")
       }
       let session = try beginSegment(recordingSessionId: recordingSessionId, resuming: false)
-      return statusDictionary(session: session)
+      return publishStatus(session: session)
     }
   }
 
@@ -234,7 +239,7 @@ final class DurableForegroundRecorder {
         let session = try store.transitionSession(recordingSessionId: recordingSessionId, to: .paused)
         runtimeState = .paused
         audioSession.deactivate()
-        return statusDictionary(session: session)
+        return publishStatus(session: session)
       } catch {
         activeCapture?.stop()
         clearActiveCapture()
@@ -260,7 +265,7 @@ final class DurableForegroundRecorder {
       try claim(recordingSessionId)
       runtimeState = .resuming
       let resumed = try beginSegment(recordingSessionId: recordingSessionId, resuming: true)
-      return statusDictionary(session: resumed)
+      return publishStatus(session: resumed)
     }
   }
 
@@ -269,7 +274,7 @@ final class DurableForegroundRecorder {
       let existing = try store.getSession(recordingSessionId: recordingSessionId)
       if existing.state == .finalized {
         if ownedSessionId == recordingSessionId { releaseOwnership() }
-        return statusDictionary(session: existing)
+        return publishStatus(session: existing)
       }
       // Finish must work after cold recovery without Resume. Ownership is
       // process-local, so a relaunch leaves no owner even when committed
@@ -296,7 +301,7 @@ final class DurableForegroundRecorder {
         }
         session = try store.finalizeSession(recordingSessionId: recordingSessionId)
         releaseOwnership()
-        return statusDictionary(session: session)
+        return publishStatus(session: session)
       } catch {
         activeCapture?.stop()
         clearActiveCapture()
@@ -442,6 +447,10 @@ final class DurableForegroundRecorder {
     if reason.hasPrefix("interruption") { lastInterruption = reason }
     runtimeState = runtimeAfter
     audioSession.deactivate()
+    // Native is authoritative: push paused/interrupted status to JS so the UI
+    // cannot keep showing "recording" after capture has already stopped.
+    let session = try? store.getSession(recordingSessionId: recordingSessionId)
+    _ = publishStatus(session: session)
   }
 
   private func claim(_ recordingSessionId: String) throws {
@@ -509,13 +518,22 @@ final class DurableForegroundRecorder {
     runtimeState = .idle
   }
 
+  private func publishStatus(session: DurableRecordingSession?) -> [String: Any] {
+    statusSequence += 1
+    let payload = statusDictionary(session: session)
+    onStatusChange?(payload)
+    return payload
+  }
+
   private func statusDictionary(session: DurableRecordingSession?) -> [String: Any] {
     var result: [String: Any] = [
       "runtimeState": runtimeState.rawValue,
       "permission": audioSession.permissionState.rawValue,
-      "completedSegments": session?.segments.map { $0.asDictionary() } ?? []
+      "completedSegments": session?.segments.map { $0.asDictionary() } ?? [],
+      "statusSequence": statusSequence
     ]
     if let ownedSessionId { result["recordingSessionId"] = ownedSessionId }
+    if let session { result["recordingSessionId"] = session.recordingSessionId }
     if let activePlan { result["activeSegmentId"] = activePlan.segmentId }
     if let lastInterruption { result["interruptionState"] = lastInterruption }
     if let lastRouteChange { result["routeChangeState"] = lastRouteChange }

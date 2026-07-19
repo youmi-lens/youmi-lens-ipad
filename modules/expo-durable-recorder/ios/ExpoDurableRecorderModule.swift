@@ -28,9 +28,12 @@ public final class ExpoDurableRecorderModule: Module {
   private lazy var exporterResult = Result {
     DurableFinalAssetExporter(store: try storeResult.get())
   }
+  private var statusBridgeInstalled = false
 
   public func definition() -> ModuleDefinition {
     Name("ExpoDurableRecorder")
+
+    Events("onRecordingStatusChange")
 
     AsyncFunction("getCapabilities") { () -> [String: Any] in
       [
@@ -100,7 +103,7 @@ public final class ExpoDurableRecorderModule: Module {
     AsyncFunction("prepareRecording") {
       (input: PrepareDurableRecordingRecord) async throws -> [String: Any] in
       do {
-        return try await self.engineResult.get().prepareRecording(
+        return try await self.ensureStatusBridge(self.engineResult.get()).prepareRecording(
           recordingSessionId: input.recordingSessionId,
           requestPermission: input.requestPermission
         )
@@ -180,12 +183,25 @@ public final class ExpoDurableRecorderModule: Module {
 
   private func withEngine<T>(_ operation: (DurableForegroundRecorder) throws -> T) throws -> T {
     do {
-      return try operation(engineResult.get())
+      return try operation(ensureStatusBridge(engineResult.get()))
     } catch let error as DurableRecorderCoreError {
       throw moduleException(error)
     } catch {
       throw storageException(error)
     }
+  }
+
+  private func ensureStatusBridge(_ engine: DurableForegroundRecorder) -> DurableForegroundRecorder {
+    if !statusBridgeInstalled {
+      engine.onStatusChange = { [weak self] payload in
+        // Expo event delivery must happen on the main queue.
+        DispatchQueue.main.async {
+          self?.sendEvent("onRecordingStatusChange", payload)
+        }
+      }
+      statusBridgeInstalled = true
+    }
+    return engine
   }
 
   private func moduleException(_ error: DurableRecorderCoreError) -> Exception {

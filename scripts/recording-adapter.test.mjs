@@ -68,6 +68,8 @@ assert.match(native, /exportFinalizedAsset/);
 assert.match(native, /acknowledgeFinalAssetHandoff/);
 assert.match(native, /recoverRecordingSession/);
 assert.match(native, /incomplete_temporary_file/, 'an unfinalized crash artifact cannot be silently skipped');
+assert.match(native, /addRecordingStatusListener/, 'native forced-pause status must reach the adapter');
+assert.match(native, /evaluateNativeStatusUpdate/, 'status updates must be gated against stale/cross-session events');
 assert.match(native, /abandonSession/);
 assert.match(native, /deleteSession/);
 assert.match(screen, /finishRecoverableRecording/);
