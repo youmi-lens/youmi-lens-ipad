@@ -217,7 +217,9 @@ Until then, treat Phase 4 as prepared infrastructure, not an active rollout.
 
 ## Deployment status
 
-**Nothing is deployed. No user is enrolled.** The client falls back to legacy
+**Nothing is deployed. No user is enrolled.** Phase 4C confirmed the table is
+absent and activation is blocked on administrative access — see
+[phase-4c-activation-evidence.md](phase-4c-activation-evidence.md). The client falls back to legacy
 because the table does not exist and the fetch fails closed.
 
 Requires explicit approval:

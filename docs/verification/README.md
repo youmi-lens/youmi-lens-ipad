@@ -18,6 +18,7 @@ needs a human.
 | [recovery-architecture.md](recovery-architecture.md) | Storage layout, session lifecycle, recovery, handoff, idempotency |
 | [native-recording-test-guide.md](native-recording-test-guide.md) | Expected states, files, metadata, failure signatures |
 | [release-checklist.md](release-checklist.md) | Dev vs release workflow, and the one manual RELEASE-ONLY gate |
+| [phase-4c-activation-evidence.md](phase-4c-activation-evidence.md) | Phase 4C audit result — activation BLOCKED, nothing deployed |
 | [phase-4b-activation-readiness.md](phase-4b-activation-readiness.md) | Activation gate, provider wiring, no-query guarantee, freeze/recovery verification |
 | [phase-4b-activation-runbook.md](phase-4b-activation-runbook.md) | Exact future sequence to deploy and activate remote rollout |
 | [phase-4-rollout-control.md](phase-4-rollout-control.md) | Per-user rollout, kill switch, caching, RLS model, operator workflow |

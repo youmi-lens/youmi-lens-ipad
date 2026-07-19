@@ -13,7 +13,8 @@ committed; native recording remains gated off by default.
 | 2C | Feature-gated adapter, recovery, discard, handoff | `e3af1e7` |
 | 3 | Controlled dogfooding: runtime selection policy, fallback reasons, provenance, privacy-minimal diagnostics | `f3e4ec7` |
 | 4 | Reversible per-user rollout control, kill switch, engine freeze, recovery precedence (backend undeployed) | `7068aed` |
-| 4B | Provider wired behind an activation gate; zero requests by default | see `phase-4b-activation-readiness.md` |
+| 4B | Provider wired behind an activation gate; zero requests by default | `47d8a80` |
+| 4C | Backend activation attempted — **blocked**, no admin access; nothing deployed | see `phase-4c-activation-evidence.md` |
 
 ## Phase 3 — delivered
 
@@ -46,6 +47,14 @@ reason codes, requests are deduplicated and stale-guarded, and the session
 engine freeze is verified as actually connected. Details in
 `phase-4b-activation-readiness.md`; deployment steps in
 `phase-4b-activation-runbook.md`.
+
+## Phase 4C — blocked, not complete
+
+Backend activation could not begin: no service-role credential, no Supabase CLI
+or psql, and no deployment authorization. The table is confirmed absent. The
+migration safety review, client secret-boundary review and full automated
+verification passed. Nothing was deployed and no user was enrolled. Blocker and
+the exact approval needed are in `phase-4c-activation-evidence.md`.
 
 ## Phase 5 — native recording becomes the default
 

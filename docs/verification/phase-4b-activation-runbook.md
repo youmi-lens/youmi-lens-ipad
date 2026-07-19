@@ -3,6 +3,11 @@
 Exact sequence for turning on remote rollout **in the future**. Nothing here has
 been executed.
 
+> **Phase 4C attempted this runbook on 2026-07-19 and stopped at Step 1:** no
+> service-role credential, no Supabase CLI/psql, no deployment authorization.
+> The table was confirmed absent (PGRST205). See
+> [phase-4c-activation-evidence.md](phase-4c-activation-evidence.md).
+>
 > **Current state: NOT DEPLOYED, NOT ENROLLED, NOT ACTIVATED.**
 > The migration is design-reviewed but never applied. `EXPO_PUBLIC_RECORDING_ROLLOUT_REMOTE`
 > is `0`, so the app performs zero rollout requests today.
