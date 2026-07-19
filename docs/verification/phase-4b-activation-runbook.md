@@ -40,7 +40,16 @@ sign-off. The migration creates one new table and touches nothing else.
 
 ## Step 4 — Run RLS verification as four principals
 
-Run the verification block at the bottom of the migration as each of:
+**Automated:** `node scripts/rollout-rls-verify.mjs` runs the whole matrix and
+exits non-zero on any unsafe access. Export two **disposable** test accounts
+(`ROLLOUT_TEST_A_EMAIL`/`_PASSWORD`, `ROLLOUT_TEST_B_EMAIL`/`_PASSWORD`) and
+`SUPABASE_SERVICE_ROLE_KEY` in the operator shell for the full four-principal
+run; without them the user/admin rows report SKIPPED and exit 3.
+
+Exit 0 = all executed checks passed · 1 = **security failure, roll back** ·
+2 = table missing · 3 = passed but incomplete.
+
+Or run the verification block at the bottom of the migration manually as each of:
 
 1. **Unauthenticated** client (anon key)
 2. **Ordinary user A**

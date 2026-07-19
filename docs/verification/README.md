@@ -9,6 +9,7 @@ needs a human.
 | --- | --- |
 | `npm run test:recording` | Any change touching recording (~7s, no device) |
 | `npm run release:recording` | Before a release — full suite plus simulator build |
+| `node scripts/rollout-rls-verify.mjs` | After deploying the rollout migration — empirical RLS matrix |
 | `npm run release:recording:fast` | Same, skipping the simulator build |
 
 ## Documents
