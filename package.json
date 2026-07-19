@@ -9,7 +9,11 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "lint": "expo lint",
-    "test:phase3": "node scripts/phase3-purchases.test.mjs"
+    "test:phase3": "node scripts/phase3-purchases.test.mjs",
+    "test:recording": "node scripts/verify-recording.mjs",
+    "verify:recording": "node scripts/verify-recording.mjs",
+    "release:recording": "node scripts/verify-release.mjs",
+    "release:recording:fast": "node scripts/verify-release.mjs --fast"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.3",

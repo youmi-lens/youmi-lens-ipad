@@ -1,0 +1,32 @@
+#!/usr/bin/env node
+// Recording-only verification. This is the command to run while working on
+// anything that touches recording: it proves persistence, capture, resume,
+// discard, export, handoff, idempotency and relaunch without a physical device.
+import { nodeStep, runSteps } from './lib/verification.mjs';
+
+const passed = await runSteps('Native recording verification', [
+  nodeStep('persistence (durable session store)', 'scripts/durable-recorder-session.test.mjs'),
+  nodeStep('capture engine (AAC segments)', 'scripts/durable-recorder-audio.test.mjs'),
+  nodeStep('native contract (JS <-> Swift)', 'scripts/durable-recorder-contract.test.mjs'),
+  nodeStep('exporter (final asset assembly)', 'scripts/durable-recorder-finalization.test.mjs'),
+  nodeStep('recovery / resume / discard / relaunch', 'scripts/durable-recorder-recovery.test.mjs'),
+  nodeStep('recorder adapter + feature gate', 'scripts/recording-adapter.test.mjs'),
+  nodeStep('recording persistence (lecture side)', 'scripts/recording-persistence.test.mjs'),
+  nodeStep('processing resume', 'scripts/processing-resume.test.mjs'),
+  nodeStep('lecture startup state', 'scripts/lecture-startup-state.test.mjs'),
+]);
+
+if (passed) {
+  console.log(`
+Covered:
+  persistence   durable sessions survive process death
+  resume        recovery appends a new immutable segment
+  discard       durable state removed, no downstream asset
+  exporter      segment order preserved in the final asset
+  handoff       downstream handoff acknowledged durably
+  idempotency   repeated export / ack never duplicate
+  relaunch      a restart never re-offers acknowledged audio
+`);
+}
+
+process.exit(passed ? 0 : 1);
