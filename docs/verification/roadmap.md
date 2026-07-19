@@ -11,7 +11,8 @@ committed; native recording remains gated off by default.
 | 2A | Durable native session layer | `b8d53dc` |
 | 2B | Durable foreground audio engine, segments, pause/resume | `0c57581` |
 | 2C | Feature-gated adapter, recovery, discard, handoff | `e3af1e7` |
-| 3 | Controlled dogfooding: runtime selection policy, fallback reasons, provenance, privacy-minimal diagnostics | see `phase-3-dogfood.md` |
+| 3 | Controlled dogfooding: runtime selection policy, fallback reasons, provenance, privacy-minimal diagnostics | `f3e4ec7` |
+| 4 | Reversible per-user rollout control, kill switch, engine freeze, recovery precedence (backend undeployed) | see `phase-4-rollout-control.md` |
 
 ## Phase 3 — delivered
 
@@ -21,14 +22,21 @@ diagnostics. Default remains legacy. Details in `phase-3-dogfood.md`.
 
 **Deferred out of Phase 3:**
 
-- **Per-user remote eligibility.** Eligibility is a build-time cohort flag, so
-  changing who is enrolled needs a rebuild. A per-user flag would require a
-  backend/schema decision that was deliberately out of scope.
+- ~~Per-user remote eligibility~~ — delivered in Phase 4 (client complete;
+  backend migration prepared but not deployed).
 - Physical resume-from-recovery and discard gates.
 - Recovery UX polish: the recovery card still blocks starting a new recording,
   which is safe but blunt. Revisit once real recovery frequency is known.
 
-## Phase 4 — native recording becomes the default
+## Phase 4 — delivered
+
+Reversible per-user rollout control: strict remote config parsing, user-scoped
+cache with a 15-minute TTL, kill switch, active-session engine freeze, and
+recovery precedence over rollout state. Client is complete and tested; the
+Supabase migration is prepared, RLS-reviewed, and **not deployed**. Details in
+`phase-4-rollout-control.md`.
+
+## Phase 5 — native recording becomes the default
 
 Entry criteria, all required:
 

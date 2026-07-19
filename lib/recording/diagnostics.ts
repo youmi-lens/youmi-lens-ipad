@@ -26,7 +26,18 @@ export type RecordingDiagnosticEvent =
   | 'native_recovery_discarded'
   | 'native_handoff_completed'
   | 'native_handoff_retried'
-  | 'native_reconciliation_issue';
+  | 'native_reconciliation_issue'
+  // Phase 4 — rollout control
+  | 'rollout_fetch_started'
+  | 'rollout_fetch_succeeded'
+  | 'rollout_fetch_failed'
+  | 'rollout_cache_used'
+  | 'rollout_cache_expired'
+  | 'rollout_invalid_config'
+  | 'rollout_kill_switch_applied'
+  | 'rollout_engine_frozen'
+  | 'rollout_remote_disabled'
+  | 'native_recovery_overrode_rollout';
 
 /**
  * The only fields that may ever be emitted. Deliberately excludes every
@@ -47,6 +58,13 @@ const ALLOWED_FIELDS = Object.freeze([
   'recoverableSessionCount',
   'hasReconciliationIssues',
   'cohort',
+  // Phase 4 — rollout control. All non-identifying: a cohort label, an integer
+  // config revision, a coarse cache-age bucket and booleans.
+  'configRevision',
+  'cacheAgeBucket',
+  'expiryStatus',
+  'recoveryOverride',
+  'frozen',
 ]);
 
 const ALLOWED_FIELD_SET = new Set<string>(ALLOWED_FIELDS);

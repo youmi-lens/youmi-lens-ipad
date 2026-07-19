@@ -18,6 +18,7 @@ needs a human.
 | [recovery-architecture.md](recovery-architecture.md) | Storage layout, session lifecycle, recovery, handoff, idempotency |
 | [native-recording-test-guide.md](native-recording-test-guide.md) | Expected states, files, metadata, failure signatures |
 | [release-checklist.md](release-checklist.md) | Dev vs release workflow, and the one manual RELEASE-ONLY gate |
+| [phase-4-rollout-control.md](phase-4-rollout-control.md) | Per-user rollout, kill switch, caching, RLS model, operator workflow |
 | [phase-3-dogfood.md](phase-3-dogfood.md) | Engine selection, internal eligibility, fallback, provenance, telemetry privacy, rollback |
 | [phase-2c.md](phase-2c.md) | Adapter, recovery, discard, handoff — coverage and evidence |
 | [phase-2b.md](phase-2b.md) | Durable foreground audio engine |
@@ -28,7 +29,9 @@ needs a human.
 Native recording is **implemented but gated off**. The committed value of
 `CONFIGURED_RECORDING_ENGINE` is `legacy`; production uses the legacy Expo
 recorder. Internal builds may opt in via a build-time cohort flag — see
-[phase-3-dogfood.md](phase-3-dogfood.md). One manual physical gate remains
+[phase-3-dogfood.md](phase-3-dogfood.md). Per-user rollout control exists but
+its backend is **not deployed** — see
+[phase-4-rollout-control.md](phase-4-rollout-control.md). One manual physical gate remains
 before native can become the default — see
 [release-checklist.md](release-checklist.md).
 

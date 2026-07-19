@@ -12,6 +12,8 @@ const passed = await runSteps('Native recording verification', [
   nodeStep('recovery / resume / discard / relaunch', 'scripts/durable-recorder-recovery.test.mjs'),
   nodeStep('recorder adapter + feature gate', 'scripts/recording-adapter.test.mjs'),
   nodeStep('engine selection policy + fallback', 'scripts/recording-engine-policy.test.mjs'),
+  nodeStep('rollout control + failure matrix', 'scripts/recording-rollout.test.mjs'),
+  nodeStep('rollout admin + migration RLS', 'scripts/rollout-admin.test.mjs'),
   nodeStep('diagnostics privacy boundary', 'scripts/recording-diagnostics.test.mjs'),
   nodeStep('engine provenance + recovery routing', 'scripts/recording-provenance.test.mjs'),
   nodeStep('recording persistence (lecture side)', 'scripts/recording-persistence.test.mjs'),

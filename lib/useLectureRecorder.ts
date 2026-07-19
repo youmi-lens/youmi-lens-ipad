@@ -1,7 +1,8 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 
 import { formatRecordingDiagnosticSummary, logRecordingEvent } from './recording/diagnostics';
 import { resolveRecordingEngineDecisionForRuntime } from './recording/featureGate';
+import type { RolloutEligibility } from './recording/rolloutProvider';
 import type { LectureRecorder } from './recording/types';
 import { useLegacyLectureRecorder } from './recording/useLegacyLectureRecorder';
 import { useNativeDurableLectureRecorder } from './recording/useNativeDurableLectureRecorder';
@@ -13,10 +14,21 @@ export type {
   RecordingFallbackReason,
 } from './recording/featureGate';
 
-export function useLectureRecorder(options: { lectureId: string; forceLegacy?: boolean }): LectureRecorder {
+export function useLectureRecorder(options: {
+  lectureId: string;
+  forceLegacy?: boolean;
+  rollout?: RolloutEligibility | null;
+}): LectureRecorder {
+  // The engine is resolved once per recording session and then frozen. A later
+  // rollout change, cache refresh or token refresh must not switch engines
+  // underneath an in-flight recording.
+  const frozenEngineRef = useRef<'legacy' | 'nativeDurable' | null>(null);
   const decision = resolveRecordingEngineDecisionForRuntime({
     forceLegacy: options.forceLegacy === true,
+    rollout: options.rollout ?? null,
+    frozenEngine: frozenEngineRef.current,
   });
+  if (frozenEngineRef.current === null) frozenEngineRef.current = decision.engine;
   const engine = decision.engine;
   const legacy = useLegacyLectureRecorder(engine === 'legacy');
   const nativeDurable = useNativeDurableLectureRecorder(engine === 'nativeDurable', options.lectureId);

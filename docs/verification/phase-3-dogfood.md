@@ -45,7 +45,8 @@ system, no backend, no schema change, no secrets.
 It is deliberately **not** per-user. A committed allowlist would mean committing
 personal identifiers, and a backend-driven flag would require schema and
 deployment decisions outside this phase's scope. Per-user remote eligibility is
-therefore **deferred** — see the roadmap.
+therefore handled in Phase 4 — see
+[phase-4-rollout-control.md](phase-4-rollout-control.md) (backend not yet deployed).
 
 Eligibility is independent of subscriptions, purchases, entitlements, quotas and
 Student Basic, and reads none of that state.
@@ -117,7 +118,8 @@ drops everything else, so a careless call site cannot leak.
 **Allowed:** `engine`, `source`, `reason`, `issueCode`, `appBuild`,
 `sessionState`, `segmentCount`, `durationBucket`, `recovered`,
 `handoffCompleted`, `hasRecoverableSession`, `recoverableSessionCount`,
-`hasReconciliationIssues`, `cohort`.
+`hasReconciliationIssues`, `cohort`. Phase 4 adds `configRevision`,
+`cacheAgeBucket`, `expiryStatus`, `recoveryOverride` and `frozen`.
 
 **Forbidden and unemittable:** audio, waveforms, transcript / caption /
 translation text, lecture titles, course names, emails, raw user / session /
@@ -178,8 +180,7 @@ Not met yet. Before native can become the default:
 - Internal dogfooding shows no unexplained `native_reconciliation_issue` events
 - `recorder_fallback_to_legacy` is rare and every reason code is understood
 - Recovery succeeds when offered
-- Per-user rollout control exists, so the default can be reverted without a
-  rebuild
+- Per-user rollout control is deployed and verified (Phase 4)
 - A tested rollback path is confirmed
 
 ## Deferred physical gate

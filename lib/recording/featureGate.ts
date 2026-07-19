@@ -68,9 +68,21 @@ export function resolveRecordingEngineDecisionForRuntime(options: {
   capability?: NativeCapability;
   hasDurableEvidence?: boolean;
   eligibilityResolved?: boolean;
+  /** Normalized per-user rollout result; null when not resolved yet. */
+  rollout?: {
+    eligible: boolean;
+    resolved: boolean;
+    reason: string | null;
+    cohort: string | null;
+    revision: number | null;
+  } | null;
+  /** Engine already chosen for an in-flight recording session. */
+  frozenEngine?: RecordingEngine | null;
 } = {}): RecordingEngineDecision {
   return resolveRecordingEngineDecision({
     forceLegacy: options.forceLegacy === true,
+    rollout: options.rollout ?? null,
+    frozenEngine: options.frozenEngine ?? null,
     isDevelopment: __DEV__,
     // No test context exists at runtime; the override path is exercised by the
     // pure policy tests, which is what keeps it inert in every shipped build.
