@@ -85,7 +85,8 @@ final class DurableRecorderStore {
         finalized: false,
         failureCode: nil,
         failureMessage: nil,
-        segments: []
+        segments: [],
+        finalAsset: nil
       )
 
       do {
@@ -135,7 +136,14 @@ final class DurableRecorderStore {
         guard let session = try? readSession(canonicalIdentifier: canonical) else {
           return nil
         }
-        return session.recoverable && !session.state.isTerminal ? session : nil
+        // A finalized session with audio remains a completion candidate. This
+        // closes the crash window between native export and the JS lecture
+        // record/update that starts downstream processing. Re-export is
+        // idempotent, and matching remains scoped to this session's lectureId.
+        let completionPending = session.state == .finalized
+          && !session.segments.isEmpty
+          && session.handoffCompletedAt == nil
+        return (session.recoverable && !session.state.isTerminal) || completionPending ? session : nil
       }.sorted { lhs, rhs in
         if lhs.updatedAt != rhs.updatedAt {
           return lhs.updatedAt > rhs.updatedAt
@@ -407,6 +415,107 @@ final class DurableRecorderStore {
     }
   }
 
+  func finalAssetPlan(recordingSessionId: String) throws -> DurableFinalAssetPlan {
+    try synchronized {
+      let canonical = try requireCanonicalIdentifier(recordingSessionId)
+      let session = try readSession(canonicalIdentifier: canonical)
+      guard session.state == .finalized else {
+        throw DurableRecorderCoreError.invalidRecorderState("Final asset export requires a finalized session.")
+      }
+      let segments = session.segments.sorted { $0.sequence < $1.sequence }
+      guard !segments.isEmpty else { throw DurableRecorderCoreError.noFinalizableSegments }
+      let sessionDirectory = sessionURL(forCanonicalIdentifier: canonical)
+      let finalDirectory = sessionDirectory.appendingPathComponent("final", isDirectory: true)
+      do {
+        try fileManager.createDirectory(at: finalDirectory, withIntermediateDirectories: true)
+      } catch {
+        throw DurableRecorderCoreError.storageFailure(error.localizedDescription)
+      }
+      return DurableFinalAssetPlan(
+        recordingSessionId: canonical,
+        sourceSegments: segments,
+        sourceURLs: segments.map { sessionDirectory.appendingPathComponent($0.relativePath) },
+        temporaryURL: finalDirectory.appendingPathComponent("lecture.exporting.m4a"),
+        finalURL: finalDirectory.appendingPathComponent("lecture.m4a"),
+        relativePath: "final/lecture.m4a",
+        existingMetadata: session.finalAsset
+      )
+    }
+  }
+
+  func removeStaleFinalAssetTemporaryFile(_ plan: DurableFinalAssetPlan) throws {
+    try synchronized {
+      guard fileManager.fileExists(atPath: plan.temporaryURL.path) else { return }
+      do { try fileManager.removeItem(at: plan.temporaryURL) }
+      catch { throw DurableRecorderCoreError.storageFailure(error.localizedDescription) }
+    }
+  }
+
+  func promoteFinalAsset(_ plan: DurableFinalAssetPlan) throws {
+    try synchronized {
+      guard fileManager.fileExists(atPath: plan.temporaryURL.path) else {
+        throw DurableRecorderCoreError.finalAssetMissing
+      }
+      guard !fileManager.fileExists(atPath: plan.finalURL.path) else { return }
+      do { try fileManager.moveItem(at: plan.temporaryURL, to: plan.finalURL) }
+      catch { throw DurableRecorderCoreError.storageFailure(error.localizedDescription) }
+    }
+  }
+
+  func commitFinalAsset(
+    recordingSessionId: String,
+    relativePath: String,
+    inspection: DurableAudioFileInspection,
+    sourceSegmentIds: [String]
+  ) throws -> DurableRecordingSession {
+    try synchronized {
+      let canonical = try requireCanonicalIdentifier(recordingSessionId)
+      var session = try readSession(canonicalIdentifier: canonical)
+      guard session.state == .finalized else {
+        throw DurableRecorderCoreError.invalidRecorderState("Final asset metadata requires a finalized session.")
+      }
+      let expectedIds = session.segments.sorted { $0.sequence < $1.sequence }.map(\.segmentId)
+      guard relativePath == "final/lecture.m4a", sourceSegmentIds == expectedIds,
+            inspection.durationMs > 0, inspection.byteLength > 0 else {
+        throw DurableRecorderCoreError.invalidMetadata
+      }
+      if session.finalAsset != nil { return session }
+      let finalURL = sessionURL(forCanonicalIdentifier: canonical).appendingPathComponent(relativePath)
+      guard fileManager.fileExists(atPath: finalURL.path) else {
+        throw DurableRecorderCoreError.finalAssetMissing
+      }
+      session.finalAsset = DurableFinalAssetMetadata(
+        relativePath: relativePath,
+        createdAt: Self.timestamp(clock()),
+        durationMs: inspection.durationMs,
+        byteLength: inspection.byteLength,
+        container: "m4a",
+        sourceSegmentIds: sourceSegmentIds
+      )
+      session.updatedAt = Self.timestamp(clock())
+      try write(session)
+      return session
+    }
+  }
+
+  func acknowledgeFinalAssetHandoff(recordingSessionId: String) throws -> DurableRecordingSession {
+    try synchronized {
+      let canonical = try requireCanonicalIdentifier(recordingSessionId)
+      var session = try readSession(canonicalIdentifier: canonical)
+      guard session.state == .finalized, session.finalAsset != nil else {
+        throw DurableRecorderCoreError.invalidRecorderState(
+          "Final asset handoff can only be acknowledged after export."
+        )
+      }
+      if session.handoffCompletedAt != nil { return session }
+      let timestamp = Self.timestamp(clock())
+      session.handoffCompletedAt = timestamp
+      session.updatedAt = timestamp
+      try write(session)
+      return session
+    }
+  }
+
   private func synchronized<T>(_ operation: () throws -> T) rethrows -> T {
     lock.lock()
     defer { lock.unlock() }
@@ -443,6 +552,8 @@ final class DurableRecorderStore {
             session.relativeSessionPath == "sessions/\(canonicalIdentifier)",
             session.recoverable == !session.state.isTerminal,
             session.finalized == (session.state == .finalized),
+            Self.finalAssetIsValid(session.finalAsset, segments: session.segments),
+            session.handoffCompletedAt == nil || (session.state == .finalized && session.finalAsset != nil),
             try Self.segmentsAreValid(session.segments) else {
         throw DurableRecorderCoreError.invalidMetadata
       }
@@ -510,6 +621,18 @@ final class DurableRecorderStore {
       previousSequence = segment.sequence
     }
     return true
+  }
+
+  private static func finalAssetIsValid(
+    _ finalAsset: DurableFinalAssetMetadata?,
+    segments: [DurableRecordingSegmentMetadata]
+  ) -> Bool {
+    guard let finalAsset else { return true }
+    return finalAsset.relativePath == "final/lecture.m4a"
+      && finalAsset.durationMs > 0
+      && finalAsset.byteLength > 0
+      && finalAsset.container == "m4a"
+      && finalAsset.sourceSegmentIds == segments.sorted { $0.sequence < $1.sequence }.map(\.segmentId)
   }
 
   private static func isFinalizedSegmentFileName(_ fileName: String) -> Bool {

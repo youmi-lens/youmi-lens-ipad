@@ -331,7 +331,9 @@ final class DurableForegroundRecorder {
         (try? fileInspector.inspect(url: url)) != nil
       }
       if !session.state.isTerminal {
-        try claim(recordingSessionId)
+        // Recovery is inspection-only. Resume claims ownership when the user
+        // explicitly chooses to continue; Finish/Discard must not strand the
+        // engine behind an otherwise idle recovered session.
         runtimeState = session.state == .paused ? .paused : session.state == .ready ? .ready : .idle
       }
       return DurableRecoveryResult(session: session, issues: result.issues)

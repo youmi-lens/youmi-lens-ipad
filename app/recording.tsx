@@ -94,10 +94,16 @@ export default function RecordingScreen() {
   }, [resumeLecture]);
   const course = getCourse(resumeLecture?.courseId ?? params.courseId);
   const courseName = course?.name ?? t('recording.defaultCourse');
+  // One stable lecture identity owns both the local draft and (when gated on)
+  // exactly one native durable recording session.
+  const [pendingLectureId] = useState(() => resumeLecture?.id ?? reserveLectureId());
 
   const {
+    engine: recordingEngine,
     permissionChecked,
     permissionStatus,
+    recoveryChecked,
+    recoverableSession,
     isRecording,
     isPaused,
     durationMillis,
@@ -106,7 +112,13 @@ export default function RecordingScreen() {
     pauseRecording,
     resumeRecording,
     stopRecording,
-  } = useLectureRecorder();
+    leaveRecording,
+    recoverRecording,
+    finishRecoverableRecording,
+    acknowledgeFinalizedOutput,
+    discardRecoverableRecording,
+    dismissRecovery,
+  } = useLectureRecorder({ lectureId: pendingLectureId, forceLegacy: isGuest });
 
   const {
     status: liveCaptionStatus,
@@ -125,6 +137,7 @@ export default function RecordingScreen() {
   const [micStreamError, setMicStreamError] = useState<string | null>(null);
   const [startFailed, setStartFailed] = useState(false);
   const [finishing, setFinishing] = useState(false);
+  const [recoveryDismissed, setRecoveryDismissed] = useState(false);
   const [materialPickerVisible, setMaterialPickerVisible] = useState(false);
   const [importingMaterial, setImportingMaterial] = useState(false);
   // Reopening an in-progress lecture starts in a REVIEW state: prior captions
@@ -135,7 +148,6 @@ export default function RecordingScreen() {
   // New content APPENDS to the resumed lecture's id (no duplicate); a fresh
   // recording reserves a new id. Prior caption history / marks / audio are
   // snapshotted once at mount so we can merge new content onto them.
-  const [pendingLectureId] = useState(() => resumeLecture?.id ?? reserveLectureId());
   const priorCaptionLinesRef = useRef<PersistedCaptionLine[]>(resumeLecture?.liveCaptionLines ?? []);
   const priorMarksRef = useRef<number[]>(resumeLecture?.markedTimestamps ?? []);
   const priorAudioUriRef = useRef<string | null>(resumeLecture?.localAudioUri ?? null);
@@ -161,7 +173,9 @@ export default function RecordingScreen() {
   const materialAnnotationsRef = useRef(materialAnnotations);
 
   const granted = permissionStatus === 'granted';
-  const sessionDurationMillis = isResume
+  const sessionDurationMillis = recordingEngine === 'nativeDurable'
+    ? durationMillis
+    : isResume
     ? (resumeLecture?.durationMillis ?? 0) + (isReviewingResume ? 0 : durationMillis)
     : durationMillis;
   const seconds = Math.floor(sessionDurationMillis / 1000);
@@ -286,6 +300,31 @@ export default function RecordingScreen() {
   const persistProgressRef = useRef(persistProgress);
   persistProgressRef.current = persistProgress;
 
+  // Native durability needs the product-side lecture identity to exist before
+  // a process can be killed. This empty in-progress shell is local-only and is
+  // later filled by the normal autosave/Finish paths.
+  const ensureNativeProgressIdentity = useCallback(() => {
+    if (recordingEngine !== 'nativeDurable' || isGuest || progressCreatedRef.current) return;
+    saveInProgressLecture({
+      id: pendingLectureId,
+      courseId: sessionCourseIdRef.current,
+      title: sessionTitleRef.current,
+      durationMillis: 0,
+      localAudioUri: null,
+      markedTimestamps: [],
+      liveTranscript: '',
+      liveTranscriptZh: '',
+      translatedLiveTranscript: '',
+      sourceLanguage,
+      translationLanguage,
+      liveCaptionLines: [],
+      notes: '',
+      noteStrokes: [],
+      noteImages: [],
+    });
+    progressCreatedRef.current = true;
+  }, [isGuest, pendingLectureId, recordingEngine, saveInProgressLecture, sourceLanguage, translationLanguage]);
+
   // Autosave: create the lecture as soon as meaningful content appears (so it
   // survives an app kill), then refresh it at most every 5s while recording.
   useEffect(() => {
@@ -352,6 +391,7 @@ export default function RecordingScreen() {
         localRecordingActive: isRecordingRef.current,
       });
     }
+
     resetCaptions();
     setMicStreamError(null);
     firstPcmFrameLoggedRef.current = false;
@@ -439,7 +479,7 @@ export default function RecordingScreen() {
   // granted. The local recorder starts first so it owns the audio session;
   // the live caption mic stream then attaches on top without being clobbered.
   useEffect(() => {
-    if (autoStarted.current || !granted || !contentPreferencesLoaded) return;
+    if (autoStarted.current || !granted || !contentPreferencesLoaded || !recoveryChecked || recoverableSession) return;
     // Resumed lecture: wait for the existing central Pause/Continue control
     // before the recorder/mic/captions start, so opening it is a safe review.
     if (isResume && !continueRequested) return;
@@ -447,12 +487,13 @@ export default function RecordingScreen() {
     void startRecording().then((started) => {
       if (__DEV__) console.info('[recording] automatic local recording result', { started });
       setStartFailed(!started);
+      if (started) ensureNativeProgressIdentity();
       // Guests record locally only — no live caption WebSocket / backend calls.
       if (started && !isGuest) void startCaptionPipeline();
     });
   // The recorder and caption starters intentionally run once after permission resolves.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [granted, isGuest, isResume, continueRequested, contentPreferencesLoaded]);
+  }, [granted, isGuest, isResume, continueRequested, contentPreferencesLoaded, recoveryChecked, recoverableSession]);
 
   // Keep this fresh for the mount-once AppState listener below.
   isRecordingRef.current = isRecording;
@@ -487,6 +528,7 @@ export default function RecordingScreen() {
     const started = await startRecording();
     if (__DEV__) console.info('[recording] permission CTA recording result', { started });
     setStartFailed(!started);
+    if (started) ensureNativeProgressIdentity();
     if (started && !isGuest) await startCaptionPipeline();
   };
 
@@ -498,19 +540,20 @@ export default function RecordingScreen() {
     const started = await startRecording();
     if (__DEV__) console.info('[recording] retry start recording result', { started });
     setStartFailed(!started);
+    if (started) ensureNativeProgressIdentity();
     if (started && !isGuest) await startCaptionPipeline();
   };
 
-  const togglePause = () => {
+  const togglePause = async () => {
     if (isReviewingResume) {
       setContinueRequested(true);
       return;
     }
     if (isPaused) {
-      resumeRecording();
-      if (!isGuest) void startCaptionPipeline();
+      await resumeRecording();
+      if (!isGuest) await startCaptionPipeline();
     } else {
-      pauseRecording();
+      await pauseRecording();
       stopMicStream();
       stopLiveCaptions();
       // Pausing keeps the session — persist so it survives a later exit.
@@ -528,7 +571,7 @@ export default function RecordingScreen() {
       stopLiveCaptions();
       let uri: string | null = null;
       try {
-        uri = await stopRecording();
+        uri = await leaveRecording();
       } catch {
         uri = null;
       }
@@ -547,8 +590,9 @@ export default function RecordingScreen() {
     }).start();
   };
 
-  const finish = async () => {
+  const finish = async (options?: { recoverable?: boolean }) => {
     if (finishing) return;
+    if (options?.recoverable) autoStarted.current = true;
     if (__DEV__) {
       console.info('[recording] finish pressed', {
         durationMillis: sessionDurationMillis,
@@ -561,12 +605,19 @@ export default function RecordingScreen() {
     const finalDuration = sessionDurationMillis;
     stopMicStream();
     stopLiveCaptions();
-    const uri = await stopRecording();
+    const uri = options?.recoverable
+      ? await finishRecoverableRecording()
+      : await stopRecording();
     if (__DEV__) {
       console.info('[recording] local recording stopped', {
         hasUri: Boolean(uri),
         durationMillis: finalDuration,
       });
+    }
+    if (recordingEngine === 'nativeDurable' && !uri) {
+      finishedRef.current = false;
+      setFinishing(false);
+      return;
     }
 
     // Guest recordings are local-only with no captions, so audio is their only
@@ -695,9 +746,42 @@ export default function RecordingScreen() {
       });
       lectureId = lecture.id;
     }
+    if (recordingEngine === 'nativeDurable' && !(await acknowledgeFinalizedOutput())) {
+      finishedRef.current = false;
+      setFinishing(false);
+      return;
+    }
     resetDraft();
 
     router.replace({ pathname: '/processing', params: { lectureId } });
+  };
+
+  const resumeRecoveredRecording = async () => {
+    if (finishing) return;
+    autoStarted.current = true;
+    const recovered = await recoverRecording();
+    if (!recovered) return;
+    setContinueRequested(true);
+    await resumeRecording();
+    if (!isGuest) await startCaptionPipeline();
+  };
+
+  const confirmDiscardRecoveredRecording = () => {
+    Alert.alert(
+      t('recording.recoveryDiscardTitle'),
+      t('recording.recoveryDiscardBody'),
+      [
+        { text: t('common.cancel'), style: 'cancel' },
+        {
+          text: t('recording.recoveryDiscard'),
+          style: 'destructive',
+          onPress: () => {
+            autoStarted.current = true;
+            void discardRecoverableRecording();
+          },
+        },
+      ],
+    );
   };
 
   // Guest recordings are capped at 2 minutes. When the cap is reached we finish
@@ -960,7 +1044,7 @@ export default function RecordingScreen() {
               accessibilityLabel={isReviewingResume || isPaused ? t('recording.resume') : t('recording.pause')}
               accessibilityState={{ disabled: !centralControlEnabled }}
               disabled={!centralControlEnabled}
-              onPress={togglePause}
+              onPress={() => { void togglePause(); }}
               style={({ pressed }) => [styles.roundBtn, !centralControlEnabled && styles.disabled, pressed && styles.pressed]}
             >
               <Ionicons
@@ -973,7 +1057,7 @@ export default function RecordingScreen() {
             <Pressable
               accessibilityRole="button"
               disabled={finishing}
-              onPress={finish}
+              onPress={() => { void finish(); }}
               style={({ pressed }) => [styles.finishButton, finishing && styles.disabled, pressed && styles.pressed]}
             >
               <Ionicons name="checkmark-done" size={18} color={colors.pearlWhite} />
@@ -1045,6 +1129,49 @@ export default function RecordingScreen() {
                   disabled={importingMaterial}
                   onPress={importAndOpenMaterial}
                 />
+              </View>
+            </View>
+          </Modal>
+
+          <Modal
+            visible={Boolean(recoverableSession) && !recoveryDismissed}
+            transparent
+            animationType="fade"
+            onRequestClose={() => { setRecoveryDismissed(true); dismissRecovery(); }}
+          >
+            <View style={styles.materialModalOverlay}>
+              <Pressable style={StyleSheet.absoluteFill} onPress={() => { setRecoveryDismissed(true); dismissRecovery(); }} />
+              <View style={styles.recoveryCard}>
+                <View style={styles.recoveryIcon}>
+                  <Ionicons name="refresh-circle-outline" size={32} color={colors.accent} />
+                </View>
+                <Text style={styles.materialModalTitle}>{t('recording.recoveryTitle')}</Text>
+                <Text style={styles.permBody}>{t('recording.recoveryBody')}</Text>
+                {error ? <Text style={styles.errorText}>{error}</Text> : null}
+                {recoverableSession?.state !== 'finalized' ? (
+                  <PrimaryButton
+                    label={t('recording.recoveryResume')}
+                    icon="play"
+                    onPress={() => { void resumeRecoveredRecording(); }}
+                  />
+                ) : null}
+                {(recoverableSession?.segments.length ?? 0) > 0 ? (
+                  <SecondaryButton
+                    label={t('recording.recoveryFinish')}
+                    icon="checkmark-done"
+                    onPress={() => { void finish({ recoverable: true }); }}
+                  />
+                ) : null}
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={confirmDiscardRecoveredRecording}
+                  style={({ pressed }) => [styles.recoveryDiscardButton, pressed && styles.pressed]}
+                >
+                  <Text style={styles.recoveryDiscardText}>{t('recording.recoveryDiscard')}</Text>
+                </Pressable>
+                <Pressable accessibilityRole="button" onPress={() => { setRecoveryDismissed(true); dismissRecovery(); }}>
+                  <Text style={styles.markHint}>{t('common.notNow')}</Text>
+                </Pressable>
               </View>
             </View>
           </Modal>
@@ -1148,6 +1275,22 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     textAlign: 'center',
   },
+  recoveryCard: {
+    width: '100%',
+    maxWidth: 430,
+    alignSelf: 'center',
+    alignItems: 'stretch',
+    gap: spacing.md,
+    padding: spacing.xl,
+    borderRadius: radius.xl,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    ...shadows.card,
+  },
+  recoveryIcon: { alignSelf: 'center' },
+  recoveryDiscardButton: { alignItems: 'center', paddingVertical: spacing.sm },
+  recoveryDiscardText: { color: colors.recordingRed, fontSize: fontSize.sm, fontWeight: '700' },
 
   // ---- Recording ----
   toast: {

@@ -84,6 +84,14 @@ const finalizedRecordingSession = {
   recoverable: false,
   finalized: true,
   segments: [segmentResult],
+  finalAsset: {
+    relativePath: 'final/lecture.m4a',
+    createdAt: '2023-11-14T22:13:23.000Z',
+    durationMs: 1000,
+    byteLength: 4096,
+    container: 'm4a',
+    sourceSegmentIds: [segmentResult.segmentId],
+  },
 };
 
 const statusResult = (runtimeState, session = undefined) => ({
@@ -111,6 +119,14 @@ const linked = loadBoundary({
     stopRecording: async () => statusResult('idle', finalizedRecordingSession),
     getRecordingStatus: async () => statusResult('idle'),
     recoverRecordingSession: async () => ({ session: pausedSession, issues: [] }),
+    exportFinalizedAsset: async () => ({
+      session: finalizedRecordingSession,
+      fileUri: 'file:///durable-recorder/sessions/11111111-1111-4111-8111-111111111111/final/lecture.m4a',
+    }),
+    acknowledgeFinalAssetHandoff: async () => ({
+      ...finalizedRecordingSession,
+      handoffCompletedAt: '2023-11-14T22:13:24.000Z',
+    }),
   },
   platform: 'ios',
 });
@@ -135,6 +151,14 @@ assert.equal((await linked.prepareRecording({ recordingSessionId: sessionResult.
 assert.equal((await linked.startRecording({ recordingSessionId: sessionResult.recordingSessionId })).runtimeState, 'recording');
 assert.equal((await linked.pauseRecording({ recordingSessionId: sessionResult.recordingSessionId })).completedSegments.length, 1);
 assert.equal((await linked.recoverRecordingSession({ recordingSessionId: sessionResult.recordingSessionId })).issues.length, 0);
+assert.equal(
+  (await linked.exportFinalizedAsset({ recordingSessionId: sessionResult.recordingSessionId })).fileUri,
+  'file:///durable-recorder/sessions/11111111-1111-4111-8111-111111111111/final/lecture.m4a',
+);
+assert.equal(
+  (await linked.acknowledgeFinalAssetHandoff({ recordingSessionId: sessionResult.recordingSessionId })).handoffCompletedAt,
+  '2023-11-14T22:13:24.000Z',
+);
 
 const unavailable = loadBoundary({ nativeModule: null, platform: 'web' });
 assert.deepEqual(plain(await unavailable.getCapabilities()), {
@@ -170,8 +194,10 @@ assert.deepEqual(
     'DURABLE_RECORDING_STATES',
     'DurableRecorderError',
     'abandonSession',
+    'acknowledgeFinalAssetHandoff',
     'createSession',
     'deleteSession',
+    'exportFinalizedAsset',
     'finalizeSession',
     'getCapabilities',
     'getMicrophonePermissionStatus',
@@ -186,7 +212,7 @@ assert.deepEqual(
     'stopRecording',
     'transitionSession',
   ],
-  'Phase 2B preserves session APIs and adds only foreground recorder actions',
+  'Phase 2C preserves existing APIs and adds finalized-asset handoff APIs',
 );
 
 await assert.rejects(

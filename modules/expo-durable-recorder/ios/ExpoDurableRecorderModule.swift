@@ -25,6 +25,9 @@ public final class ExpoDurableRecorderModule: Module {
   private lazy var engineResult = Result {
     DurableForegroundRecorder(store: try storeResult.get())
   }
+  private lazy var exporterResult = Result {
+    DurableFinalAssetExporter(store: try storeResult.get())
+  }
 
   public func definition() -> ModuleDefinition {
     Name("ExpoDurableRecorder")
@@ -141,6 +144,26 @@ public final class ExpoDurableRecorderModule: Module {
     AsyncFunction("recoverRecordingSession") { (input: DurableSessionIdentifierRecord) throws -> [String: Any] in
       try self.withEngine { engine in
         try engine.recoverRecordingSession(recordingSessionId: input.recordingSessionId).asDictionary()
+      }
+    }
+
+    AsyncFunction("exportFinalizedAsset") {
+      (input: DurableSessionIdentifierRecord) async throws -> [String: Any] in
+      do {
+        return try await self.exporterResult.get().export(recordingSessionId: input.recordingSessionId)
+      } catch let error as DurableRecorderCoreError {
+        throw self.moduleException(error)
+      } catch {
+        throw self.storageException(error)
+      }
+    }
+
+    AsyncFunction("acknowledgeFinalAssetHandoff") {
+      (input: DurableSessionIdentifierRecord) throws -> [String: Any] in
+      try self.withStore { store in
+        try store.acknowledgeFinalAssetHandoff(
+          recordingSessionId: input.recordingSessionId
+        ).asDictionary()
       }
     }
   }

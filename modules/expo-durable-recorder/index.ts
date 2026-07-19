@@ -57,6 +57,22 @@ export type DurableRecordingSession = {
   failureCode?: string;
   failureMessage?: string;
   segments: DurableRecordingSegment[];
+  finalAsset?: DurableFinalAsset;
+  handoffCompletedAt?: string;
+};
+
+export type DurableFinalAsset = {
+  relativePath: 'final/lecture.m4a';
+  createdAt: string;
+  durationMs: number;
+  byteLength: number;
+  container: 'm4a';
+  sourceSegmentIds: string[];
+};
+
+export type DurableFinalizedOutput = {
+  session: DurableRecordingSession;
+  fileUri: string;
 };
 
 export type CreateDurableSessionInput = {
@@ -135,6 +151,9 @@ export type DurableRecorderErrorCode =
   | 'ERR_DURABLE_RECORDER_START_FAILED'
   | 'ERR_DURABLE_RECORDER_SEGMENT_VALIDATION'
   | 'ERR_DURABLE_RECORDER_SEGMENT_COLLISION'
+  | 'ERR_DURABLE_RECORDER_NO_FINALIZABLE_SEGMENTS'
+  | 'ERR_DURABLE_RECORDER_FINAL_ASSET_EXPORT'
+  | 'ERR_DURABLE_RECORDER_FINAL_ASSET_MISSING'
   | 'ERR_DURABLE_RECORDER_STORAGE';
 
 export class DurableRecorderError extends Error {
@@ -164,6 +183,8 @@ type NativeDurableRecorderModule = {
   stopRecording: (input: DurableSessionIdentifierInput) => Promise<unknown>;
   getRecordingStatus: () => Promise<unknown>;
   recoverRecordingSession: (input: DurableSessionIdentifierInput) => Promise<unknown>;
+  exportFinalizedAsset: (input: DurableSessionIdentifierInput) => Promise<unknown>;
+  acknowledgeFinalAssetHandoff: (input: DurableSessionIdentifierInput) => Promise<unknown>;
 };
 
 const stateSet = new Set<string>(DURABLE_RECORDING_STATES);
@@ -282,6 +303,8 @@ function validateSession(value: unknown): DurableRecordingSession | null {
     failureCode,
     failureMessage,
     segments,
+    finalAsset,
+    handoffCompletedAt,
   } = value;
   if (
     schemaVersion !== 1 ||
@@ -306,8 +329,34 @@ function validateSession(value: unknown): DurableRecordingSession | null {
   if (recoverable === terminal || finalized !== (state === 'finalized')) return null;
   const validatedSegments = segments.map(validateSegment);
   if (validatedSegments.some((segment) => segment === null)) return null;
+  if (handoffCompletedAt !== undefined && !isTimestamp(handoffCompletedAt)) return null;
   const concreteSegments = validatedSegments as DurableRecordingSegment[];
   if (concreteSegments.some((segment, index) => segment.sequence !== index + 1)) return null;
+  let validatedFinalAsset: DurableFinalAsset | undefined;
+  if (finalAsset !== undefined) {
+    if (!isRecord(finalAsset)) return null;
+    const sourceSegmentIds = finalAsset.sourceSegmentIds;
+    if (
+      finalAsset.relativePath !== 'final/lecture.m4a' ||
+      !isTimestamp(finalAsset.createdAt) ||
+      !Number.isInteger(finalAsset.durationMs) ||
+      (finalAsset.durationMs as number) <= 0 ||
+      !Number.isInteger(finalAsset.byteLength) ||
+      (finalAsset.byteLength as number) <= 0 ||
+      finalAsset.container !== 'm4a' ||
+      !Array.isArray(sourceSegmentIds) ||
+      sourceSegmentIds.length !== concreteSegments.length ||
+      sourceSegmentIds.some((id, index) => id !== concreteSegments[index]?.segmentId)
+    ) return null;
+    validatedFinalAsset = {
+      relativePath: 'final/lecture.m4a',
+      createdAt: finalAsset.createdAt,
+      durationMs: finalAsset.durationMs as number,
+      byteLength: finalAsset.byteLength as number,
+      container: 'm4a',
+      sourceSegmentIds: sourceSegmentIds as string[],
+    };
+  }
   return {
     schemaVersion,
     recordingSessionId,
@@ -321,6 +370,8 @@ function validateSession(value: unknown): DurableRecordingSession | null {
     ...(failureCode === undefined ? {} : { failureCode }),
     ...(failureMessage === undefined ? {} : { failureMessage }),
     segments: concreteSegments,
+    ...(validatedFinalAsset ? { finalAsset: validatedFinalAsset } : {}),
+    ...(handoffCompletedAt === undefined ? {} : { handoffCompletedAt }),
   };
 }
 
@@ -610,6 +661,44 @@ export async function recoverRecordingSession(
       'The native durable recorder returned an invalid recovery issue.',
     );
     return { session, issues: issues as DurableRecoveryIssue[] };
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function exportFinalizedAsset(
+  input: DurableSessionIdentifierInput,
+): Promise<DurableFinalizedOutput> {
+  try {
+    const result = await requireNativeModule().exportFinalizedAsset({
+      recordingSessionId: requireSessionId(input?.recordingSessionId),
+    });
+    if (!isRecord(result) || typeof result.fileUri !== 'string' || !result.fileUri.startsWith('file://')) {
+      throw new DurableRecorderError(
+        'ERR_DURABLE_RECORDER_INVALID_NATIVE_RESULT',
+        'The native durable recorder returned an invalid final asset.',
+      );
+    }
+    const session = requireSession(result.session);
+    if (!session.finalAsset || session.state !== 'finalized') {
+      throw new DurableRecorderError(
+        'ERR_DURABLE_RECORDER_INVALID_NATIVE_RESULT',
+        'The native durable recorder returned incomplete final asset metadata.',
+      );
+    }
+    return { session, fileUri: result.fileUri };
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function acknowledgeFinalAssetHandoff(
+  input: DurableSessionIdentifierInput,
+): Promise<DurableRecordingSession> {
+  try {
+    return requireSession(await requireNativeModule().acknowledgeFinalAssetHandoff({
+      recordingSessionId: requireSessionId(input?.recordingSessionId),
+    }));
   } catch (error) {
     throw normalizeError(error);
   }

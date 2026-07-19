@@ -103,6 +103,26 @@ struct DurableRecordingSegmentMetadata: Codable, Equatable {
   }
 }
 
+struct DurableFinalAssetMetadata: Codable, Equatable {
+  let relativePath: String
+  let createdAt: String
+  let durationMs: Int
+  let byteLength: Int64
+  let container: String
+  let sourceSegmentIds: [String]
+
+  func asDictionary() -> [String: Any] {
+    [
+      "relativePath": relativePath,
+      "createdAt": createdAt,
+      "durationMs": durationMs,
+      "byteLength": byteLength,
+      "container": container,
+      "sourceSegmentIds": sourceSegmentIds
+    ]
+  }
+}
+
 struct DurableRecordingSession: Codable, Equatable {
   let schemaVersion: Int
   let recordingSessionId: String
@@ -116,6 +136,8 @@ struct DurableRecordingSession: Codable, Equatable {
   var failureCode: String?
   var failureMessage: String?
   var segments: [DurableRecordingSegmentMetadata]
+  var finalAsset: DurableFinalAssetMetadata? = nil
+  var handoffCompletedAt: String? = nil
 
   mutating func apply(
     state target: DurableRecordingState,
@@ -146,8 +168,20 @@ struct DurableRecordingSession: Codable, Equatable {
     ]
     if let failureCode { result["failureCode"] = failureCode }
     if let failureMessage { result["failureMessage"] = failureMessage }
+    if let finalAsset { result["finalAsset"] = finalAsset.asDictionary() }
+    if let handoffCompletedAt { result["handoffCompletedAt"] = handoffCompletedAt }
     return result
   }
+}
+
+struct DurableFinalAssetPlan {
+  let recordingSessionId: String
+  let sourceSegments: [DurableRecordingSegmentMetadata]
+  let sourceURLs: [URL]
+  let temporaryURL: URL
+  let finalURL: URL
+  let relativePath: String
+  let existingMetadata: DurableFinalAssetMetadata?
 }
 
 struct DurableSegmentPlan: Equatable {
@@ -205,6 +239,9 @@ enum DurableRecorderCoreError: Error, Equatable {
   case recorderStartFailed(String)
   case segmentValidationFailed(String)
   case segmentCollision
+  case noFinalizableSegments
+  case finalAssetExportFailed(String)
+  case finalAssetMissing
   case storageFailure(String)
 
   var code: String {
@@ -225,6 +262,9 @@ enum DurableRecorderCoreError: Error, Equatable {
     case .recorderStartFailed: return "ERR_DURABLE_RECORDER_START_FAILED"
     case .segmentValidationFailed: return "ERR_DURABLE_RECORDER_SEGMENT_VALIDATION"
     case .segmentCollision: return "ERR_DURABLE_RECORDER_SEGMENT_COLLISION"
+    case .noFinalizableSegments: return "ERR_DURABLE_RECORDER_NO_FINALIZABLE_SEGMENTS"
+    case .finalAssetExportFailed: return "ERR_DURABLE_RECORDER_FINAL_ASSET_EXPORT"
+    case .finalAssetMissing: return "ERR_DURABLE_RECORDER_FINAL_ASSET_MISSING"
     case .storageFailure: return "ERR_DURABLE_RECORDER_STORAGE"
     }
   }
@@ -263,6 +303,12 @@ enum DurableRecorderCoreError: Error, Equatable {
       return "The recorded segment failed validation: \(reason)"
     case .segmentCollision:
       return "A generated segment path already exists."
+    case .noFinalizableSegments:
+      return "The durable recording session has no finalized audio segments."
+    case let .finalAssetExportFailed(reason):
+      return "The durable final audio asset could not be created: \(reason)"
+    case .finalAssetMissing:
+      return "The durable final audio asset is missing."
     case let .storageFailure(reason):
       return "Durable recording storage failed: \(reason)"
     }
