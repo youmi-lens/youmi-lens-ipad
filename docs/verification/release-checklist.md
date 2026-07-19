@@ -82,8 +82,9 @@ xcrun devicectl device info files --device $DEV \
 
 ## Rollout control
 
-Remote per-user rollout is wired but **inactive**, and Phase 4C activation is
-**blocked pending admin access** (see
+Remote per-user rollout is wired but **inactive**. The rollout table is now
+deployed to production, but RLS is only partially verified and nobody is
+enrolled (see
 [phase-4c-activation-evidence.md](phase-4c-activation-evidence.md)): the activation gate
 `EXPO_PUBLIC_RECORDING_ROLLOUT_REMOTE` is `0`, the migration is undeployed, and
 no user is enrolled. A release build must never set that flag. Activation steps:

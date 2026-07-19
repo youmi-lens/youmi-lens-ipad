@@ -3,7 +3,8 @@
 **Date:** 2026-07-19
 **App commit at audit:** `db00304`
 **Environment:** PRODUCTION
-**Outcome: BLOCKED at Task 4 (apply migration). Nothing was deployed.**
+**Outcome: migration DEPLOYED by the user. Verification PARTIAL — stopped
+before enrollment because the decisive RLS checks could not be executed.**
 
 Phase 4C is **not complete**.
 
@@ -12,14 +13,14 @@ project `lbws…dult`, and the target was positively confirmed: the project ref 
 `.env` matches the authorized ref exactly. The migration safety review, client
 secret-boundary review and full automated verification all pass.
 
-Deployment still cannot proceed, for a different reason than before:
-**authorization is present, but no executable administrative credential is.**
-Authorization grants permission; it does not supply a key. Applying DDL requires
-one of a service-role key, a Supabase CLI access token, or a database password —
-none of which exists in this environment.
+**Update — migration applied.** The user applied the authorized migration once,
+via the Supabase Dashboard SQL Editor, to production project `lbws…dult`. It was
+not reapplied by this session, and no other backend change was made.
 
-No backend object was created, altered or dropped. No user was enrolled. No
-credential was requested, stored or transmitted.
+Post-deployment verification is **partial**. The anonymous principal passes, but
+the two checks that actually gate enrollment — ordinary-user self-enrollment and
+cross-user read — could not be executed, because no test-account credentials and
+no service-role key are available here. **No user has been enrolled.**
 
 ## Pre-migration snapshot
 
@@ -35,8 +36,8 @@ credential was requested, stored or transmitted.
 | `~/.supabase` access token | **absent** (only telemetry and traces present) |
 | DDL path via anon key (`exec_sql` RPC) | **absent** — `PGRST202`, correctly not exposed |
 | Linked Supabase project (`supabase/config.toml`) | absent |
-| `recording_engine_rollout` table | **does not exist** (PGRST205, HTTP 404) |
-| Existing rollout rows | none — table absent |
+| `recording_engine_rollout` table | **EXISTS** (deployed by user; anon read denied `42501`) |
+| Existing rollout rows | none created by this session |
 | Migration version history | not accessible without admin access |
 | Global recorder default | `legacy` |
 | Dogfood build flag | `0` |
@@ -78,20 +79,60 @@ or any function or trigger.
 Rollback reverses only this migration: it drops the one policy and the one
 table, and nothing else.
 
-## RLS empirical verification — NOT PERFORMED
+## Post-deployment schema verification — PASS
 
-**Status: NOT EMPIRICALLY VERIFIED.** The table does not exist, so there is
-nothing to test against. The design review from Phase 4 stands unchanged, and
-must not be treated as verification.
+Verified from the anonymous context by differential probing. PostgREST resolves
+an unknown column before evaluating privileges, so the two error codes separate
+cleanly:
 
-| Context | Required outcome | Actual |
+| Column probed | Code | Meaning |
 | --- | --- | --- |
-| Unauthenticated read / insert / update / delete | denied | **not executed** |
-| User A read own row | allowed | **not executed** |
-| User A read user B's row | denied | **not executed** |
-| User A insert / update / delete / self-enroll | denied | **not executed** |
-| User B read user A's row | denied | **not executed** |
-| Service role insert / update / kill switch / expiry / delete | allowed | **not executed** |
+| `user_id`, `engine`, `enabled`, `cohort`, `kill_switch`, `rollout_revision`, `expires_at`, `updated_at` | `42501` | column **exists**, permission denied |
+| `definitely_not_a_column` (control) | `42703` | column does not exist |
+
+All eight reviewed columns are present, and the control confirms the probe
+distinguishes existence from permission. Constraint definitions, `FORCE ROW
+LEVEL SECURITY`, and the policy body are **not** verifiable from this context
+and remain unconfirmed.
+
+## RLS empirical verification — PARTIAL (4 passed, 3 groups skipped)
+
+Command: `node scripts/rollout-rls-verify.mjs` → **exit 3** (passed but
+incomplete). No unsafe access was observed in any executed check.
+
+| Principal | Operation | Expected | Actual | Result |
+| --- | --- | --- | --- | --- |
+| anon | select | no rows | denied `401 42501` | **PASS** |
+| anon | insert | denied | denied `401 42501` | **PASS** |
+| anon | update | denied | denied `401 42501` | **PASS** |
+| anon | delete | denied | denied `401 42501` | **PASS** |
+| user A | read own row | allowed | — | **SKIPPED** — no test credentials |
+| user A | read user B's row | no rows | — | **SKIPPED** — no test credentials |
+| user A | self-enroll (insert) | denied | — | **SKIPPED** — no test credentials |
+| user A | update enabled / engine / kill_switch / expires_at | denied | — | **SKIPPED** — no test credentials |
+| user A | delete | denied | — | **SKIPPED** — no test credentials |
+| user B | read user A's row | no rows | — | **SKIPPED** — no test credentials |
+| user B | writes (as user A) | denied | — | **SKIPPED** — no test credentials |
+| admin | insert / update / kill_switch / expiry / delete | allowed | — | **SKIPPED** — no service-role key |
+
+### What the passing checks do and do not prove
+
+The four anon passes come from the **grant layer**
+(`revoke all … from anon`), not from the RLS policy. They prove an anonymous
+caller has no privileges on the table at all.
+
+They do **not** exercise `using (auth.uid() = user_id)`. The policy that stops
+one signed-in user reading or modifying another user's row is therefore still
+**unverified**. That is precisely the property that must hold before anyone is
+enrolled, so enrollment has not proceeded.
+
+## Enrollment — NOT PERFORMED
+
+Blocked deliberately. Enrolling on the strength of anon-only results would mean
+trusting the authenticated-user policy without ever having tested it.
+
+Self-signing-up two disposable accounts to unblock this was rejected: it would
+write to `auth.users`, which is a protected area.
 
 ## Client secret boundary — PASS
 
@@ -150,7 +191,21 @@ denied with `42501`. No data was modified by that check.
 | Physical resume-from-recovery gate | **deferred, not failed** |
 | Phase 5 | not started |
 
-## Blocker
+## Remaining blocker
+
+**Migration: deployed. Authenticated-principal verification: not executable.**
+
+The verifier needs credentials that do not exist in this environment:
+
+- `ROLLOUT_TEST_A_EMAIL` / `_PASSWORD` and `ROLLOUT_TEST_B_EMAIL` / `_PASSWORD`
+  — two **disposable** accounts, never real users
+- optionally `SUPABASE_SERVICE_ROLE_KEY` for the admin rows
+
+With those exported in an operator shell, `node scripts/rollout-rls-verify.mjs`
+completes the matrix and exits 0. Only then may enrollment proceed, at Step 6 of
+`phase-4b-activation-runbook.md`.
+
+### Historical: pre-deployment blocker
 
 **Authorization: granted. Credential: absent.** Every administrative path was
 checked and none is executable from here:

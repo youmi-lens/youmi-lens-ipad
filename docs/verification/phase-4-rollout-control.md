@@ -217,8 +217,9 @@ Until then, treat Phase 4 as prepared infrastructure, not an active rollout.
 
 ## Deployment status
 
-**Nothing is deployed. No user is enrolled.** Phase 4C confirmed the table is
-absent and activation is blocked on administrative access — see
+**The migration is now deployed to production; no user is enrolled and the
+remote provider remains off.** RLS is only partially verified — the anonymous
+principal passes, but the authenticated-user policy is untested. See
 [phase-4c-activation-evidence.md](phase-4c-activation-evidence.md). The client falls back to legacy
 because the table does not exist and the fetch fails closed.
 
