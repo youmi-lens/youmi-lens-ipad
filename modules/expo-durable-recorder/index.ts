@@ -25,9 +25,23 @@ export type DurableRecorderCapabilities = {
 };
 
 export type DurableRecordingSegment = {
+  schemaVersion: 1;
   segmentId: string;
-  createdAt: string;
+  sequence: number;
   relativePath: string;
+  createdAt: string;
+  finalizedAt: string;
+  durationMs: number;
+  byteLength: number;
+  container: 'm4a';
+  codec: 'aac';
+  sampleRate: number;
+  channelCount: number;
+  integrityStatus: 'validated';
+  interruptionReason?: string;
+  routeAtStart?: string;
+  routeAtEnd?: string;
+  recoveredAfterRestart?: boolean;
 };
 
 export type DurableRecordingSession = {
@@ -60,6 +74,48 @@ export type DurableSessionIdentifierInput = {
   recordingSessionId: string;
 };
 
+export const DURABLE_RECORDER_RUNTIME_STATES = [
+  'idle',
+  'preparing',
+  'ready',
+  'recording',
+  'pausing',
+  'paused',
+  'resuming',
+  'stopping',
+  'interrupted',
+  'failed',
+] as const;
+
+export type DurableRecorderRuntimeState = (typeof DURABLE_RECORDER_RUNTIME_STATES)[number];
+export type DurableRecorderPermissionState = 'undetermined' | 'granted' | 'denied' | 'restricted';
+
+export type PrepareDurableRecordingInput = DurableSessionIdentifierInput & {
+  requestPermission?: boolean;
+};
+
+export type DurableRecordingStatus = {
+  runtimeState: DurableRecorderRuntimeState;
+  permission: DurableRecorderPermissionState;
+  recordingSessionId?: string;
+  activeSegmentId?: string;
+  completedSegments: DurableRecordingSegment[];
+  session?: DurableRecordingSession;
+  interruptionState?: string;
+  routeChangeState?: string;
+};
+
+export type DurableRecoveryIssue = {
+  code: string;
+  relativePath: string;
+  segmentId?: string;
+};
+
+export type DurableRecordingRecoveryResult = {
+  session: DurableRecordingSession;
+  issues: DurableRecoveryIssue[];
+};
+
 export type DurableRecorderErrorCode =
   | 'ERR_DURABLE_RECORDER_UNAVAILABLE'
   | 'ERR_DURABLE_RECORDER_INVALID_NATIVE_RESULT'
@@ -69,8 +125,16 @@ export type DurableRecorderErrorCode =
   | 'ERR_DURABLE_RECORDER_INVALID_TRANSITION'
   | 'ERR_DURABLE_RECORDER_TERMINAL_STATE'
   | 'ERR_DURABLE_RECORDER_UNSUPPORTED_SCHEMA'
+  | 'ERR_DURABLE_RECORDER_UNSUPPORTED_SEGMENT_SCHEMA'
   | 'ERR_DURABLE_RECORDER_INVALID_METADATA'
   | 'ERR_DURABLE_RECORDER_SESSION_NOT_TERMINAL'
+  | 'ERR_DURABLE_RECORDER_BUSY'
+  | 'ERR_DURABLE_RECORDER_INVALID_RECORDER_STATE'
+  | 'ERR_DURABLE_RECORDER_PERMISSION_DENIED'
+  | 'ERR_DURABLE_RECORDER_NO_AUDIO_INPUT'
+  | 'ERR_DURABLE_RECORDER_START_FAILED'
+  | 'ERR_DURABLE_RECORDER_SEGMENT_VALIDATION'
+  | 'ERR_DURABLE_RECORDER_SEGMENT_COLLISION'
   | 'ERR_DURABLE_RECORDER_STORAGE';
 
 export class DurableRecorderError extends Error {
@@ -92,9 +156,19 @@ type NativeDurableRecorderModule = {
   finalizeSession: (input: DurableSessionIdentifierInput) => Promise<unknown>;
   abandonSession: (input: DurableSessionIdentifierInput) => Promise<unknown>;
   deleteSession: (recordingSessionId: string) => Promise<unknown>;
+  getMicrophonePermissionStatus: () => Promise<unknown>;
+  prepareRecording: (input: PrepareDurableRecordingInput) => Promise<unknown>;
+  startRecording: (input: DurableSessionIdentifierInput) => Promise<unknown>;
+  pauseRecording: (input: DurableSessionIdentifierInput) => Promise<unknown>;
+  resumeRecording: (input: DurableSessionIdentifierInput) => Promise<unknown>;
+  stopRecording: (input: DurableSessionIdentifierInput) => Promise<unknown>;
+  getRecordingStatus: () => Promise<unknown>;
+  recoverRecordingSession: (input: DurableSessionIdentifierInput) => Promise<unknown>;
 };
 
 const stateSet = new Set<string>(DURABLE_RECORDING_STATES);
+const runtimeStateSet = new Set<string>(DURABLE_RECORDER_RUNTIME_STATES);
+const permissionStateSet = new Set<string>(['undetermined', 'granted', 'denied', 'restricted']);
 const sessionIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function loadNativeModule(): NativeDurableRecorderModule | null {
@@ -124,20 +198,73 @@ function isTimestamp(value: unknown): value is string {
 
 function validateSegment(value: unknown): DurableRecordingSegment | null {
   if (!isRecord(value)) return null;
-  const { segmentId, createdAt, relativePath } = value;
+  const {
+    schemaVersion,
+    segmentId,
+    sequence,
+    relativePath,
+    createdAt,
+    finalizedAt,
+    durationMs,
+    byteLength,
+    container,
+    codec,
+    sampleRate,
+    channelCount,
+    integrityStatus,
+    interruptionReason,
+    routeAtStart,
+    routeAtEnd,
+    recoveredAfterRestart,
+  } = value;
   if (
+    schemaVersion !== 1 ||
     typeof segmentId !== 'string' ||
     !sessionIdPattern.test(segmentId) ||
+    !Number.isInteger(sequence) ||
+    (sequence as number) <= 0 ||
     !isTimestamp(createdAt) ||
+    !isTimestamp(finalizedAt) ||
+    !Number.isInteger(durationMs) ||
+    (durationMs as number) <= 0 ||
+    !Number.isInteger(byteLength) ||
+    (byteLength as number) <= 0 ||
+    container !== 'm4a' ||
+    codec !== 'aac' ||
+    typeof sampleRate !== 'number' ||
+    !Number.isFinite(sampleRate) ||
+    sampleRate <= 0 ||
+    !Number.isInteger(channelCount) ||
+    (channelCount as number) <= 0 ||
+    integrityStatus !== 'validated' ||
     typeof relativePath !== 'string' ||
-    !relativePath.startsWith('segments/') ||
-    relativePath.includes('..') ||
-    relativePath.includes('\\') ||
-    relativePath.startsWith('/')
+    relativePath !== `segments/${String(sequence).padStart(6, '0')}-${segmentId}.m4a` ||
+    (interruptionReason !== undefined && typeof interruptionReason !== 'string') ||
+    (routeAtStart !== undefined && typeof routeAtStart !== 'string') ||
+    (routeAtEnd !== undefined && typeof routeAtEnd !== 'string') ||
+    (recoveredAfterRestart !== undefined && typeof recoveredAfterRestart !== 'boolean')
   ) {
     return null;
   }
-  return { segmentId, createdAt, relativePath };
+  return {
+    schemaVersion,
+    segmentId,
+    sequence: sequence as number,
+    relativePath,
+    createdAt,
+    finalizedAt,
+    durationMs: durationMs as number,
+    byteLength: byteLength as number,
+    container,
+    codec,
+    sampleRate,
+    channelCount: channelCount as number,
+    integrityStatus,
+    ...(interruptionReason === undefined ? {} : { interruptionReason }),
+    ...(routeAtStart === undefined ? {} : { routeAtStart }),
+    ...(routeAtEnd === undefined ? {} : { routeAtEnd }),
+    ...(recoveredAfterRestart === undefined ? {} : { recoveredAfterRestart }),
+  };
 }
 
 function validateSession(value: unknown): DurableRecordingSession | null {
@@ -179,6 +306,8 @@ function validateSession(value: unknown): DurableRecordingSession | null {
   if (recoverable === terminal || finalized !== (state === 'finalized')) return null;
   const validatedSegments = segments.map(validateSegment);
   if (validatedSegments.some((segment) => segment === null)) return null;
+  const concreteSegments = validatedSegments as DurableRecordingSegment[];
+  if (concreteSegments.some((segment, index) => segment.sequence !== index + 1)) return null;
   return {
     schemaVersion,
     recordingSessionId,
@@ -191,8 +320,58 @@ function validateSession(value: unknown): DurableRecordingSession | null {
     finalized,
     ...(failureCode === undefined ? {} : { failureCode }),
     ...(failureMessage === undefined ? {} : { failureMessage }),
-    segments: validatedSegments as DurableRecordingSegment[],
+    segments: concreteSegments,
   };
+}
+
+function validateStatus(value: unknown): DurableRecordingStatus | null {
+  if (!isRecord(value)) return null;
+  const {
+    runtimeState,
+    permission,
+    recordingSessionId,
+    activeSegmentId,
+    completedSegments,
+    session,
+    interruptionState,
+    routeChangeState,
+  } = value;
+  if (
+    typeof runtimeState !== 'string' ||
+    !runtimeStateSet.has(runtimeState) ||
+    typeof permission !== 'string' ||
+    !permissionStateSet.has(permission) ||
+    (recordingSessionId !== undefined &&
+      (typeof recordingSessionId !== 'string' || !sessionIdPattern.test(recordingSessionId))) ||
+    (activeSegmentId !== undefined &&
+      (typeof activeSegmentId !== 'string' || !sessionIdPattern.test(activeSegmentId))) ||
+    !Array.isArray(completedSegments) ||
+    (interruptionState !== undefined && typeof interruptionState !== 'string') ||
+    (routeChangeState !== undefined && typeof routeChangeState !== 'string')
+  ) return null;
+  const segments = completedSegments.map(validateSegment);
+  if (segments.some((segment) => segment === null)) return null;
+  const validatedSession = session === undefined ? undefined : validateSession(session);
+  if (session !== undefined && !validatedSession) return null;
+  return {
+    runtimeState: runtimeState as DurableRecorderRuntimeState,
+    permission: permission as DurableRecorderPermissionState,
+    ...(recordingSessionId === undefined ? {} : { recordingSessionId }),
+    ...(activeSegmentId === undefined ? {} : { activeSegmentId }),
+    completedSegments: segments as DurableRecordingSegment[],
+    ...(validatedSession ? { session: validatedSession } : {}),
+    ...(interruptionState === undefined ? {} : { interruptionState }),
+    ...(routeChangeState === undefined ? {} : { routeChangeState }),
+  };
+}
+
+function requireStatus(value: unknown): DurableRecordingStatus {
+  const status = validateStatus(value);
+  if (!status) throw new DurableRecorderError(
+    'ERR_DURABLE_RECORDER_INVALID_NATIVE_RESULT',
+    'The native durable recorder returned an invalid recording status.',
+  );
+  return status;
 }
 
 function requireSession(value: unknown): DurableRecordingSession {
@@ -258,7 +437,7 @@ export async function getCapabilities(): Promise<DurableRecorderCapabilities> {
       result.moduleAvailable !== true ||
       result.contractVersion !== DURABLE_RECORDER_CONTRACT_VERSION ||
       result.platform !== 'ios' ||
-      result.implementation !== 'native-placeholder'
+      result.implementation !== 'native-foreground-audio'
     ) {
       return unavailableCapabilities();
     }
@@ -266,7 +445,7 @@ export async function getCapabilities(): Promise<DurableRecorderCapabilities> {
       moduleAvailable: true,
       contractVersion: DURABLE_RECORDER_CONTRACT_VERSION,
       platform: 'ios',
-      implementation: 'native-placeholder',
+      implementation: 'native-foreground-audio',
     };
   } catch {
     return unavailableCapabilities();
@@ -339,6 +518,98 @@ export async function deleteSession(recordingSessionId: string): Promise<boolean
       'The native durable recorder returned an invalid deletion result.',
     );
     return result;
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function getMicrophonePermissionStatus(): Promise<DurableRecorderPermissionState> {
+  try {
+    const result = await requireNativeModule().getMicrophonePermissionStatus();
+    if (typeof result !== 'string' || !permissionStateSet.has(result)) throw new DurableRecorderError(
+      'ERR_DURABLE_RECORDER_INVALID_NATIVE_RESULT',
+      'The native durable recorder returned an invalid microphone permission state.',
+    );
+    return result as DurableRecorderPermissionState;
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+async function statusOperation(operation: () => Promise<unknown>): Promise<DurableRecordingStatus> {
+  try {
+    return requireStatus(await operation());
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function prepareRecording(
+  input: PrepareDurableRecordingInput,
+): Promise<DurableRecordingStatus> {
+  return statusOperation(() => requireNativeModule().prepareRecording({
+    recordingSessionId: requireSessionId(input?.recordingSessionId),
+    requestPermission: input?.requestPermission === true,
+  }));
+}
+
+export async function startRecording(input: DurableSessionIdentifierInput): Promise<DurableRecordingStatus> {
+  return statusOperation(() => requireNativeModule().startRecording({
+    recordingSessionId: requireSessionId(input?.recordingSessionId),
+  }));
+}
+
+export async function pauseRecording(input: DurableSessionIdentifierInput): Promise<DurableRecordingStatus> {
+  return statusOperation(() => requireNativeModule().pauseRecording({
+    recordingSessionId: requireSessionId(input?.recordingSessionId),
+  }));
+}
+
+export async function resumeRecording(input: DurableSessionIdentifierInput): Promise<DurableRecordingStatus> {
+  return statusOperation(() => requireNativeModule().resumeRecording({
+    recordingSessionId: requireSessionId(input?.recordingSessionId),
+  }));
+}
+
+export async function stopRecording(input: DurableSessionIdentifierInput): Promise<DurableRecordingStatus> {
+  return statusOperation(() => requireNativeModule().stopRecording({
+    recordingSessionId: requireSessionId(input?.recordingSessionId),
+  }));
+}
+
+export async function getRecordingStatus(): Promise<DurableRecordingStatus> {
+  return statusOperation(() => requireNativeModule().getRecordingStatus());
+}
+
+export async function recoverRecordingSession(
+  input: DurableSessionIdentifierInput,
+): Promise<DurableRecordingRecoveryResult> {
+  try {
+    const result = await requireNativeModule().recoverRecordingSession({
+      recordingSessionId: requireSessionId(input?.recordingSessionId),
+    });
+    if (!isRecord(result) || !Array.isArray(result.issues)) throw new DurableRecorderError(
+      'ERR_DURABLE_RECORDER_INVALID_NATIVE_RESULT',
+      'The native durable recorder returned an invalid recovery result.',
+    );
+    const session = requireSession(result.session);
+    const issues = result.issues.map((issue): DurableRecoveryIssue | null => {
+      if (!isRecord(issue) || typeof issue.code !== 'string' ||
+          typeof issue.relativePath !== 'string' || !issue.relativePath.startsWith('segments/') ||
+          issue.relativePath.includes('..') || issue.relativePath.includes('\\') ||
+          (issue.segmentId !== undefined &&
+            (typeof issue.segmentId !== 'string' || !sessionIdPattern.test(issue.segmentId)))) return null;
+      return {
+        code: issue.code,
+        relativePath: issue.relativePath,
+        ...(issue.segmentId === undefined ? {} : { segmentId: issue.segmentId }),
+      };
+    });
+    if (issues.some((issue) => issue === null)) throw new DurableRecorderError(
+      'ERR_DURABLE_RECORDER_INVALID_NATIVE_RESULT',
+      'The native durable recorder returned an invalid recovery issue.',
+    );
+    return { session, issues: issues as DurableRecoveryIssue[] };
   } catch (error) {
     throw normalizeError(error);
   }

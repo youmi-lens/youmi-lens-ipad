@@ -43,7 +43,7 @@ const nativeResult = {
   moduleAvailable: true,
   contractVersion: 1,
   platform: 'ios',
-  implementation: 'native-placeholder',
+  implementation: 'native-foreground-audio',
 };
 
 const sessionResult = {
@@ -59,6 +59,40 @@ const sessionResult = {
   segments: [],
 };
 
+const segmentResult = {
+  schemaVersion: 1,
+  segmentId: '22222222-2222-4222-8222-222222222222',
+  sequence: 1,
+  relativePath: 'segments/000001-22222222-2222-4222-8222-222222222222.m4a',
+  createdAt: '2023-11-14T22:13:21.000Z',
+  finalizedAt: '2023-11-14T22:13:22.000Z',
+  durationMs: 1000,
+  byteLength: 4096,
+  container: 'm4a',
+  codec: 'aac',
+  sampleRate: 44100,
+  channelCount: 1,
+  integrityStatus: 'validated',
+};
+
+const readySession = { ...sessionResult, state: 'ready' };
+const recordingSession = { ...sessionResult, state: 'recording' };
+const pausedSession = { ...sessionResult, state: 'paused', segments: [segmentResult] };
+const finalizedRecordingSession = {
+  ...sessionResult,
+  state: 'finalized',
+  recoverable: false,
+  finalized: true,
+  segments: [segmentResult],
+};
+
+const statusResult = (runtimeState, session = undefined) => ({
+  runtimeState,
+  permission: 'granted',
+  ...(session ? { recordingSessionId: session.recordingSessionId, session } : {}),
+  completedSegments: session?.segments ?? [],
+});
+
 const linked = loadBoundary({
   nativeModule: {
     getCapabilities: async () => nativeResult,
@@ -69,6 +103,14 @@ const linked = loadBoundary({
     finalizeSession: async () => ({ ...sessionResult, state: 'finalized', recoverable: false, finalized: true }),
     abandonSession: async () => ({ ...sessionResult, state: 'abandoned', recoverable: false }),
     deleteSession: async () => true,
+    getMicrophonePermissionStatus: async () => 'granted',
+    prepareRecording: async () => statusResult('ready', readySession),
+    startRecording: async () => statusResult('recording', recordingSession),
+    pauseRecording: async () => statusResult('paused', pausedSession),
+    resumeRecording: async () => statusResult('recording', recordingSession),
+    stopRecording: async () => statusResult('idle', finalizedRecordingSession),
+    getRecordingStatus: async () => statusResult('idle'),
+    recoverRecordingSession: async () => ({ session: pausedSession, issues: [] }),
   },
   platform: 'ios',
 });
@@ -88,6 +130,11 @@ assert.deepEqual(plain(linked.DURABLE_RECORDING_STATES), [
 assert.deepEqual(plain(await linked.createSession({ lectureId: ' lecture-contract ' })), sessionResult);
 assert.deepEqual(plain(await linked.listRecoverableSessions()), [sessionResult]);
 assert.equal(await linked.deleteSession(sessionResult.recordingSessionId), true);
+assert.equal(await linked.getMicrophonePermissionStatus(), 'granted');
+assert.equal((await linked.prepareRecording({ recordingSessionId: sessionResult.recordingSessionId })).runtimeState, 'ready');
+assert.equal((await linked.startRecording({ recordingSessionId: sessionResult.recordingSessionId })).runtimeState, 'recording');
+assert.equal((await linked.pauseRecording({ recordingSessionId: sessionResult.recordingSessionId })).completedSegments.length, 1);
+assert.equal((await linked.recoverRecordingSession({ recordingSessionId: sessionResult.recordingSessionId })).issues.length, 0);
 
 const unavailable = loadBoundary({ nativeModule: null, platform: 'web' });
 assert.deepEqual(plain(await unavailable.getCapabilities()), {
@@ -119,6 +166,7 @@ assert.deepEqual(
   publicExports,
   [
     'DURABLE_RECORDER_CONTRACT_VERSION',
+    'DURABLE_RECORDER_RUNTIME_STATES',
     'DURABLE_RECORDING_STATES',
     'DurableRecorderError',
     'abandonSession',
@@ -126,21 +174,31 @@ assert.deepEqual(
     'deleteSession',
     'finalizeSession',
     'getCapabilities',
+    'getMicrophonePermissionStatus',
+    'getRecordingStatus',
     'getSession',
     'listRecoverableSessions',
+    'pauseRecording',
+    'prepareRecording',
+    'recoverRecordingSession',
+    'resumeRecording',
+    'startRecording',
+    'stopRecording',
     'transitionSession',
   ],
-  'Phase 2A exposes only capability and session-foundation actions',
+  'Phase 2B preserves session APIs and adds only foreground recorder actions',
 );
-
-for (const forbidden of ['startRecording', 'pauseRecording', 'resumeRecording', 'stopRecording']) {
-  assert.equal(forbidden in linked, false, `${forbidden} is not public`);
-}
 
 await assert.rejects(
   unavailable.createSession({ lectureId: 'lecture-unavailable' }),
   (error) => error instanceof unavailable.DurableRecorderError && error.code === 'ERR_DURABLE_RECORDER_UNAVAILABLE',
   'missing native module returns a deterministic typed error',
+);
+
+await assert.rejects(
+  unavailable.getRecordingStatus(),
+  (error) => error instanceof unavailable.DurableRecorderError && error.code === 'ERR_DURABLE_RECORDER_UNAVAILABLE',
+  'missing native recorder does not fall back to a fake JavaScript recorder',
 );
 
 const invalidNativeResult = loadBoundary({
@@ -156,4 +214,4 @@ await assert.rejects(
   'absolute native paths are rejected by the TypeScript boundary',
 );
 
-console.log('Durable recorder Phase 2A contract tests passed.');
+console.log('Durable recorder Phase 2B contract tests passed.');

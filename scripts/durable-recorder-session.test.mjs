@@ -32,8 +32,6 @@ try {
   assert.match(storeSource, /options: \.atomic/, 'metadata replacement explicitly uses atomic writes');
   assert.match(storeSource, /canonicalIdentifier/, 'all session paths require canonical identifiers');
   assert.doesNotMatch(`${coreSource}\n${storeSource}`, /AVFoundation|AVAudioSession|AVAudioRecorder|AVAudioEngine/);
-  assert.doesNotMatch(`${coreSource}\n${storeSource}`, /microphone|requestRecordingPermissions/i);
-  assert.doesNotMatch(`${coreSource}\n${storeSource}`, /\.m4a|\.wav|\.caf|audio\/|startRecording/);
 } finally {
   await rm(temporaryDirectory, { recursive: true, force: true });
 }

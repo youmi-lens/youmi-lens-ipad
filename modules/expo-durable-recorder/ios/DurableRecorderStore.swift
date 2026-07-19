@@ -232,6 +232,181 @@ final class DurableRecorderStore {
     }
   }
 
+  func createSegmentPlan(recordingSessionId: String) throws -> DurableSegmentPlan {
+    try synchronized {
+      let canonical = try requireCanonicalIdentifier(recordingSessionId)
+      let session = try readSession(canonicalIdentifier: canonical)
+      guard !session.state.isTerminal else {
+        throw DurableRecorderCoreError.terminalState(session.state)
+      }
+      let sequence = (session.segments.map(\.sequence).max() ?? 0) + 1
+      let createdAt = Self.timestamp(clock())
+
+      for _ in 0..<10 {
+        let segmentId = UUID().uuidString.lowercased()
+        let prefix = String(format: "%06d-%@", sequence, segmentId)
+        let activeRelativePath = "segments/\(prefix).partial.m4a"
+        let finalizedRelativePath = "segments/\(prefix).m4a"
+        let activeURL = sessionURL(forCanonicalIdentifier: canonical)
+          .appendingPathComponent(activeRelativePath, isDirectory: false)
+        let finalizedURL = sessionURL(forCanonicalIdentifier: canonical)
+          .appendingPathComponent(finalizedRelativePath, isDirectory: false)
+        if !fileManager.fileExists(atPath: activeURL.path),
+           !fileManager.fileExists(atPath: finalizedURL.path) {
+          return DurableSegmentPlan(
+            segmentId: segmentId,
+            sequence: sequence,
+            createdAt: createdAt,
+            activeRelativePath: activeRelativePath,
+            finalizedRelativePath: finalizedRelativePath,
+            activeURL: activeURL,
+            finalizedURL: finalizedURL
+          )
+        }
+      }
+      throw DurableRecorderCoreError.segmentCollision
+    }
+  }
+
+  func commitSegment(
+    recordingSessionId: String,
+    plan: DurableSegmentPlan,
+    inspection: DurableAudioFileInspection,
+    interruptionReason: String? = nil,
+    routeAtStart: String? = nil,
+    routeAtEnd: String? = nil,
+    recoveredAfterRestart: Bool? = nil
+  ) throws -> DurableRecordingSession {
+    try synchronized {
+      let canonical = try requireCanonicalIdentifier(recordingSessionId)
+      var session = try readSession(canonicalIdentifier: canonical)
+      guard !session.state.isTerminal else {
+        throw DurableRecorderCoreError.terminalState(session.state)
+      }
+      guard inspection.durationMs > 0, inspection.byteLength > 0,
+            inspection.sampleRate > 0, inspection.channelCount > 0 else {
+        throw DurableRecorderCoreError.segmentValidationFailed("The audio asset has no readable media duration.")
+      }
+      guard plan.sequence == (session.segments.map(\.sequence).max() ?? 0) + 1,
+            Self.canonicalIdentifier(plan.segmentId) == plan.segmentId,
+            plan.finalizedRelativePath == Self.finalizedRelativePath(
+              sequence: plan.sequence,
+              segmentId: plan.segmentId
+            ),
+            plan.activeRelativePath == Self.activeRelativePath(
+              sequence: plan.sequence,
+              segmentId: plan.segmentId
+            ) else {
+        throw DurableRecorderCoreError.invalidMetadata
+      }
+      guard !session.segments.contains(where: {
+        $0.segmentId == plan.segmentId || $0.sequence == plan.sequence || $0.relativePath == plan.finalizedRelativePath
+      }) else {
+        throw DurableRecorderCoreError.segmentCollision
+      }
+      guard fileManager.fileExists(atPath: plan.activeURL.path),
+            !fileManager.fileExists(atPath: plan.finalizedURL.path) else {
+        throw DurableRecorderCoreError.segmentCollision
+      }
+
+      do {
+        try fileManager.moveItem(at: plan.activeURL, to: plan.finalizedURL)
+      } catch {
+        throw DurableRecorderCoreError.storageFailure(error.localizedDescription)
+      }
+
+      let finalizedAt = Self.timestamp(clock())
+      session.segments.append(DurableRecordingSegmentMetadata(
+        schemaVersion: durableRecorderSegmentSchemaVersion,
+        segmentId: plan.segmentId,
+        sequence: plan.sequence,
+        relativePath: plan.finalizedRelativePath,
+        createdAt: plan.createdAt,
+        finalizedAt: finalizedAt,
+        durationMs: inspection.durationMs,
+        byteLength: inspection.byteLength,
+        container: "m4a",
+        codec: "aac",
+        sampleRate: inspection.sampleRate,
+        channelCount: inspection.channelCount,
+        integrityStatus: "validated",
+        interruptionReason: interruptionReason,
+        routeAtStart: routeAtStart,
+        routeAtEnd: routeAtEnd,
+        recoveredAfterRestart: recoveredAfterRestart
+      ))
+      session.updatedAt = finalizedAt
+      try write(session)
+      return session
+    }
+  }
+
+  func reconcileSession(
+    recordingSessionId: String,
+    inspectAudioFile: (URL) -> Bool
+  ) throws -> DurableRecoveryResult {
+    try synchronized {
+      let canonical = try requireCanonicalIdentifier(recordingSessionId)
+      let session = try readSession(canonicalIdentifier: canonical)
+      let sessionDirectory = sessionURL(forCanonicalIdentifier: canonical)
+      let segmentsDirectory = sessionDirectory.appendingPathComponent("segments", isDirectory: true)
+      let referenced = Set(session.segments.map(\.relativePath))
+      var issues: [DurableRecoveryIssue] = []
+
+      for segment in session.segments {
+        let url = sessionDirectory.appendingPathComponent(segment.relativePath, isDirectory: false)
+        guard fileManager.fileExists(atPath: url.path) else {
+          issues.append(DurableRecoveryIssue(
+            code: "missing_referenced_file",
+            relativePath: segment.relativePath,
+            segmentId: segment.segmentId
+          ))
+          continue
+        }
+        if !inspectAudioFile(url) {
+          issues.append(DurableRecoveryIssue(
+            code: "invalid_referenced_file",
+            relativePath: segment.relativePath,
+            segmentId: segment.segmentId
+          ))
+        }
+      }
+
+      let entries = (try? fileManager.contentsOfDirectory(
+        at: segmentsDirectory,
+        includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+        options: [.skipsHiddenFiles]
+      )) ?? []
+      for entry in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+        let relativePath = "segments/\(entry.lastPathComponent)"
+        if entry.lastPathComponent.hasSuffix(".partial.m4a") {
+          issues.append(DurableRecoveryIssue(
+            code: "incomplete_temporary_file",
+            relativePath: relativePath,
+            segmentId: Self.segmentId(fromFileName: entry.lastPathComponent)
+          ))
+          continue
+        }
+        if Self.isFinalizedSegmentFileName(entry.lastPathComponent) {
+          if !referenced.contains(relativePath) {
+            issues.append(DurableRecoveryIssue(
+              code: inspectAudioFile(entry) ? "orphan_finalized_file" : "invalid_orphan_file",
+              relativePath: relativePath,
+              segmentId: Self.segmentId(fromFileName: entry.lastPathComponent)
+            ))
+          }
+          continue
+        }
+        issues.append(DurableRecoveryIssue(
+          code: "unsupported_segment_format",
+          relativePath: relativePath,
+          segmentId: nil
+        ))
+      }
+      return DurableRecoveryResult(session: session, issues: issues)
+    }
+  }
+
   private func synchronized<T>(_ operation: () throws -> T) rethrows -> T {
     lock.lock()
     defer { lock.unlock() }
@@ -267,7 +442,8 @@ final class DurableRecorderStore {
       guard session.recordingSessionId == canonicalIdentifier,
             session.relativeSessionPath == "sessions/\(canonicalIdentifier)",
             session.recoverable == !session.state.isTerminal,
-            session.finalized == (session.state == .finalized) else {
+            session.finalized == (session.state == .finalized),
+            try Self.segmentsAreValid(session.segments) else {
         throw DurableRecorderCoreError.invalidMetadata
       }
       return session
@@ -294,6 +470,63 @@ final class DurableRecorderStore {
   private static func canonicalIdentifier(_ rawIdentifier: String) -> String? {
     let canonical = UUID(uuidString: rawIdentifier)?.uuidString.lowercased()
     return canonical == rawIdentifier ? canonical : nil
+  }
+
+  private static func finalizedRelativePath(sequence: Int, segmentId: String) -> String {
+    String(format: "segments/%06d-%@.m4a", sequence, segmentId)
+  }
+
+  private static func activeRelativePath(sequence: Int, segmentId: String) -> String {
+    String(format: "segments/%06d-%@.partial.m4a", sequence, segmentId)
+  }
+
+  private static func segmentsAreValid(_ segments: [DurableRecordingSegmentMetadata]) throws -> Bool {
+    var identifiers = Set<String>()
+    var sequences = Set<Int>()
+    var paths = Set<String>()
+    var previousSequence = 0
+    for segment in segments {
+      guard segment.schemaVersion == durableRecorderSegmentSchemaVersion else {
+        throw DurableRecorderCoreError.unsupportedSegmentSchemaVersion(segment.schemaVersion)
+      }
+      guard canonicalIdentifier(segment.segmentId) == segment.segmentId,
+            segment.sequence > previousSequence,
+            segment.relativePath == finalizedRelativePath(
+              sequence: segment.sequence,
+              segmentId: segment.segmentId
+            ),
+            segment.durationMs > 0,
+            segment.byteLength > 0,
+            segment.container == "m4a",
+            segment.codec == "aac",
+            segment.sampleRate > 0,
+            segment.channelCount > 0,
+            segment.integrityStatus == "validated",
+            identifiers.insert(segment.segmentId).inserted,
+            sequences.insert(segment.sequence).inserted,
+            paths.insert(segment.relativePath).inserted else {
+        return false
+      }
+      previousSequence = segment.sequence
+    }
+    return true
+  }
+
+  private static func isFinalizedSegmentFileName(_ fileName: String) -> Bool {
+    guard fileName.count == 47, fileName.hasSuffix(".m4a") else { return false }
+    let prefix = String(fileName.prefix(6))
+    guard Int(prefix) != nil, fileName[fileName.index(fileName.startIndex, offsetBy: 6)] == "-" else {
+      return false
+    }
+    return segmentId(fromFileName: fileName) != nil
+  }
+
+  private static func segmentId(fromFileName fileName: String) -> String? {
+    guard fileName.count >= 43 else { return nil }
+    let start = fileName.index(fileName.startIndex, offsetBy: 7)
+    let end = fileName.index(start, offsetBy: 36)
+    let candidate = String(fileName[start..<end])
+    return canonicalIdentifier(candidate)
   }
 
   private static func timestamp(_ date: Date) -> String {
