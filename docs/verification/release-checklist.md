@@ -80,6 +80,13 @@ xcrun devicectl device info files --device $DEV \
 
 `xcrun devicectl device copy from ...` pulls a `session.json` for inspection.
 
+## Rollout control
+
+Remote per-user rollout is wired but **inactive**: the activation gate
+`EXPO_PUBLIC_RECORDING_ROLLOUT_REMOTE` is `0`, the migration is undeployed, and
+no user is enrolled. A release build must never set that flag. Activation steps:
+[phase-4b-activation-runbook.md](phase-4b-activation-runbook.md).
+
 ## Current status
 
 | Gate | Status |

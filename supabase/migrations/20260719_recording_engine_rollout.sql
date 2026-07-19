@@ -1,8 +1,14 @@
 -- Phase 4 — per-user recording engine rollout control.
 --
--- STATUS: NOT DEPLOYED. Prepared and reviewed only. Applying this requires
--- explicit approval and a service-role credential that is not available to the
--- app. See docs/verification/phase-4-rollout-control.md.
+-- STATUS: DESIGN-REVIEWED / NOT DEPLOYED / NOT EMPIRICALLY VERIFIED
+--
+-- The policy set below has been reviewed by construction only. No Supabase
+-- CLI, psql, Docker instance, or service-role credential was available, so it
+-- has never been executed against a database. Do not treat it as verified
+-- until the checks in docs/verification/phase-4b-activation-runbook.md pass.
+--
+-- Applying this requires explicit approval and a service-role credential that
+-- is not available to the app.
 --
 -- Purpose: let an operator move an individual user onto the durable native
 -- recorder, and revoke it, without shipping a new build.
@@ -56,17 +62,68 @@ revoke all on public.recording_engine_rollout from anon, authenticated;
 grant select on public.recording_engine_rollout to authenticated;
 
 -- ---------------------------------------------------------------------------
--- Verification queries (run after applying, as an ordinary authenticated user)
+-- Verification queries — run every one of these after applying.
+-- Full procedure: docs/verification/phase-4b-activation-runbook.md
 -- ---------------------------------------------------------------------------
 --
---   -- Must return only the caller's own row (0 or 1 rows):
---   select user_id from public.recording_engine_rollout;
+-- (1) As an UNAUTHENTICATED client (anon key), this must return zero rows or
+--     a permission error — never another user's data:
+--       select * from public.recording_engine_rollout;
 --
---   -- All of these must fail with a permissions/RLS error:
---   insert into public.recording_engine_rollout (user_id, engine, enabled)
---     values (auth.uid(), 'nativeDurable', true);
---   update public.recording_engine_rollout set enabled = true;
---   delete from public.recording_engine_rollout;
+-- (2) As ordinary user A, this must return ONLY A's own row (0 or 1 rows):
+--       select user_id from public.recording_engine_rollout;
 --
--- If any write succeeds as an ordinary user, STOP: the policy set is wrong and
--- users could enroll themselves.
+-- (3) CROSS-USER READ — as ordinary user B, with A's uuid substituted, this
+--     must return ZERO rows:
+--       select * from public.recording_engine_rollout
+--         where user_id = '<user-A-uuid>';
+--
+-- (4) SELF-ENROLLMENT — every one of these must FAIL as an ordinary user:
+--       insert into public.recording_engine_rollout (user_id, engine, enabled)
+--         values (auth.uid(), 'nativeDurable', true);
+--       update public.recording_engine_rollout set enabled = true;
+--       update public.recording_engine_rollout set kill_switch = false;
+--       delete from public.recording_engine_rollout;
+--
+-- If ANY of (3) or (4) succeeds, STOP and run the rollback: users could read
+-- other accounts or enroll themselves.
+--
+-- ---------------------------------------------------------------------------
+-- Operator procedures (service role only; bypasses RLS)
+-- ---------------------------------------------------------------------------
+--
+-- Prefer the CLI, which is dry-run by default and redacts identifiers:
+--   node scripts/rollout-admin.mjs enable  --user <uuid> --cohort internal \
+--     --expires 2026-08-01 --commit
+--   node scripts/rollout-admin.mjs disable --user <uuid> --commit
+--   node scripts/rollout-admin.mjs revoke  --user <uuid> --commit
+--   node scripts/rollout-admin.mjs inspect --user <uuid>
+--
+-- Equivalent SQL, if the CLI is unavailable:
+--
+--   -- ADMIN WRITE (enroll):
+--   insert into public.recording_engine_rollout
+--     (user_id, engine, enabled, cohort, expires_at)
+--     values ('<uuid>', 'nativeDurable', true, 'internal', '2026-08-01T00:00:00Z')
+--   on conflict (user_id) do update set
+--     engine = excluded.engine, enabled = excluded.enabled,
+--     cohort = excluded.cohort, expires_at = excluded.expires_at,
+--     kill_switch = false, updated_at = now();
+--
+--   -- REVOKE one user (keeps the row, so the decision stays auditable):
+--   update public.recording_engine_rollout
+--     set enabled = false, kill_switch = true, updated_at = now()
+--     where user_id = '<uuid>';
+--
+--   -- KILL SWITCH for everyone (stops all NEW native sessions; active
+--   -- recordings finish on their frozen engine and stay recoverable):
+--   update public.recording_engine_rollout
+--     set kill_switch = true, updated_at = now();
+--
+--   -- EMERGENCY ROLLBACK — disable everyone without dropping anything:
+--   update public.recording_engine_rollout
+--     set enabled = false, kill_switch = true, updated_at = now();
+--   -- then, only if the mechanism itself must go, apply the .rollback.sql file.
+--
+-- All of the above take effect within the client cache TTL (15 minutes) or on
+-- next launch. None of them deletes durable audio or affects recovery.

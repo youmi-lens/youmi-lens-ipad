@@ -46,6 +46,14 @@ type RolloutRow = {
   kill_switch?: unknown;
 };
 
+/** Maps a classified reader failure to a stable, non-identifying reason code. */
+const FAILURE_REASONS: Record<string, string> = {
+  infrastructure_unavailable: 'rollout_infrastructure_unavailable',
+  unauthorized: 'rollout_unauthorized',
+  timed_out: 'rollout_timed_out',
+  fetch_failed: 'rollout_fetch_failed',
+};
+
 const LEGACY_RESULT: RolloutEligibility = {
   eligible: false,
   resolved: false,
@@ -127,13 +135,20 @@ export async function fetchRolloutEligibility(options: {
   }
 
   if (error) {
-    // Never log the raw backend response — it can carry request details.
-    logRecordingEvent('rollout_fetch_failed', {
-      reason: error === 'unauthorized' ? 'rollout_unauthorized' : 'rollout_fetch_failed',
-    });
+    const reason = FAILURE_REASONS[error] ?? 'rollout_fetch_failed';
+    // Never log the raw backend response — it can carry schema and request
+    // details. Only the classified reason code leaves this boundary.
+    logRecordingEvent(
+      reason === 'rollout_infrastructure_unavailable'
+        ? 'rollout_infrastructure_unavailable'
+        : reason === 'rollout_timed_out'
+          ? 'rollout_resolution_timed_out'
+          : 'rollout_fetch_failed',
+      { reason },
+    );
     const result = evaluateRollout({
       killSwitch: false,
-      fetch: { status: 'unavailable', reason: error === 'unauthorized' ? 'rollout_unauthorized' : 'rollout_fetch_failed', engine: 'legacy', cohort: null, revision: null },
+      fetch: { status: 'unavailable', reason, engine: 'legacy', cohort: null, revision: null },
       cache: cached,
     }) as RolloutEligibility;
     if (cached) {
@@ -165,16 +180,59 @@ export async function fetchRolloutEligibility(options: {
   return result;
 }
 
+/** Bounded so a slow or hanging request can never stall the recording screen. */
+export const ROLLOUT_FETCH_TIMEOUT_MS = 4000;
+
+/**
+ * Classifies a backend failure into a stable reason code. The raw message is
+ * inspected here and then discarded — it can carry schema and request details,
+ * so it must never reach diagnostics or the UI.
+ */
+export function classifyRolloutError(message: string | null | undefined): string {
+  const text = typeof message === 'string' ? message : '';
+  // Table absent before the migration is deployed: expected, not an incident.
+  if (/does not exist|undefined table|relation .* does not exist|schema cache|PGRST205|42P01/i.test(text)) {
+    return 'infrastructure_unavailable';
+  }
+  if (/permission|denied|jwt|unauthor|RLS|42501/i.test(text)) return 'unauthorized';
+  return 'fetch_failed';
+}
+
+function withTimeout<T>(promise: PromiseLike<T>, timeoutMs: number, onTimeout: () => T): Promise<T> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve(onTimeout());
+    }, timeoutMs);
+    promise.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(onTimeout());
+      },
+    );
+  });
+}
+
 async function defaultReader(userId: string): Promise<{ row: RolloutRow | null; error: string | null }> {
-  const { data, error } = await supabase
+  const query = supabase
     .from(ROLLOUT_TABLE)
     .select('engine, enabled, cohort, expires_at, rollout_revision, kill_switch')
     .eq('user_id', userId)
-    .maybeSingle();
+    .maybeSingle()
+    .then(({ data, error }) => {
+      if (error) return { row: null, error: classifyRolloutError(error.message) };
+      return { row: (data as RolloutRow | null) ?? null, error: null };
+    });
 
-  if (error) {
-    const unauthorized = /permission|denied|jwt|unauthor/i.test(error.message ?? '');
-    return { row: null, error: unauthorized ? 'unauthorized' : 'fetch_failed' };
-  }
-  return { row: (data as RolloutRow | null) ?? null, error: null };
+  return withTimeout(query, ROLLOUT_FETCH_TIMEOUT_MS, () => ({ row: null, error: 'timed_out' }));
 }

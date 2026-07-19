@@ -187,6 +187,15 @@ The release guard is unchanged: the committed default must still be `legacy`.
 
 ## Wiring status — read this before assuming rollout is live
 
+> **Updated in Phase 4B: the provider IS now wired into the recording screen,**
+> but it is inert by default because the activation gate
+> `EXPO_PUBLIC_RECORDING_ROLLOUT_REMOTE` is `0`. The section below described the
+> pre-4B state and is kept for context. See
+> [phase-4b-activation-readiness.md](phase-4b-activation-readiness.md).
+
+<details>
+<summary>Pre-Phase-4B wiring note (historical)</summary>
+
 The provider is **implemented and tested but intentionally not called by the
 recording screen yet.** `useLectureRecorder` accepts a `rollout` option; nothing
 currently passes it, so every user resolves through the Phase 3 path (legacy).
@@ -203,6 +212,8 @@ Activation is a two-line change once the migration is applied:
 2. Pass the result into `useLectureRecorder({ ..., rollout })`.
 
 Until then, treat Phase 4 as prepared infrastructure, not an active rollout.
+
+</details>
 
 ## Deployment status
 

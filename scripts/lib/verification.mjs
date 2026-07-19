@@ -84,6 +84,43 @@ export async function checkFeatureGate() {
   };
 }
 
+/**
+ * Rollout must ship inert: remote provider off, no build-time cohort, no
+ * enrolled user, no service-role credential, and the migration undeployed.
+ */
+export async function checkRolloutDefaults() {
+  const problems = [];
+  const gate = await readFile(sourceUrl('lib/recording/featureGate.ts'), 'utf8');
+  const envExample = await readFile(sourceUrl('.env.example'), 'utf8');
+
+  if (!/REMOTE_ROLLOUT_ENABLED =\s*process\.env\.EXPO_PUBLIC_RECORDING_ROLLOUT_REMOTE === '1'/.test(gate)) {
+    problems.push("The remote rollout activation gate is not a strict === '1' check.");
+  }
+  if (/EXPO_PUBLIC_RECORDING_ROLLOUT_REMOTE\s*=\s*1/.test(envExample)) {
+    problems.push('.env.example enables remote rollout; it must ship disabled.');
+  }
+  if (/EXPO_PUBLIC_NATIVE_RECORDER_DOGFOOD\s*=\s*1/.test(envExample)) {
+    problems.push('.env.example enables the dogfood cohort; it must ship disabled.');
+  }
+
+  // No enrolled user, credential, or personal identifier may be committed.
+  const client = runCommand('git', ['grep', '-lE', 'SERVICE_ROLE|service_role', '--', 'lib', 'app']);
+  if (client.output.trim().length > 0) {
+    problems.push(`Service-role reference in client code:\n${client.output.trim()}`);
+  }
+  const identifiers = runCommand('git', [
+    'grep', '-lEI', '[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}', '--',
+    'lib/recording', 'supabase', 'scripts/rollout-admin.mjs',
+  ]);
+  if (identifiers.output.trim().length > 0) {
+    problems.push(`Possible personal identifier committed:\n${identifiers.output.trim()}`);
+  }
+
+  return problems.length === 0
+    ? { ok: true, output: '' }
+    : { ok: false, output: problems.join('\n') };
+}
+
 /** A release build must come from a committed, unmodified tree. */
 export function checkWorkingTree() {
   const status = runCommand('git', ['status', '--porcelain=v1']);

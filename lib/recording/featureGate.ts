@@ -45,6 +45,20 @@ export const INTERNAL_DOGFOOD_ENABLED =
   process.env.EXPO_PUBLIC_NATIVE_RECORDER_DOGFOOD === '1';
 
 /**
+ * Infrastructure activation gate for remote rollout.
+ *
+ * This is NOT the per-user eligibility decision — it only controls whether the
+ * app is allowed to query the rollout table at all. It stays off until that
+ * table is deployed and its RLS verified, so the committed default performs
+ * zero rollout requests.
+ *
+ * Strict: only the exact string '1' enables it. Absent, '0', 'true' and any
+ * other value are all disabled.
+ */
+export const REMOTE_ROLLOUT_ENABLED =
+  process.env.EXPO_PUBLIC_RECORDING_ROLLOUT_REMOTE === '1';
+
+/**
  * Development-only override, settable from a dev menu or debugger. It is read
  * only when __DEV__ is true, so a release build ignores it entirely.
  */

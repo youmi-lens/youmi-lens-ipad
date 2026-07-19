@@ -36,6 +36,7 @@ import { useLiveCaptions } from '@/lib/liveCaptions';
 import { getLiveMicStreamStatus, startMicStream, stopMicStream } from '@/lib/liveMicStream';
 import { useRecordingNotes } from '@/lib/recordingNotes';
 import { useData } from '@/lib/store';
+import { useRolloutEligibility } from '@/lib/recording/useRolloutEligibility';
 import { useLectureRecorder } from '@/lib/useLectureRecorder';
 import { resolveCaptionAreaState, recordingControlsEnabled } from '@/lib/lectureStartupState.mjs';
 import {
@@ -47,7 +48,10 @@ export default function RecordingScreen() {
   const router = useRouter();
   const t = useT();
   const params = useLocalSearchParams<{ courseId?: string; lectureTitle?: string; lectureId?: string }>();
-  const { isGuest, exitGuest } = useAuth();
+  const { isGuest, exitGuest, user, loading: authLoading } = useAuth();
+  // Inactive by default: with the activation gate off this issues no request
+  // and stays null, so the policy resolves to legacy exactly as before.
+  const rollout = useRolloutEligibility({ userId: user?.id ?? null, authLoading });
   const {
     getCourse,
     createLecture,
@@ -118,7 +122,7 @@ export default function RecordingScreen() {
     acknowledgeFinalizedOutput,
     discardRecoverableRecording,
     dismissRecovery,
-  } = useLectureRecorder({ lectureId: pendingLectureId, forceLegacy: isGuest });
+  } = useLectureRecorder({ lectureId: pendingLectureId, forceLegacy: isGuest, rollout });
 
   const {
     status: liveCaptionStatus,

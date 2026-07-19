@@ -12,7 +12,8 @@ committed; native recording remains gated off by default.
 | 2B | Durable foreground audio engine, segments, pause/resume | `0c57581` |
 | 2C | Feature-gated adapter, recovery, discard, handoff | `e3af1e7` |
 | 3 | Controlled dogfooding: runtime selection policy, fallback reasons, provenance, privacy-minimal diagnostics | `f3e4ec7` |
-| 4 | Reversible per-user rollout control, kill switch, engine freeze, recovery precedence (backend undeployed) | see `phase-4-rollout-control.md` |
+| 4 | Reversible per-user rollout control, kill switch, engine freeze, recovery precedence (backend undeployed) | `7068aed` |
+| 4B | Provider wired behind an activation gate; zero requests by default | see `phase-4b-activation-readiness.md` |
 
 ## Phase 3 — delivered
 
@@ -35,6 +36,16 @@ cache with a 15-minute TTL, kill switch, active-session engine freeze, and
 recovery precedence over rollout state. Client is complete and tested; the
 Supabase migration is prepared, RLS-reviewed, and **not deployed**. Details in
 `phase-4-rollout-control.md`.
+
+## Phase 4B — delivered
+
+The rollout provider is now wired into the recording screen behind an explicit
+infrastructure activation gate that is off by default, so the committed build
+makes no rollout requests. Table-missing and timeout are normalized to stable
+reason codes, requests are deduplicated and stale-guarded, and the session
+engine freeze is verified as actually connected. Details in
+`phase-4b-activation-readiness.md`; deployment steps in
+`phase-4b-activation-runbook.md`.
 
 ## Phase 5 — native recording becomes the default
 

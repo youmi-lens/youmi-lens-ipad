@@ -37,7 +37,16 @@ export type RecordingDiagnosticEvent =
   | 'rollout_kill_switch_applied'
   | 'rollout_engine_frozen'
   | 'rollout_remote_disabled'
-  | 'native_recovery_overrode_rollout';
+  | 'native_recovery_overrode_rollout'
+  // Phase 4B — activation gating and resolution lifecycle
+  | 'rollout_remote_provider_disabled'
+  | 'rollout_resolution_started'
+  | 'rollout_resolution_completed'
+  | 'rollout_resolution_timed_out'
+  | 'rollout_infrastructure_unavailable'
+  | 'rollout_resolution_ignored_as_stale'
+  | 'rollout_request_deduplicated'
+  | 'rollout_decision_frozen';
 
 /**
  * The only fields that may ever be emitted. Deliberately excludes every

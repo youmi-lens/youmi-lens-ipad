@@ -9,6 +9,7 @@ import { readdir } from 'node:fs/promises';
 
 import {
   checkFeatureGate,
+  checkRolloutDefaults,
   checkWorkingTree,
   nodeStep,
   runCommand,
@@ -26,6 +27,7 @@ const allTests = (await readdir(scriptsDirectory))
 
 const steps = [
   { name: 'feature gate is legacy', run: checkFeatureGate },
+  { name: 'rollout ships inert', run: checkRolloutDefaults },
   { name: 'typescript', run: () => runCommand('npx', ['tsc', '--noEmit']) },
   { name: 'lint', run: () => runCommand('npx', ['expo', 'lint']) },
   ...allTests.map((name) => nodeStep(name.replace(/\.test\.mjs$/, ''), `scripts/${name}`)),
