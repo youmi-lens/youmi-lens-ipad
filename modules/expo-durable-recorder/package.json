@@ -1,0 +1,7 @@
+{
+  "name": "expo-durable-recorder",
+  "version": "1.0.0",
+  "description": "Non-recording native contract boundary for future Youmi Lens recording durability work.",
+  "main": "index.ts",
+  "private": true
+}
