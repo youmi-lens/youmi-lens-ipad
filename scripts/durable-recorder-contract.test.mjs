@@ -207,14 +207,17 @@ assert.deepEqual(
     'getSession',
     'listRecoverableSessions',
     'pauseRecording',
+    'performCheckpointForTesting',
     'prepareRecording',
     'recoverRecordingSession',
     'resumeRecording',
+    'simulateInterruptionBeganForTesting',
+    'simulateRouteLossForTesting',
     'startRecording',
     'stopRecording',
     'transitionSession',
   ],
-  'Preserves existing APIs and exposes recording status change subscription',
+  'Preserves existing APIs; DEBUG/__DEV__ verification hooks are explicit exports',
 );
 
 assert.equal(linked.RECORDING_STATUS_CHANGE_EVENT, 'onRecordingStatusChange');

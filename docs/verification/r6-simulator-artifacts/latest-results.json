@@ -1,0 +1,200 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-07-20T06:13:40.870Z",
+  "engine": "nativeDurable",
+  "source": "internal_dogfood",
+  "dogfoodEnv": "1",
+  "scenarios": [
+    {
+      "id": "S1",
+      "status": "PASS",
+      "detail": "dogfood override active; native module exercised directly (auth-independent)",
+      "evidence": {
+        "dogfood": "1",
+        "verify": "1"
+      }
+    },
+    {
+      "id": "S2",
+      "status": "PASS",
+      "detail": "start → checkpoint → finish → export → ack",
+      "evidence": {
+        "segments": [
+          1,
+          2
+        ],
+        "durationMs": 833,
+        "byteLength": 20364,
+        "handoff": true
+      }
+    },
+    {
+      "id": "S3",
+      "status": "PASS",
+      "detail": "three forced checkpoints; UI-facing status stayed recording; no paused events",
+      "evidence": {
+        "sequences": [
+          1,
+          2,
+          3,
+          4
+        ],
+        "pausedEvents": 0,
+        "finalSegments": 4
+      }
+    },
+    {
+      "id": "S9",
+      "status": "PASS",
+      "detail": "three finish-after-checkpoint races serialized safely",
+      "evidence": {
+        "sessions": 3
+      }
+    },
+    {
+      "id": "S10",
+      "status": "PASS",
+      "detail": "three sequential native sessions finalized",
+      "evidence": {
+        "sessionIds": [
+          "874653a7-bb01-41a3-ae56-f014d152faa7",
+          "a4378803-95ac-4f1a-a1a9-daa948dd4d47",
+          "bc269a6d-12d4-4169-a5c8-ce865d290a6c"
+        ]
+      }
+    },
+    {
+      "id": "S11",
+      "status": "PASS",
+      "detail": "accelerated logical 10-minute stability via 10 forced checkpoints (not real wall-clock 10 min)",
+      "evidence": {
+        "mode": "accelerated",
+        "checkpointSegments": 10,
+        "finalSegments": 11,
+        "sequences": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11
+        ]
+      }
+    },
+    {
+      "id": "S13-interruption",
+      "status": "PASS",
+      "detail": "injected interruption → paused/interrupted → manual resume → finish",
+      "evidence": {
+        "runtimeAfter": "interrupted"
+      }
+    },
+    {
+      "id": "S13-route",
+      "status": "PASS",
+      "detail": "injected route-loss forced pause → resume → finish (harness/injection, not physical hardware)",
+      "evidence": {
+        "runtimeAfter": "paused"
+      }
+    },
+    {
+      "id": "S4",
+      "status": "PASS",
+      "detail": "Simulator background path (other-app background may jetsam): recover → paused → resume → finish",
+      "evidence": {
+        "runtimeAfterReturn": "paused",
+        "recoveredState": "paused",
+        "issues": [],
+        "committedSegments": 2
+      }
+    },
+    {
+      "id": "S8",
+      "status": "PASS",
+      "detail": "background/checkpoint race: recovered safely after Simulator background/jetsam; resume/finish preserved committed audio",
+      "evidence": {
+        "runtimeAfterReturn": "paused",
+        "recoveredState": "paused",
+        "issues": [],
+        "committedSegments": 2
+      }
+    },
+    {
+      "id": "S5",
+      "status": "PASS",
+      "detail": "force-kill → recover → direct Finish (no Resume)",
+      "evidence": {
+        "segments": [
+          1
+        ],
+        "issues": [
+          "stale_temporary_file_quarantined"
+        ],
+        "finalDurationMs": 533
+      }
+    },
+    {
+      "id": "S6",
+      "status": "PASS",
+      "detail": "force-kill → recover → Resume → checkpoint → Finish",
+      "evidence": {
+        "segments": [
+          1,
+          2,
+          3
+        ],
+        "issues": [
+          "stale_temporary_file_quarantined"
+        ],
+        "finalDurationMs": 1064
+      }
+    },
+    {
+      "id": "S7",
+      "status": "PASS",
+      "detail": "recovery Swift harness — orphan finalized segment adoption (R4)",
+      "layer": "native-harness"
+    }
+  ],
+  "complete": true,
+  "memorySamples": [
+    {
+      "at": "pre_launch",
+      "rssKb": 421920,
+      "matchingProcessCount": 300,
+      "nodeExpoLines": 6
+    },
+    {
+      "at": "after_in_process",
+      "rssKb": 478048,
+      "matchingProcessCount": 300,
+      "nodeExpoLines": 6
+    },
+    {
+      "at": "after_s5",
+      "rssKb": 519648,
+      "matchingProcessCount": 300,
+      "nodeExpoLines": 6
+    },
+    {
+      "at": "after_s6",
+      "rssKb": 524832,
+      "matchingProcessCount": 300,
+      "nodeExpoLines": 6
+    }
+  ],
+  "simulator": {
+    "name": "iPad Air 11-inch (M4)",
+    "udid": "BD98BA99-E4A6-411A-9E2C-540B8D00B0F0",
+    "os": "iOS 26.5"
+  },
+  "automation": "in-app R6SimulatorVerifyHost + simctl orchestrator",
+  "authApproach": "native module APIs directly (no Guest forceLegacy; no production auth change)",
+  "checkpointMode": "forced performCheckpointForTesting (DEBUG) for accelerated scenarios",
+  "physicalCheckpointRetained": "PASS (prior manual physical iPad test)"
+}

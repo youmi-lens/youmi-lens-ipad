@@ -11,6 +11,7 @@ import { I18nProvider } from '@/lib/i18n';
 import { LiveCaptionsProvider } from '@/lib/liveCaptions';
 import { useProcessingOrchestrator } from '@/lib/useProcessingOrchestrator';
 import { RecordingNotesProvider } from '@/lib/recordingNotes';
+import { R6SimulatorVerifyHost } from '@/lib/recording/R6SimulatorVerifyHost';
 import { DataProvider } from '@/lib/store';
 
 export const unstable_settings = {
@@ -92,6 +93,7 @@ function AuthGate() {
   const canUseApp = isGuest || (!!session && !needsUsernameSetup && !isResettingPassword);
 
   return (
+    <>
     <Stack
       screenOptions={{
         headerShown: false,
@@ -125,5 +127,9 @@ function AuthGate() {
         <Stack.Screen name="lecture-material/[lectureId]/[materialId]" />
       </Stack.Protected>
     </Stack>
+    {__DEV__ && process.env.EXPO_PUBLIC_R6_SIMULATOR_VERIFY === '1' ? (
+      <R6SimulatorVerifyHost />
+    ) : null}
+    </>
   );
 }

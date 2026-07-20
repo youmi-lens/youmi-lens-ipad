@@ -169,6 +169,32 @@ public final class ExpoDurableRecorderModule: Module {
         ).asDictionary()
       }
     }
+
+    // DEBUG-only verification hooks for Simulator R6 durability automation.
+    // Omitted from Release builds so production cannot invoke them.
+    #if DEBUG
+    AsyncFunction("performCheckpointForTesting") {
+      (input: DurableSessionIdentifierRecord) throws -> [String: Any] in
+      try self.withEngine { engine in
+        try engine.performCheckpointForTesting()
+        return engine.getRecordingStatus()
+      }
+    }
+
+    AsyncFunction("simulateInterruptionBeganForTesting") { () throws -> [String: Any] in
+      try self.withEngine { engine in
+        engine.simulateInterruptionBeganForTesting()
+        return engine.getRecordingStatus()
+      }
+    }
+
+    AsyncFunction("simulateRouteLossForTesting") { () throws -> [String: Any] in
+      try self.withEngine { engine in
+        engine.simulateRouteLossForTesting()
+        return engine.getRecordingStatus()
+      }
+    }
+    #endif
   }
 
   private func withStore<T>(_ operation: (DurableRecorderStore) throws -> T) throws -> T {

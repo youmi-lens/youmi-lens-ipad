@@ -159,7 +159,8 @@ export type DurableRecorderErrorCode =
   | 'ERR_DURABLE_RECORDER_NO_FINALIZABLE_SEGMENTS'
   | 'ERR_DURABLE_RECORDER_FINAL_ASSET_EXPORT'
   | 'ERR_DURABLE_RECORDER_FINAL_ASSET_MISSING'
-  | 'ERR_DURABLE_RECORDER_STORAGE';
+  | 'ERR_DURABLE_RECORDER_STORAGE'
+  | 'ERR_DURABLE_RECORDER_UNSUPPORTED';
 
 export class DurableRecorderError extends Error {
   readonly code: DurableRecorderErrorCode;
@@ -192,6 +193,10 @@ type NativeDurableRecorderModule = {
   recoverRecordingSession: (input: DurableSessionIdentifierInput) => Promise<unknown>;
   exportFinalizedAsset: (input: DurableSessionIdentifierInput) => Promise<unknown>;
   acknowledgeFinalAssetHandoff: (input: DurableSessionIdentifierInput) => Promise<unknown>;
+  /** DEBUG builds only. */
+  performCheckpointForTesting?: (input: DurableSessionIdentifierInput) => Promise<unknown>;
+  simulateInterruptionBeganForTesting?: () => Promise<unknown>;
+  simulateRouteLossForTesting?: () => Promise<unknown>;
   addListener?: (
     eventName: string,
     listener: (event: unknown) => void,
@@ -756,4 +761,72 @@ export async function acknowledgeFinalAssetHandoff(
   } catch (error) {
     throw normalizeError(error);
   }
+}
+
+/**
+ * DEBUG/__DEV__ only. Forces one checkpoint rollover without publishing paused
+ * status. Used by Simulator R6 automation; inert in production source paths
+ * because the native AsyncFunction is compiled out of Release builds.
+ */
+export async function performCheckpointForTesting(
+  input: DurableSessionIdentifierInput,
+): Promise<DurableRecordingStatus> {
+  if (!__DEV__) {
+    throw new DurableRecorderError(
+      'ERR_DURABLE_RECORDER_UNSUPPORTED',
+      'Checkpoint test hooks are unavailable outside development builds.',
+    );
+  }
+  return statusOperation(() => {
+    const mod = requireNativeModule();
+    if (typeof mod.performCheckpointForTesting !== 'function') {
+      throw new DurableRecorderError(
+        'ERR_DURABLE_RECORDER_UNSUPPORTED',
+        'Native checkpoint test hook is unavailable in this build.',
+      );
+    }
+    return mod.performCheckpointForTesting({
+      recordingSessionId: requireSessionId(input?.recordingSessionId),
+    });
+  });
+}
+
+/** DEBUG/__DEV__ only. Simulates an AVAudioSession interruption began. */
+export async function simulateInterruptionBeganForTesting(): Promise<DurableRecordingStatus> {
+  if (!__DEV__) {
+    throw new DurableRecorderError(
+      'ERR_DURABLE_RECORDER_UNSUPPORTED',
+      'Interruption test hooks are unavailable outside development builds.',
+    );
+  }
+  return statusOperation(() => {
+    const mod = requireNativeModule();
+    if (typeof mod.simulateInterruptionBeganForTesting !== 'function') {
+      throw new DurableRecorderError(
+        'ERR_DURABLE_RECORDER_UNSUPPORTED',
+        'Native interruption test hook is unavailable in this build.',
+      );
+    }
+    return mod.simulateInterruptionBeganForTesting();
+  });
+}
+
+/** DEBUG/__DEV__ only. Simulates a route-loss forced pause. */
+export async function simulateRouteLossForTesting(): Promise<DurableRecordingStatus> {
+  if (!__DEV__) {
+    throw new DurableRecorderError(
+      'ERR_DURABLE_RECORDER_UNSUPPORTED',
+      'Route-loss test hooks are unavailable outside development builds.',
+    );
+  }
+  return statusOperation(() => {
+    const mod = requireNativeModule();
+    if (typeof mod.simulateRouteLossForTesting !== 'function') {
+      throw new DurableRecorderError(
+        'ERR_DURABLE_RECORDER_UNSUPPORTED',
+        'Native route-loss test hook is unavailable in this build.',
+      );
+    }
+    return mod.simulateRouteLossForTesting();
+  });
 }
