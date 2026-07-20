@@ -102,6 +102,9 @@ export async function checkRolloutDefaults() {
   if (/EXPO_PUBLIC_NATIVE_RECORDER_DOGFOOD\s*=\s*1/.test(envExample)) {
     problems.push('.env.example enables the dogfood cohort; it must ship disabled.');
   }
+  if (/EXPO_PUBLIC_R6_SIMULATOR_VERIFY\s*=\s*1/.test(envExample)) {
+    problems.push('.env.example enables R6 simulator verify; it must never ship enabled.');
+  }
 
   // No enrolled user, credential, or personal identifier may be committed.
   const client = runCommand('git', ['grep', '-lE', 'SERVICE_ROLE|service_role', '--', 'lib', 'app']);

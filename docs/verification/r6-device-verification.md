@@ -143,3 +143,30 @@ Not production-candidate ready. Do not flip `CONFIGURED_RECORDING_ENGINE`.
 - No R7 activation.
 - No push.
 - Physical iPad app was **not** modified in the Simulator automation pass.
+
+## R6 verification infrastructure safety
+
+Activation rule (all required; fail closed otherwise):
+
+```text
+__DEV__ === true
+AND EXPO_PUBLIC_R6_SIMULATOR_VERIFY === "1"
+AND native DEBUG Expo hooks available (for forced checkpoint / injected interruption)
+```
+
+Hardening:
+
+- `_layout` loads the host only via gated `require` (no static production import).
+- `isR6SimulatorVerifyEnabled()` rejects missing/`0`/`true`/whitespace values.
+- Expo AsyncFunction test hooks are `#if DEBUG` only (absent from Release).
+- Tracked `.env.example` and EAS `production` must not set the R6 verify flag to `1`.
+- Committed artifacts redact Simulator UDIDs.
+- No production navigation entry or release deep link.
+
+Regression: `scripts/r6-verify-gate.test.mjs` (included in `npm run test:recording`).
+
+## Future physical verification
+
+Remaining hardware scenarios are deferred to a dedicated TestFlight dogfood
+build — see [r6-testflight-verification-plan.md](r6-testflight-verification-plan.md).
+Do not use the user’s daily physical iPad install for that pass.

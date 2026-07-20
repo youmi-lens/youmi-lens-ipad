@@ -28,6 +28,8 @@ import {
   type DurableRecordingStatus,
 } from '@/modules/expo-durable-recorder';
 
+import { isR6SimulatorVerifyEnabled } from '@/lib/recording/r6VerifyGate';
+
 export type R6ScenarioResult = {
   id: string;
   status: 'PASS' | 'FAIL' | 'BLOCKED' | 'SKIPPED';
@@ -58,10 +60,7 @@ type PhaseFile = {
   updatedAt: string;
 };
 
-const VERIFY_ENABLED =
-  typeof __DEV__ !== 'undefined' &&
-  __DEV__ &&
-  process.env.EXPO_PUBLIC_R6_SIMULATOR_VERIFY === '1';
+const VERIFY_ENABLED = isR6SimulatorVerifyEnabled();
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

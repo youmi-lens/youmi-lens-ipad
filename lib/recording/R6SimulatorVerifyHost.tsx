@@ -19,8 +19,10 @@ import {
 } from '@/lib/recording/r6SimulatorVerify';
 
 /**
- * Simulator R6 host. Mounted only when EXPO_PUBLIC_R6_SIMULATOR_VERIFY=1.
+ * Simulator R6 host. Mounted only when `__DEV__` and
+ * `EXPO_PUBLIC_R6_SIMULATOR_VERIFY=1` (see `isR6SimulatorVerifyEnabled`).
  * Exercises the native durable recorder APIs directly (no Guest forceLegacy).
+ * Must never mount from production navigation or release bundles.
  */
 export function R6SimulatorVerifyHost() {
   const [message, setMessage] = useState('R6 verify starting…');
@@ -31,6 +33,8 @@ export function R6SimulatorVerifyHost() {
     started.current = true;
     void runHost();
   }, []);
+
+  if (!VERIFY_ENABLED) return null;
 
   async function runHost() {
     const progress = (m: string) => setMessage(m);
@@ -125,8 +129,6 @@ export function R6SimulatorVerifyHost() {
       progress(`FAIL: ${fail.detail}`);
     }
   }
-
-  if (!VERIFY_ENABLED) return null;
 
   return (
     <View pointerEvents="none" style={styles.banner}>

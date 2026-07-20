@@ -190,7 +190,7 @@
   ],
   "simulator": {
     "name": "iPad Air 11-inch (M4)",
-    "udid": "BD98BA99-E4A6-411A-9E2C-540B8D00B0F0",
+    "udid": "[redacted]",
     "os": "iOS 26.5"
   },
   "automation": "in-app R6SimulatorVerifyHost + simctl orchestrator",

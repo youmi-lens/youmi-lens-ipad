@@ -368,7 +368,7 @@ async function main() {
     ...results,
     scenarios: [...(results?.scenarios ?? []).filter((s) => s.id !== 'S7'), s7],
     memorySamples,
-    simulator: { name: DEVICE_NAME, udid, os: 'iOS 26.5' },
+    simulator: { name: DEVICE_NAME, udid: '[redacted]', os: 'iOS 26.5' },
     automation: 'in-app R6SimulatorVerifyHost + simctl orchestrator',
     authApproach: 'native module APIs directly (no Guest forceLegacy; no production auth change)',
     checkpointMode: 'forced performCheckpointForTesting (DEBUG) for accelerated scenarios',

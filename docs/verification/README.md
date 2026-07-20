@@ -19,7 +19,8 @@ needs a human.
 | [recovery-architecture.md](recovery-architecture.md) | Storage layout, session lifecycle, recovery, handoff, idempotency |
 | [native-recording-test-guide.md](native-recording-test-guide.md) | Expected states, files, metadata, failure signatures |
 | [release-checklist.md](release-checklist.md) | Dev vs release workflow, and the one manual RELEASE-ONLY gate |
-| [r6-device-verification.md](r6-device-verification.md) | R6 Simulator/device build evidence; interactive scenarios still blocked |
+| [r6-device-verification.md](r6-device-verification.md) | R6 Simulator/device evidence; DOGFOOD READY; infrastructure gates |
+| [r6-testflight-verification-plan.md](r6-testflight-verification-plan.md) | Future TestFlight matrix for remaining physical scenarios |
 | [phase-4c-activation-evidence.md](phase-4c-activation-evidence.md) | Phase 4C audit result — activation BLOCKED, nothing deployed |
 | [phase-4b-activation-readiness.md](phase-4b-activation-readiness.md) | Activation gate, provider wiring, no-query guarantee, freeze/recovery verification |
 | [phase-4b-activation-runbook.md](phase-4b-activation-runbook.md) | Exact future sequence to deploy and activate remote rollout |

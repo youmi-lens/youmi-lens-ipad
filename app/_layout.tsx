@@ -4,6 +4,7 @@ import { StatusBar } from 'expo-status-bar';
 import { ActivityIndicator, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+import type { ComponentType } from 'react';
 
 import { colors } from '@/constants/theme';
 import { AuthProvider, useAuth } from '@/lib/auth';
@@ -11,7 +12,7 @@ import { I18nProvider } from '@/lib/i18n';
 import { LiveCaptionsProvider } from '@/lib/liveCaptions';
 import { useProcessingOrchestrator } from '@/lib/useProcessingOrchestrator';
 import { RecordingNotesProvider } from '@/lib/recordingNotes';
-import { R6SimulatorVerifyHost } from '@/lib/recording/R6SimulatorVerifyHost';
+import { isR6SimulatorVerifyEnabled } from '@/lib/recording/r6VerifyGate';
 import { DataProvider } from '@/lib/store';
 
 export const unstable_settings = {
@@ -92,6 +93,15 @@ function AuthGate() {
   // `auth` in these states, so this changes nothing the user sees.
   const canUseApp = isGuest || (!!session && !needsUsernameSetup && !isResettingPassword);
 
+  // R6 Simulator verification host must never enter the production module graph.
+  // Require only when both gates pass so Metro cannot statically pull the host
+  // (and its durable test hooks) into release bundles.
+  let R6SimulatorVerifyHost: ComponentType | null = null;
+  if (isR6SimulatorVerifyEnabled()) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    R6SimulatorVerifyHost = require('@/lib/recording/R6SimulatorVerifyHost').R6SimulatorVerifyHost;
+  }
+
   return (
     <>
     <Stack
@@ -127,9 +137,7 @@ function AuthGate() {
         <Stack.Screen name="lecture-material/[lectureId]/[materialId]" />
       </Stack.Protected>
     </Stack>
-    {__DEV__ && process.env.EXPO_PUBLIC_R6_SIMULATOR_VERIFY === '1' ? (
-      <R6SimulatorVerifyHost />
-    ) : null}
+    {R6SimulatorVerifyHost ? <R6SimulatorVerifyHost /> : null}
     </>
   );
 }
