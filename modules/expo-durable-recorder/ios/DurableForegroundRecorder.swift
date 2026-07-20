@@ -129,10 +129,19 @@ final class SystemDurableAudioSessionManager: DurableAudioSessionManaging {
 #endif
 
 final class DurableForegroundRecorder {
+  /// Production checkpoint cadence for mid-capture durability.
+  ///
+  /// Bounds force-kill loss of the active `.partial.m4a` to roughly this
+  /// interval by committing immutable segments and opening the next one while
+  /// remaining logically recording. Zero disables scheduling (tests).
+  static let defaultCheckpointInterval: TimeInterval = 60
+
   private let store: DurableRecorderStore
   private let audioSession: DurableAudioSessionManaging
   private let captureFactory: DurableAudioCaptureFactory
   private let fileInspector: DurableAudioFileInspecting
+  /// Seconds between internal segment rollovers. `<= 0` disables checkpoints.
+  private let checkpointInterval: TimeInterval
   private let queue = DispatchQueue(label: "com.youmilens.durable-recorder.engine")
   private var observers: [NSObjectProtocol] = []
 
@@ -149,17 +158,25 @@ final class DurableForegroundRecorder {
   /// meaningful lifecycle transitions (forced pause, pause, resume, start, stop).
   var onStatusChange: (([String: Any]) -> Void)?
 
+  /// Invalidates pending checkpoint timers when cancelled or rescheduled.
+  private var checkpointGeneration: UInt64 = 0
+  private var checkpointTimer: DispatchSourceTimer?
+  /// Prevents overlapping rollover work on the engine queue.
+  private var isCheckpointInProgress = false
+
   init(
     store: DurableRecorderStore,
     audioSession: DurableAudioSessionManaging = SystemDurableAudioSessionManager(),
     captureFactory: DurableAudioCaptureFactory = SystemDurableAudioCaptureFactory(),
     fileInspector: DurableAudioFileInspecting = SystemDurableAudioFileInspector(),
+    checkpointInterval: TimeInterval = DurableForegroundRecorder.defaultCheckpointInterval,
     observeSystemNotifications: Bool = true
   ) {
     self.store = store
     self.audioSession = audioSession
     self.captureFactory = captureFactory
     self.fileInspector = fileInspector
+    self.checkpointInterval = checkpointInterval
     if observeSystemNotifications {
       registerObservers()
     }
@@ -167,6 +184,8 @@ final class DurableForegroundRecorder {
 
   deinit {
     observers.forEach(NotificationCenter.default.removeObserver)
+    checkpointTimer?.cancel()
+    checkpointTimer = nil
     activeCapture?.stop()
     audioSession.deactivate()
   }
@@ -220,6 +239,7 @@ final class DurableForegroundRecorder {
         throw DurableRecorderCoreError.invalidRecorderState("Start requires a prepared ready session.")
       }
       let session = try beginSegment(recordingSessionId: recordingSessionId, resuming: false)
+      scheduleCheckpoint()
       return publishStatus(session: session)
     }
   }
@@ -233,6 +253,7 @@ final class DurableForegroundRecorder {
       guard runtimeState == .recording else {
         throw DurableRecorderCoreError.invalidRecorderState("Pause requires an active recording segment.")
       }
+      cancelCheckpoint()
       runtimeState = .pausing
       do {
         _ = try finalizeActiveSegment(recordingSessionId: recordingSessionId)
@@ -265,6 +286,7 @@ final class DurableForegroundRecorder {
       try claim(recordingSessionId)
       runtimeState = .resuming
       let resumed = try beginSegment(recordingSessionId: recordingSessionId, resuming: true)
+      scheduleCheckpoint()
       return publishStatus(session: resumed)
     }
   }
@@ -281,6 +303,7 @@ final class DurableForegroundRecorder {
       // segments are intact. Claim for finalization only when this process has
       // no live owner and no active capture; never start audio here.
       try claimForFinalization(recordingSessionId, session: existing)
+      cancelCheckpoint()
       runtimeState = .stopping
       do {
         var session = existing
@@ -402,6 +425,37 @@ final class DurableForegroundRecorder {
     }
   }
 
+  /// Test-only: run the production checkpoint rollover path immediately.
+  func performCheckpointForTesting() throws {
+    try queue.sync {
+      guard runtimeState == .recording, let recordingSessionId = ownedSessionId else {
+        throw DurableRecorderCoreError.invalidRecorderState("Checkpoint requires an active recording segment.")
+      }
+      try performCheckpointRollover(recordingSessionId: recordingSessionId)
+    }
+  }
+
+  /// Test-only: fire a checkpoint callback with an explicit identity token.
+  func fireCheckpointTimerForTesting(
+    generation: UInt64,
+    sessionId: String,
+    segmentId: String
+  ) {
+    queue.sync {
+      handleCheckpointTimer(generation: generation, sessionId: sessionId, segmentId: segmentId)
+    }
+  }
+
+  /// Test-only: identity of the currently scheduled checkpoint, if any.
+  func checkpointIdentityForTesting() -> (generation: UInt64, sessionId: String, segmentId: String)? {
+    queue.sync {
+      guard checkpointTimer != nil,
+            let sessionId = ownedSessionId,
+            let segmentId = activePlan?.segmentId else { return nil }
+      return (checkpointGeneration, sessionId, segmentId)
+    }
+  }
+
   private func beginSegment(recordingSessionId: String, resuming: Bool) throws -> DurableRecordingSession {
     guard audioSession.permissionState == .granted else {
       runtimeState = resuming ? .paused : .ready
@@ -439,17 +493,24 @@ final class DurableForegroundRecorder {
       throw DurableRecorderCoreError.invalidRecorderState("No active segment exists.")
     }
     capture.stop()
-    let inspection = try fileInspector.inspect(url: plan.activeURL)
-    let session = try store.commitSegment(
-      recordingSessionId: recordingSessionId,
-      plan: plan,
-      inspection: inspection,
-      interruptionReason: reason,
-      routeAtStart: routeAtSegmentStart,
-      routeAtEnd: audioSession.routeDescription
-    )
-    clearActiveCapture()
-    return session
+    do {
+      let inspection = try fileInspector.inspect(url: plan.activeURL)
+      let session = try store.commitSegment(
+        recordingSessionId: recordingSessionId,
+        plan: plan,
+        inspection: inspection,
+        interruptionReason: reason,
+        routeAtStart: routeAtSegmentStart,
+        routeAtEnd: audioSession.routeDescription
+      )
+      clearActiveCapture()
+      return session
+    } catch {
+      // Keep the on-disk partial for quarantine/evidence, but drop live capture
+      // so callers cannot double-stop or pretend recording continues.
+      clearActiveCapture()
+      throw error
+    }
   }
 
   private func handleForcedPause(reason: String, runtimeAfter: DurableRecorderRuntimeState) {
@@ -457,6 +518,7 @@ final class DurableForegroundRecorder {
       if reason.hasPrefix("interruption") { lastInterruption = reason }
       return
     }
+    cancelCheckpoint()
     do {
       _ = try finalizeActiveSegment(recordingSessionId: recordingSessionId, reason: reason)
       _ = try store.transitionSession(recordingSessionId: recordingSessionId, to: .paused)
@@ -472,6 +534,115 @@ final class DurableForegroundRecorder {
     // cannot keep showing "recording" after capture has already stopped.
     let session = try? store.getSession(recordingSessionId: recordingSessionId)
     _ = publishStatus(session: session)
+  }
+
+  /// Commit the active segment and immediately open the next one without
+  /// pausing session state or publishing a paused UI event.
+  private func performCheckpointRollover(recordingSessionId: String) throws {
+    guard !isCheckpointInProgress else {
+      throw DurableRecorderCoreError.invalidRecorderState("Checkpoint already in progress.")
+    }
+    guard runtimeState == .recording else {
+      throw DurableRecorderCoreError.invalidRecorderState("Checkpoint requires an active recording segment.")
+    }
+    guard ownedSessionId == recordingSessionId, activeCapture != nil, activePlan != nil else {
+      throw DurableRecorderCoreError.invalidRecorderState("Checkpoint requires a live owned capture.")
+    }
+
+    isCheckpointInProgress = true
+    defer { isCheckpointInProgress = false }
+
+    // Drop any pending timer for this segment before mutating capture.
+    cancelCheckpoint()
+
+    do {
+      _ = try finalizeActiveSegment(recordingSessionId: recordingSessionId, reason: "checkpoint")
+    } catch {
+      failCheckpointCapture(
+        recordingSessionId: recordingSessionId,
+        runtimeAfter: .paused,
+        reason: "checkpoint_commit_failed"
+      )
+      throw error
+    }
+
+    do {
+      // Keep the audio session active across the rollover. beginSegment
+      // re-activates if needed and leaves session.state as recording.
+      _ = try beginSegment(recordingSessionId: recordingSessionId, resuming: true)
+      scheduleCheckpoint()
+      // Do not publishStatus: a successful checkpoint must stay invisible to JS
+      // so the recording timer is not reset or double-counted.
+    } catch {
+      if (try? store.getSession(recordingSessionId: recordingSessionId))?.state == .recording {
+        _ = try? store.transitionSession(recordingSessionId: recordingSessionId, to: .paused)
+      }
+      runtimeState = .paused
+      audioSession.deactivate()
+      let session = try? store.getSession(recordingSessionId: recordingSessionId)
+      _ = publishStatus(session: session)
+      throw error
+    }
+  }
+
+  private func failCheckpointCapture(
+    recordingSessionId: String,
+    runtimeAfter: DurableRecorderRuntimeState,
+    reason: String
+  ) {
+    activeCapture?.stop()
+    clearActiveCapture()
+    cancelCheckpoint()
+    _ = try? store.transitionSession(recordingSessionId: recordingSessionId, to: .paused)
+    runtimeState = runtimeAfter
+    audioSession.deactivate()
+    lastInterruption = reason
+    let session = try? store.getSession(recordingSessionId: recordingSessionId)
+    _ = publishStatus(session: session)
+  }
+
+  private func scheduleCheckpoint() {
+    cancelCheckpoint()
+    guard checkpointInterval > 0 else { return }
+    guard runtimeState == .recording else { return }
+    guard let sessionId = ownedSessionId, let plan = activePlan, activeCapture != nil else { return }
+
+    let generation = checkpointGeneration
+    let expectedSessionId = sessionId
+    let expectedSegmentId = plan.segmentId
+    let timer = DispatchSource.makeTimerSource(queue: queue)
+    timer.schedule(deadline: .now() + checkpointInterval, repeating: .never)
+    timer.setEventHandler { [weak self] in
+      self?.handleCheckpointTimer(
+        generation: generation,
+        sessionId: expectedSessionId,
+        segmentId: expectedSegmentId
+      )
+    }
+    checkpointTimer = timer
+    timer.resume()
+  }
+
+  private func cancelCheckpoint() {
+    checkpointTimer?.cancel()
+    checkpointTimer = nil
+    checkpointGeneration &+= 1
+  }
+
+  private func handleCheckpointTimer(generation: UInt64, sessionId: String, segmentId: String) {
+    guard generation == checkpointGeneration else { return }
+    guard !isCheckpointInProgress else { return }
+    guard runtimeState == .recording else { return }
+    guard ownedSessionId == sessionId else { return }
+    guard activePlan?.segmentId == segmentId else { return }
+    guard activeCapture != nil else { return }
+
+    checkpointTimer = nil
+    do {
+      try performCheckpointRollover(recordingSessionId: sessionId)
+    } catch {
+      // Failure path already published authoritative paused status.
+    }
   }
 
   private func claim(_ recordingSessionId: String) throws {
@@ -532,6 +703,7 @@ final class DurableForegroundRecorder {
   }
 
   private func releaseOwnership() {
+    cancelCheckpoint()
     activeCapture?.stop()
     clearActiveCapture()
     audioSession.deactivate()

@@ -123,6 +123,7 @@ private func makeRecoveryEngine(root: URL) throws -> (DurableRecorderStore, Dura
     audioSession: RecoveryFakeAudioSession(),
     captureFactory: RecoveryFakeCaptureFactory(),
     fileInspector: RecoveryFakeFileInspector(),
+    checkpointInterval: 0,
     observeSystemNotifications: false
   )
   return (store, engine)
@@ -154,6 +155,9 @@ private struct RecoveryTests {
     try await orphanFinalAssetAdoptionIsIdempotent(root: root)
     try await conflictingFinalAssetMetadataPreserved(root: root)
     try await liveCaptureBlocksOrphanAdoption(root: root)
+    try await forceKillBoundedLossAfterCheckpoints(root: root)
+    try await checkpointPromotionBeforeMetadataCrash(root: root)
+    try await checkpointMetadataBeforeNextSegmentCrash(root: root)
 
     print("native recovery tests passed")
   }
@@ -1229,5 +1233,141 @@ private struct RecoveryTests {
     try require(current.state == .recording, "Live recording state must remain unchanged")
     try require(current.finalAsset == nil, "Live capture must not gain finalAsset metadata")
     _ = try engine.pauseRecording(recordingSessionId: session.recordingSessionId)
+  }
+
+  // MARK: Scenario T — force-kill after checkpoints bounds loss to the active partial.
+
+  static func forceKillBoundedLossAfterCheckpoints(root: URL) async throws {
+    let lectureId = "lecture-checkpoint-bounded-loss"
+    var sessionId = ""
+    var committedDigests: [String] = []
+
+    do {
+      let (store, engine) = try makeRecoveryEngine(root: root)
+      let session = try store.createSession(lectureId: lectureId)
+      sessionId = session.recordingSessionId
+      _ = try await engine.prepareRecording(recordingSessionId: sessionId, requestPermission: false)
+      _ = try engine.startRecording(recordingSessionId: sessionId)
+      try engine.performCheckpointForTesting()
+      try engine.performCheckpointForTesting()
+      try engine.performCheckpointForTesting()
+      let live = try store.getSession(recordingSessionId: sessionId)
+      try require(live.segments.count == 3, "Precondition: three checkpoint segments committed")
+      committedDigests = try live.segments.map { segment in
+        digest(try Data(contentsOf: root
+          .appendingPathComponent(live.relativeSessionPath)
+          .appendingPathComponent(segment.relativePath)))
+      }
+      // Simulate process death: drop the engine while an active partial remains.
+      try require(engine.getRecordingStatus()["activeSegmentId"] as? String != nil, "Active partial must exist")
+    }
+
+    let (store, engine) = try makeRecoveryEngine(root: root)
+    let recovery = try engine.recoverRecordingSession(recordingSessionId: sessionId)
+    try require(recovery.session.segments.count == 3, "All checkpointed segments must recover")
+    try require(
+      recovery.issues.contains { $0.code == "stale_temporary_file_quarantined" },
+      "Current partial must be handled by R2 quarantine"
+    )
+    for (index, expected) in committedDigests.enumerated() {
+      let url = root
+        .appendingPathComponent(recovery.session.relativeSessionPath)
+        .appendingPathComponent(recovery.session.segments[index].relativePath)
+      let actual = digest(try Data(contentsOf: url))
+      try require(actual == expected, "Checkpoint segment \(index + 1) bytes must survive")
+    }
+
+    _ = try engine.resumeRecording(recordingSessionId: sessionId)
+    let stopped = try engine.stopRecording(recordingSessionId: sessionId)
+    try require(((stopped["session"] as? [String: Any])?["state"] as? String) == "finalized", "Finish after bounded-loss recovery must work")
+    let finalized = try store.getSession(recordingSessionId: sessionId)
+    try require(finalized.segments.count >= 3, "Recovered checkpoint audio must remain available for Finish")
+  }
+
+  // MARK: Scenario U — checkpoint file promoted before metadata write (R4).
+
+  static func checkpointPromotionBeforeMetadataCrash(root: URL) async throws {
+    let lectureId = "lecture-checkpoint-orphan-segment"
+    var sessionId = ""
+    var orphanDigest = ""
+
+    do {
+      let store = try DurableRecorderStore(rootURL: root)
+      var session = try store.createSession(lectureId: lectureId)
+      sessionId = session.recordingSessionId
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .preparing)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .ready)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .recording)
+      _ = try addSegment(store: store, sessionId: sessionId, frequency: 440)
+      let plan = try store.createSegmentPlan(recordingSessionId: sessionId)
+      try writeTone(to: plan.activeURL, frequency: 550, seconds: 0.35)
+      try FileManager.default.moveItem(at: plan.activeURL, to: plan.finalizedURL)
+      orphanDigest = digest(try Data(contentsOf: plan.finalizedURL))
+      // Crash window: promoted file exists, session.json still only knows segment 1.
+      session = try store.getSession(recordingSessionId: sessionId)
+      try require(session.segments.count == 1, "Precondition: metadata lacks the promoted checkpoint segment")
+    }
+
+    let (store, engine) = try makeRecoveryEngine(root: root)
+    let recovery = try engine.recoverRecordingSession(recordingSessionId: sessionId)
+    try require(
+      recovery.issues.contains { $0.code == "orphan_finalized_file_adopted" },
+      "R4 must adopt the contiguous orphan checkpoint segment"
+    )
+    let adopted = try store.getSession(recordingSessionId: sessionId)
+    try require(adopted.segments.map(\.sequence) == [1, 2], "Adopted checkpoint segment must become sequence 2")
+    let adoptedDigest = digest(try Data(contentsOf: root
+      .appendingPathComponent(adopted.relativeSessionPath)
+      .appendingPathComponent(adopted.segments[1].relativePath)))
+    try require(adoptedDigest == orphanDigest, "Adopted checkpoint bytes must match the promoted file")
+    _ = try engine.resumeRecording(recordingSessionId: sessionId)
+    _ = try engine.stopRecording(recordingSessionId: sessionId)
+  }
+
+  // MARK: Scenario V — checkpoint metadata committed before next segment starts.
+
+  static func checkpointMetadataBeforeNextSegmentCrash(root: URL) async throws {
+    let lectureId = "lecture-checkpoint-meta-before-next"
+    var sessionId = ""
+    var committedDigest = ""
+
+    do {
+      let (store, engine) = try makeRecoveryEngine(root: root)
+      let session = try store.createSession(lectureId: lectureId)
+      sessionId = session.recordingSessionId
+      _ = try await engine.prepareRecording(recordingSessionId: sessionId, requestPermission: false)
+      _ = try engine.startRecording(recordingSessionId: sessionId)
+      try engine.performCheckpointForTesting()
+      let afterCheckpoint = try store.getSession(recordingSessionId: sessionId)
+      try require(afterCheckpoint.segments.count == 1, "Precondition: checkpoint metadata committed")
+      committedDigest = digest(try Data(contentsOf: root
+        .appendingPathComponent(afterCheckpoint.relativeSessionPath)
+        .appendingPathComponent(afterCheckpoint.segments[0].relativePath)))
+      // Simulate death after metadata commit but before the next recorder is durable:
+      // drop the engine while still logically recording with a fresh active partial.
+      try require(afterCheckpoint.state == .recording, "Session remains recording after checkpoint")
+    }
+
+    let (store, engine) = try makeRecoveryEngine(root: root)
+    let recovery = try engine.recoverRecordingSession(recordingSessionId: sessionId)
+    try require(recovery.session.segments.count == 1, "Committed checkpoint audio must survive")
+    let recoveredDigest = digest(try Data(contentsOf: root
+      .appendingPathComponent(recovery.session.relativeSessionPath)
+      .appendingPathComponent(recovery.session.segments[0].relativePath)))
+    try require(recoveredDigest == committedDigest, "Checkpoint segment bytes must be unchanged")
+    try require(
+      recovery.issues.contains { $0.code == "stale_temporary_file_quarantined" }
+        || recovery.session.state == .paused
+        || recovery.session.state == .recording,
+      "Session must remain recoverable after mid-rollover death"
+    )
+
+    _ = try engine.resumeRecording(recordingSessionId: sessionId)
+    let afterResume = try store.getSession(recordingSessionId: sessionId)
+    try require(afterResume.segments.count == 1, "Resume must not rewrite the committed checkpoint segment")
+    _ = try engine.stopRecording(recordingSessionId: sessionId)
+    let finalized = try store.getSession(recordingSessionId: sessionId)
+    try require(finalized.state == .finalized, "Finish must work after metadata-before-next crash recovery")
+    try require(finalized.segments.count >= 1, "Finish must retain committed checkpoint audio")
   }
 }

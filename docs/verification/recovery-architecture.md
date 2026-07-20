@@ -116,10 +116,28 @@ no live capture):
    that file (no second concatenation).
 
 **A kill mid-capture still loses that partial segment's audio.** An AAC/M4A
-file without its `moov` atom is not salvaged here (that is later work). The
+file without its `moov` atom is not salvaged here (no `moov` repair). The
 partial is quarantined for evidence, not adopted as a committed segment.
 Zero-segment sessions remain listed for recovery so the loss stays visible;
 Finish must not invent an empty final asset when no committed segments exist.
+
+### Periodic checkpoint (bounded mid-capture loss)
+
+While logically recording, the native engine periodically commits the active
+segment and immediately opens the next one (`DurableForegroundRecorder`
+default interval: **60 seconds**). This is an internal durability checkpoint:
+
+- session state stays `recording` (not paused);
+- the audio session stays active across a successful rollover;
+- no paused/finalized status is published to JS (timer/UI stay continuous);
+- checkpoint failures force the existing paused path and publish authoritative status;
+- force-kill loss is bounded to roughly one checkpoint interval of uncommitted audio.
+
+Checkpoint scheduling is cancelled on Pause, forced pause, Finish, ownership
+release, and failure. Stale timer callbacks are ignored via a generation token
+plus session/segment identity. Tests may inject a shorter interval or call
+`performCheckpointForTesting()`; the interval is not a user setting and is not
+remotely configurable.
 
 ## Handoff and idempotency
 

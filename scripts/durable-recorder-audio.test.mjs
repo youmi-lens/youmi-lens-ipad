@@ -19,6 +19,14 @@ assert.match(sources, /kAudioFormatMPEG4AAC/, 'the engine records AAC');
 assert.match(sources, /\.partial\.m4a/, 'active artifacts are distinguishable from finalized M4A files');
 assert.match(sources, /AVAudioSession\.interruptionNotification/, 'interruption observer is registered');
 assert.match(sources, /AVAudioSession\.routeChangeNotification/, 'route observer is registered');
+assert.match(sources, /defaultCheckpointInterval/, 'production checkpoint interval is defined');
+assert.match(sources, /performCheckpointRollover/, 'internal segment checkpoint rollover exists');
+assert.match(sources, /checkpointGeneration/, 'stale checkpoint callbacks are identity-gated');
 assert.doesNotMatch(sources, /UIBackgroundModes|telemetry|analytics/i);
+assert.doesNotMatch(
+  sources,
+  /moov|M4A repair|reconstruct.*atom/i,
+  'checkpoint durability must not depend on M4A binary repair',
+);
 
 console.log('Durable recorder Phase 2B audio tests passed.');
