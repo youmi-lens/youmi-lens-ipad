@@ -224,6 +224,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
+/** Recovery issues may reference segments, the final asset, or quarantine. */
+function isAllowedRecoveryRelativePath(relativePath: string): boolean {
+  if (relativePath.includes('..') || relativePath.includes('\\')) return false;
+  return (
+    relativePath.startsWith('segments/') ||
+    relativePath.startsWith('final/') ||
+    relativePath.startsWith('quarantine/')
+  );
+}
+
 function isTimestamp(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && Number.isFinite(Date.parse(value));
 }
@@ -690,8 +700,8 @@ export async function recoverRecordingSession(
     const session = requireSession(result.session);
     const issues = result.issues.map((issue): DurableRecoveryIssue | null => {
       if (!isRecord(issue) || typeof issue.code !== 'string' ||
-          typeof issue.relativePath !== 'string' || !issue.relativePath.startsWith('segments/') ||
-          issue.relativePath.includes('..') || issue.relativePath.includes('\\') ||
+          typeof issue.relativePath !== 'string' ||
+          !isAllowedRecoveryRelativePath(issue.relativePath) ||
           (issue.segmentId !== undefined &&
             (typeof issue.segmentId !== 'string' || !sessionIdPattern.test(issue.segmentId)))) return null;
       return {

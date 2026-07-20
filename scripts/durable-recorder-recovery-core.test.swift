@@ -148,6 +148,12 @@ private struct RecoveryTests {
     try await liveCapturePartialIsNotQuarantined(root: root)
     try await stalePartialQuarantineIsIdempotent(root: root)
     try await discardStillRemovesQuarantinedPartial(root: root)
+    try await adoptOrphanFinalAssetAfterPromoteCrash(root: root)
+    try await adoptOrphanFinalizedSegmentAfterCommitCrash(root: root)
+    try await rejectZeroByteOrphanFinalAsset(root: root)
+    try await orphanFinalAssetAdoptionIsIdempotent(root: root)
+    try await conflictingFinalAssetMetadataPreserved(root: root)
+    try await liveCaptureBlocksOrphanAdoption(root: root)
 
     print("native recovery tests passed")
   }
@@ -913,5 +919,315 @@ private struct RecoveryTests {
       !offered.contains { $0.recordingSessionId == sessionId },
       "Discarded sessions must not remain recoverable"
     )
+  }
+
+  // MARK: Scenario N — adopt final/lecture.m4a after promote-then-crash.
+
+  static func adoptOrphanFinalAssetAfterPromoteCrash(root: URL) async throws {
+    let lectureId = "lecture-orphan-final-asset"
+    var sessionId = ""
+    var finalURL = URL(fileURLWithPath: "/")
+    var finalDigest = ""
+    var segmentId = ""
+    do {
+      let store = try DurableRecorderStore(rootURL: root)
+      var session = try store.createSession(lectureId: lectureId)
+      sessionId = session.recordingSessionId
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .preparing)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .ready)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .recording)
+      let first = try addSegment(store: store, sessionId: sessionId, frequency: 440)
+      segmentId = first.session.segments[0].segmentId
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .paused)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .finalizing)
+      session = try store.finalizeSession(recordingSessionId: sessionId)
+
+      // Produce the final asset, then strip finalAsset metadata to model the
+      // crash between promoteFinalAsset and commitFinalAsset.
+      let exported = try await DurableFinalAssetExporter(store: store).export(recordingSessionId: sessionId)
+      finalURL = URL(string: exported["fileUri"] as! String)!
+      finalDigest = digest(try Data(contentsOf: finalURL))
+      var stripped = try store.getSession(recordingSessionId: sessionId)
+      stripped.finalAsset = nil
+      stripped.handoffCompletedAt = nil
+      // Rewrite session.json without going through commitFinalAsset guards.
+      let encoder = JSONEncoder()
+      encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+      let metadataURL = root
+        .appendingPathComponent(stripped.relativeSessionPath)
+        .appendingPathComponent("session.json")
+      try encoder.encode(stripped).write(to: metadataURL, options: .atomic)
+    }
+
+    let (store, engine) = try makeRecoveryEngine(root: root)
+    let before = try store.getSession(recordingSessionId: sessionId)
+    try require(before.state == .finalized, "Precondition: session state stays finalized")
+    try require(before.finalAsset == nil, "Precondition: finalAsset metadata is missing")
+    try require(FileManager.default.fileExists(atPath: finalURL.path), "Precondition: final file exists")
+
+    let inspected = try store.reconcileSession(
+      recordingSessionId: sessionId,
+      inspectAudioFile: alwaysValidAudio
+    )
+    try require(
+      inspected.issues.contains { $0.code == "orphan_final_asset" },
+      "Reconcile must detect the orphan final asset before adoption"
+    )
+
+    let recovery = try engine.recoverRecordingSession(recordingSessionId: sessionId)
+    try require(
+      recovery.issues.contains { $0.code == "orphan_final_asset_adopted" },
+      "Recovery must adopt the orphan final asset"
+    )
+    try require(
+      !recovery.issues.contains { $0.code == "orphan_final_asset" },
+      "Adopted final asset must no longer appear as an unresolved orphan"
+    )
+    let adopted = try store.getSession(recordingSessionId: sessionId)
+    try require(adopted.finalAsset != nil, "Adoption must persist finalAsset metadata")
+    try require(
+      adopted.finalAsset?.relativePath == "final/lecture.m4a",
+      "Adoption must use the deterministic final path"
+    )
+    try require(
+      adopted.finalAsset?.sourceSegmentIds == [segmentId],
+      "Adopted final metadata must reference committed segments only"
+    )
+    let adoptedDigest = digest(try Data(contentsOf: finalURL))
+    try require(
+      adoptedDigest == finalDigest,
+      "Adoption must reuse the existing final bytes without rewriting"
+    )
+
+    // Finish / export must not concatenate again or create a new file.
+    let reExported = try await DurableFinalAssetExporter(store: store).export(recordingSessionId: sessionId)
+    try require((reExported["fileUri"] as? String) == finalURL.absoluteString, "Export must reuse the adopted URI")
+    let reExportedDigest = digest(try Data(contentsOf: finalURL))
+    try require(
+      reExportedDigest == finalDigest,
+      "Repeated export must not rewrite the adopted final asset"
+    )
+    let acknowledged = try store.acknowledgeFinalAssetHandoff(recordingSessionId: sessionId)
+    try require(acknowledged.handoffCompletedAt != nil, "Handoff acknowledgement must work after adoption")
+  }
+
+  // MARK: Scenario O — adopt orphan segment after commitSegment metadata crash.
+
+  static func adoptOrphanFinalizedSegmentAfterCommitCrash(root: URL) async throws {
+    let lectureId = "lecture-orphan-segment"
+    var sessionId = ""
+    var firstDigest = ""
+    var orphanDigest = ""
+    var orphanSegmentId = ""
+    do {
+      let store = try DurableRecorderStore(rootURL: root)
+      var session = try store.createSession(lectureId: lectureId)
+      sessionId = session.recordingSessionId
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .preparing)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .ready)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .recording)
+      let first = try addSegment(store: store, sessionId: sessionId, frequency: 520)
+      firstDigest = digest(first.bytes)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .paused)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .recording)
+
+      // Move a valid segment file into place without writing metadata.
+      let plan = try store.createSegmentPlan(recordingSessionId: sessionId)
+      try writeTone(to: plan.activeURL, frequency: 660, seconds: 0.4)
+      try FileManager.default.moveItem(at: plan.activeURL, to: plan.finalizedURL)
+      orphanDigest = digest(try Data(contentsOf: plan.finalizedURL))
+      orphanSegmentId = plan.segmentId
+      _ = try store.transitionSession(recordingSessionId: sessionId, to: .paused)
+    }
+
+    let (store, engine) = try makeRecoveryEngine(root: root)
+    let before = try store.getSession(recordingSessionId: sessionId)
+    try require(before.segments.count == 1, "Precondition: only segment 1 is in metadata")
+    let inspected = try store.reconcileSession(
+      recordingSessionId: sessionId,
+      inspectAudioFile: alwaysValidAudio
+    )
+    try require(
+      inspected.issues.contains { $0.code == "orphan_finalized_file" },
+      "Reconcile must report the orphan finalized segment"
+    )
+
+    let recovery = try engine.recoverRecordingSession(recordingSessionId: sessionId)
+    try require(
+      recovery.issues.contains { $0.code == "orphan_finalized_file_adopted" },
+      "Recovery must adopt the orphan finalized segment"
+    )
+    let adopted = try store.getSession(recordingSessionId: sessionId)
+    try require(adopted.segments.count == 2, "Adoption must append exactly one segment")
+    try require(adopted.segments[1].segmentId == orphanSegmentId, "Adopted segment identity must match the file")
+    try require(adopted.segments.map(\.sequence) == [1, 2], "Adopted sequence must stay contiguous")
+    let adoptedFirstDigest = digest(try Data(contentsOf: segmentURL(root: root, adopted, 0)))
+    let adoptedSecondDigest = digest(try Data(contentsOf: segmentURL(root: root, adopted, 1)))
+    try require(adoptedFirstDigest == firstDigest, "Prior committed segment must remain immutable")
+    try require(adoptedSecondDigest == orphanDigest, "Adopted segment bytes must remain the original file")
+  }
+
+  // MARK: Scenario P — zero-byte final candidate is not adopted.
+
+  static func rejectZeroByteOrphanFinalAsset(root: URL) async throws {
+    let lectureId = "lecture-orphan-final-zero"
+    var sessionId = ""
+    do {
+      let store = try DurableRecorderStore(rootURL: root)
+      var session = try store.createSession(lectureId: lectureId)
+      sessionId = session.recordingSessionId
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .preparing)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .ready)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .recording)
+      _ = try addSegment(store: store, sessionId: sessionId, frequency: 400)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .paused)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .finalizing)
+      session = try store.finalizeSession(recordingSessionId: sessionId)
+      let finalDirectory = root
+        .appendingPathComponent(session.relativeSessionPath)
+        .appendingPathComponent("final", isDirectory: true)
+      try FileManager.default.createDirectory(at: finalDirectory, withIntermediateDirectories: true)
+      try Data().write(to: finalDirectory.appendingPathComponent("lecture.m4a"))
+    }
+
+    let (store, engine) = try makeRecoveryEngine(root: root)
+    let recovery = try engine.recoverRecordingSession(recordingSessionId: sessionId)
+    try require(
+      recovery.issues.contains { $0.code == "invalid_orphan_final_asset" },
+      "Zero-byte final candidate must be reported as invalid"
+    )
+    try require(
+      !recovery.issues.contains { $0.code == "orphan_final_asset_adopted" },
+      "Zero-byte final candidate must not be adopted"
+    )
+    let session = try store.getSession(recordingSessionId: sessionId)
+    try require(session.finalAsset == nil, "Invalid orphan must not create finalAsset metadata")
+    try require(session.segments.count == 1, "Committed segments must remain intact")
+  }
+
+  // MARK: Scenario Q — repeated recovery after final adoption is idempotent.
+
+  static func orphanFinalAssetAdoptionIsIdempotent(root: URL) async throws {
+    let lectureId = "lecture-orphan-final-idempotent"
+    var sessionId = ""
+    var finalURI = ""
+    do {
+      let store = try DurableRecorderStore(rootURL: root)
+      var session = try store.createSession(lectureId: lectureId)
+      sessionId = session.recordingSessionId
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .preparing)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .ready)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .recording)
+      _ = try addSegment(store: store, sessionId: sessionId, frequency: 450)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .paused)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .finalizing)
+      session = try store.finalizeSession(recordingSessionId: sessionId)
+      let exported = try await DurableFinalAssetExporter(store: store).export(recordingSessionId: sessionId)
+      finalURI = exported["fileUri"] as! String
+      var stripped = try store.getSession(recordingSessionId: sessionId)
+      stripped.finalAsset = nil
+      stripped.handoffCompletedAt = nil
+      let encoder = JSONEncoder()
+      encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+      try encoder.encode(stripped).write(
+        to: root.appendingPathComponent(stripped.relativeSessionPath).appendingPathComponent("session.json"),
+        options: .atomic
+      )
+    }
+
+    let (store, engine) = try makeRecoveryEngine(root: root)
+    let first = try engine.recoverRecordingSession(recordingSessionId: sessionId)
+    let second = try engine.recoverRecordingSession(recordingSessionId: sessionId)
+    try require(
+      first.issues.filter { $0.code == "orphan_final_asset_adopted" }.count == 1,
+      "First recovery adopts once"
+    )
+    try require(
+      second.issues.filter { $0.code == "orphan_final_asset_adopted" }.isEmpty,
+      "Second recovery must not re-adopt"
+    )
+    let session = try store.getSession(recordingSessionId: sessionId)
+    try require(session.finalAsset != nil, "Final metadata remains after repeated recovery")
+    let exported = try await DurableFinalAssetExporter(store: store).export(recordingSessionId: sessionId)
+    try require((exported["fileUri"] as? String) == finalURI, "Export URI stays stable across recovery")
+  }
+
+  // MARK: Scenario R — existing finalAsset metadata wins over a second file.
+
+  static func conflictingFinalAssetMetadataPreserved(root: URL) async throws {
+    let lectureId = "lecture-orphan-final-conflict"
+    var sessionId = ""
+    var authoritativeDigest = ""
+    do {
+      let store = try DurableRecorderStore(rootURL: root)
+      var session = try store.createSession(lectureId: lectureId)
+      sessionId = session.recordingSessionId
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .preparing)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .ready)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .recording)
+      _ = try addSegment(store: store, sessionId: sessionId, frequency: 470)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .paused)
+      session = try store.transitionSession(recordingSessionId: sessionId, to: .finalizing)
+      session = try store.finalizeSession(recordingSessionId: sessionId)
+      let exported = try await DurableFinalAssetExporter(store: store).export(recordingSessionId: sessionId)
+      let finalURL = URL(string: exported["fileUri"] as! String)!
+      authoritativeDigest = digest(try Data(contentsOf: finalURL))
+      // Extra non-authoritative candidate beside the expected path.
+      try Data(repeating: 0x5A, count: 64).write(
+        to: finalURL.deletingLastPathComponent().appendingPathComponent("lecture.extra.m4a")
+      )
+    }
+
+    let (store, engine) = try makeRecoveryEngine(root: root)
+    let before = try store.getSession(recordingSessionId: sessionId)
+    let beforeAsset = before.finalAsset
+    try require(beforeAsset != nil, "Precondition: authoritative finalAsset exists")
+    _ = try engine.recoverRecordingSession(recordingSessionId: sessionId)
+    let after = try store.getSession(recordingSessionId: sessionId)
+    try require(after.finalAsset == beforeAsset, "Recovery must not replace authoritative finalAsset")
+    let finalURL = root
+      .appendingPathComponent(after.relativeSessionPath)
+      .appendingPathComponent("final/lecture.m4a")
+    let afterDigest = digest(try Data(contentsOf: finalURL))
+    try require(afterDigest == authoritativeDigest, "Authoritative final bytes must remain unchanged")
+    try require(
+      FileManager.default.fileExists(
+        atPath: finalURL.deletingLastPathComponent().appendingPathComponent("lecture.extra.m4a").path
+      ),
+      "Extra candidate must not be deleted"
+    )
+  }
+
+  // MARK: Scenario S — live capture blocks orphan adoption.
+
+  static func liveCaptureBlocksOrphanAdoption(root: URL) async throws {
+    let (store, engine) = try makeRecoveryEngine(root: root)
+    let session = try store.createSession(lectureId: "lecture-orphan-live")
+    _ = try await engine.prepareRecording(
+      recordingSessionId: session.recordingSessionId,
+      requestPermission: false
+    )
+    _ = try engine.startRecording(recordingSessionId: session.recordingSessionId)
+
+    // Plant a fake final file while capture is live — must not be adopted.
+    let finalDirectory = root
+      .appendingPathComponent(session.relativeSessionPath)
+      .appendingPathComponent("final", isDirectory: true)
+    try FileManager.default.createDirectory(at: finalDirectory, withIntermediateDirectories: true)
+    try Data(repeating: 0x11, count: 128).write(to: finalDirectory.appendingPathComponent("lecture.m4a"))
+
+    do {
+      _ = try engine.recoverRecordingSession(recordingSessionId: session.recordingSessionId)
+      throw RecoveryTestFailure(description: "Recovery adopted orphans during live capture")
+    } catch is RecoveryTestFailure {
+      throw RecoveryTestFailure(description: "Recovery adopted orphans during live capture")
+    } catch let error as DurableRecorderCoreError {
+      try require(error == .recorderBusy, "Live capture recovery must return recorderBusy")
+    }
+
+    let current = try store.getSession(recordingSessionId: session.recordingSessionId)
+    try require(current.state == .recording, "Live recording state must remain unchanged")
+    try require(current.finalAsset == nil, "Live capture must not gain finalAsset metadata")
+    _ = try engine.pauseRecording(recordingSessionId: session.recordingSessionId)
   }
 }

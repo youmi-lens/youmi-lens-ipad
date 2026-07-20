@@ -85,8 +85,13 @@ repairing destructively:
 | `invalid_referenced_file` | referenced segment is not readable audio |
 | `incomplete_temporary_file` | a `.partial.m4a` from a kill mid-capture |
 | `stale_temporary_file_quarantined` | informational: inactive partial moved to `quarantine/` |
-| `orphan_finalized_file` | valid audio on disk not referenced by metadata |
-| `invalid_orphan_file` | unreferenced file that is not valid audio |
+| `orphan_finalized_file` | valid `segments/*.m4a` not referenced by metadata |
+| `orphan_finalized_file_adopted` | informational: contiguous orphan segment re-attached |
+| `orphan_finalized_file_conflict` | ambiguous orphan segments; nothing adopted |
+| `invalid_orphan_file` | unreferenced segment file that is not valid audio |
+| `orphan_final_asset` | `final/lecture.m4a` exists but `finalAsset` metadata is missing |
+| `orphan_final_asset_adopted` | informational: final asset metadata attached without re-export |
+| `invalid_orphan_final_asset` | expected final path exists but failed validation |
 | `unsupported_segment_format` | unexpected file in `segments/` |
 
 Hard-blocking codes for Resume are `missing_referenced_file`,
@@ -95,9 +100,20 @@ Hard-blocking codes for Resume are `missing_referenced_file`,
 **Stale partials do not strand committed audio.** When
 `recoverRecordingSession` runs with no live capture, any `.partial.m4a` under
 `segments/` is moved to `sessions/<id>/quarantine/` and the session is
-re-reconciled. Committed `.m4a` segments and `final/lecture.m4a` are never
-touched. A live `activeCapture` makes recovery return `recorderBusy` and leaves
-the partial alone.
+re-reconciled. A live `activeCapture` makes recovery return `recorderBusy` and
+leaves the partial alone.
+
+**Orphan adoption.** Two crash windows are repaired during recovery (still with
+no live capture):
+
+1. **Segment commit window** — `commitSegment` moved
+   `segments/NNNNNN-<id>.m4a` but died before `session.json` recorded it.
+   Contiguous next-sequence orphans are re-attached; gapped or conflicting
+   orphans are left untouched.
+2. **Final promote window** — exporter promoted `final/lecture.m4a` but died
+   before `finalAsset` metadata was written. When `state == finalized` and the
+   deterministic final file validates, metadata is attached and export reuses
+   that file (no second concatenation).
 
 **A kill mid-capture still loses that partial segment's audio.** An AAC/M4A
 file without its `moov` atom is not salvaged here (that is later work). The

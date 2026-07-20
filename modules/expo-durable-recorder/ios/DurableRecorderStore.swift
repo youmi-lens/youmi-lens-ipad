@@ -411,6 +411,16 @@ final class DurableRecorderStore {
           segmentId: nil
         ))
       }
+      let finalRelativePath = "final/lecture.m4a"
+      let finalURL = sessionDirectory.appendingPathComponent(finalRelativePath, isDirectory: false)
+      if session.finalAsset == nil, fileManager.fileExists(atPath: finalURL.path) {
+        issues.append(DurableRecoveryIssue(
+          code: inspectAudioFile(finalURL) ? "orphan_final_asset" : "invalid_orphan_final_asset",
+          relativePath: finalRelativePath,
+          segmentId: nil
+        ))
+      }
+
       return DurableRecoveryResult(session: session, issues: issues)
     }
   }
@@ -467,6 +477,203 @@ final class DurableRecorderStore {
         }
       }
       return issues
+    }
+  }
+
+  /// Re-attach contiguous `segments/NNNNNN-<id>.m4a` files that were moved but
+  /// never written into session.json (commitSegment crash window).
+  ///
+  /// Only adopts the next expected sequence(s). Ambiguous or gapped orphans are
+  /// left untouched and remain visible via reconcile. Never touches quarantine,
+  /// partials, or `final/lecture.m4a`. Idempotent when nothing remains to adopt.
+  func adoptOrphanFinalizedSegments(
+    recordingSessionId: String,
+    inspectAudioFile: (URL) throws -> DurableAudioFileInspection
+  ) throws -> (session: DurableRecordingSession, issues: [DurableRecoveryIssue]) {
+    try synchronized {
+      let canonical = try requireCanonicalIdentifier(recordingSessionId)
+      var session = try readSession(canonicalIdentifier: canonical)
+      guard !session.state.isTerminal else {
+        return (session, [])
+      }
+
+      let sessionDirectory = sessionURL(forCanonicalIdentifier: canonical)
+      let segmentsDirectory = sessionDirectory.appendingPathComponent("segments", isDirectory: true)
+      let referenced = Set(session.segments.map(\.relativePath))
+      let existingSequences = Set(session.segments.map(\.sequence))
+      let entries = (try? fileManager.contentsOfDirectory(
+        at: segmentsDirectory,
+        includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+        options: [.skipsHiddenFiles]
+      )) ?? []
+
+      struct Candidate {
+        let sequence: Int
+        let segmentId: String
+        let relativePath: String
+        let url: URL
+      }
+
+      var candidates: [Candidate] = []
+      for entry in entries {
+        let fileName = entry.lastPathComponent
+        guard Self.isFinalizedSegmentFileName(fileName) else { continue }
+        let relativePath = "segments/\(fileName)"
+        guard !referenced.contains(relativePath) else { continue }
+        guard let segmentId = Self.segmentId(fromFileName: fileName) else { continue }
+        guard let sequence = Int(String(fileName.prefix(6))) else { continue }
+        guard !existingSequences.contains(sequence) else { continue }
+        candidates.append(Candidate(
+          sequence: sequence,
+          segmentId: segmentId,
+          relativePath: relativePath,
+          url: entry
+        ))
+      }
+
+      // Ambiguity: two files claiming the same next sequence → adopt nothing.
+      let grouped = Dictionary(grouping: candidates, by: \.sequence)
+      if grouped.values.contains(where: { $0.count > 1 }) {
+        return (session, [
+          DurableRecoveryIssue(
+            code: "orphan_finalized_file_conflict",
+            relativePath: "segments/",
+            segmentId: nil
+          )
+        ])
+      }
+
+      var adoptedIssues: [DurableRecoveryIssue] = []
+      var nextSequence = (session.segments.map(\.sequence).max() ?? 0) + 1
+      for candidate in candidates.sorted(by: { $0.sequence < $1.sequence }) {
+        guard candidate.sequence == nextSequence else { break }
+        guard fileManager.fileExists(atPath: candidate.url.path) else { continue }
+        let values = try? candidate.url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        guard values?.isRegularFile == true, (values?.fileSize ?? 0) > 0 else { continue }
+
+        let inspection: DurableAudioFileInspection
+        do {
+          inspection = try inspectAudioFile(candidate.url)
+        } catch {
+          continue
+        }
+        guard inspection.durationMs > 0, inspection.byteLength > 0 else { continue }
+
+        let timestamp = Self.timestamp(clock())
+        session.segments.append(DurableRecordingSegmentMetadata(
+          schemaVersion: durableRecorderSegmentSchemaVersion,
+          segmentId: candidate.segmentId,
+          sequence: candidate.sequence,
+          relativePath: candidate.relativePath,
+          createdAt: timestamp,
+          finalizedAt: timestamp,
+          durationMs: inspection.durationMs,
+          byteLength: inspection.byteLength,
+          container: "m4a",
+          codec: "aac",
+          sampleRate: inspection.sampleRate,
+          channelCount: inspection.channelCount,
+          integrityStatus: "validated",
+          interruptionReason: nil,
+          routeAtStart: nil,
+          routeAtEnd: nil,
+          recoveredAfterRestart: true
+        ))
+        session.updatedAt = timestamp
+        adoptedIssues.append(DurableRecoveryIssue(
+          code: "orphan_finalized_file_adopted",
+          relativePath: candidate.relativePath,
+          segmentId: candidate.segmentId
+        ))
+        nextSequence += 1
+      }
+
+      if !adoptedIssues.isEmpty {
+        try write(session)
+      }
+      return (session, adoptedIssues)
+    }
+  }
+
+  /// When `final/lecture.m4a` exists but `finalAsset` metadata was never written
+  /// (promote-then-crash window), attach metadata without re-exporting.
+  ///
+  /// Requires `state == finalized`. Idempotent when metadata already present.
+  /// Invalid/zero-byte files are not adopted; callers see reconcile issues.
+  func adoptExistingFinalAssetIfPresent(
+    recordingSessionId: String,
+    inspectAudioFile: (URL) throws -> DurableAudioFileInspection
+  ) throws -> (session: DurableRecordingSession, issues: [DurableRecoveryIssue]) {
+    try synchronized {
+      let canonical = try requireCanonicalIdentifier(recordingSessionId)
+      var session = try readSession(canonicalIdentifier: canonical)
+      if session.finalAsset != nil {
+        return (session, [])
+      }
+      guard session.state == .finalized else {
+        return (session, [])
+      }
+      guard !session.segments.isEmpty else {
+        return (session, [])
+      }
+
+      let relativePath = "final/lecture.m4a"
+      let finalURL = sessionURL(forCanonicalIdentifier: canonical)
+        .appendingPathComponent(relativePath, isDirectory: false)
+      guard fileManager.fileExists(atPath: finalURL.path) else {
+        return (session, [])
+      }
+      let values = try finalURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+      guard values.isRegularFile == true, let fileSize = values.fileSize, fileSize > 0 else {
+        return (session, [
+          DurableRecoveryIssue(
+            code: "invalid_orphan_final_asset",
+            relativePath: relativePath,
+            segmentId: nil
+          )
+        ])
+      }
+
+      let inspection: DurableAudioFileInspection
+      do {
+        inspection = try inspectAudioFile(finalURL)
+      } catch {
+        return (session, [
+          DurableRecoveryIssue(
+            code: "invalid_orphan_final_asset",
+            relativePath: relativePath,
+            segmentId: nil
+          )
+        ])
+      }
+      guard inspection.durationMs > 0, inspection.byteLength > 0 else {
+        return (session, [
+          DurableRecoveryIssue(
+            code: "invalid_orphan_final_asset",
+            relativePath: relativePath,
+            segmentId: nil
+          )
+        ])
+      }
+
+      let sourceIds = session.segments.sorted { $0.sequence < $1.sequence }.map(\.segmentId)
+      session.finalAsset = DurableFinalAssetMetadata(
+        relativePath: relativePath,
+        createdAt: Self.timestamp(clock()),
+        durationMs: inspection.durationMs,
+        byteLength: inspection.byteLength,
+        container: "m4a",
+        sourceSegmentIds: sourceIds
+      )
+      session.updatedAt = Self.timestamp(clock())
+      try write(session)
+      return (session, [
+        DurableRecoveryIssue(
+          code: "orphan_final_asset_adopted",
+          relativePath: relativePath,
+          segmentId: nil
+        )
+      ])
     }
   }
 

@@ -101,6 +101,8 @@ working. Guests always resolve to legacy via `forceLegacy`.
 | --- | --- |
 | `recording-adapter` fails on `= 'legacy'` | Gate left on `nativeDurable` after device testing |
 | "A durable source segment is incomplete, missing, or invalid." | Reconciliation hit a blocking issue; inspect `session.json` against `segments/` |
+| Final file exists but Finish re-exports / no handoff | Crash after `promoteFinalAsset` before `commitFinalAsset`; recovery should adopt `final/lecture.m4a` |
+| Segment file on disk missing from metadata | Crash after segment `moveItem` before metadata write; recovery should adopt contiguous orphans |
 | Recovery card never appears | Opened a *new* recording instead of the in-progress lecture; or `handoffCompletedAt` already set |
 | Recovery card appears with nothing to resume | Zero-segment session — intentional, see architecture doc |
 | Final duration ≪ sum of segments | Exporter dropped a segment; check `sourceSegmentIds` ordering |

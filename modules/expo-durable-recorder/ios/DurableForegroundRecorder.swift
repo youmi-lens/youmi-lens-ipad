@@ -344,16 +344,37 @@ final class DurableForegroundRecorder {
       // live owner, quarantine them, then re-reconcile so Resume/Finish see a
       // clean segments directory. Quarantine issues are informational only.
       let hasStalePartial = result.issues.contains { $0.code == "incomplete_temporary_file" }
-      var quarantineIssues: [DurableRecoveryIssue] = []
+      var repairIssues: [DurableRecoveryIssue] = []
       if hasStalePartial {
-        quarantineIssues = try store.quarantineInactivePartialFiles(
+        repairIssues += try store.quarantineInactivePartialFiles(
           recordingSessionId: recordingSessionId
         )
-        result = try store.reconcileSession(recordingSessionId: recordingSessionId) { [fileInspector] url in
-          (try? fileInspector.inspect(url: url)) != nil
-        }
-        session = result.session
       }
+
+      // Re-attach segment files that were moved but never recorded in metadata,
+      // then attach final/lecture.m4a metadata when the promote-then-crash window
+      // left a valid final file without finalAsset.
+      let segmentAdoption = try store.adoptOrphanFinalizedSegments(
+        recordingSessionId: recordingSessionId
+      ) { [fileInspector] url in
+        try fileInspector.inspect(url: url)
+      }
+      repairIssues += segmentAdoption.issues
+      session = segmentAdoption.session
+
+      let finalAdoption = try store.adoptExistingFinalAssetIfPresent(
+        recordingSessionId: recordingSessionId
+      ) { [fileInspector] url in
+        try fileInspector.inspect(url: url)
+      }
+      repairIssues += finalAdoption.issues
+      session = finalAdoption.session
+
+      result = try store.reconcileSession(recordingSessionId: recordingSessionId) { [fileInspector] url in
+        (try? fileInspector.inspect(url: url)) != nil
+      }
+      session = result.session
+
       if !session.state.isTerminal {
         // Recovery does not claim ownership. Resume claims when the user
         // continues capture; Finish claims via claimForFinalization.
@@ -361,7 +382,7 @@ final class DurableForegroundRecorder {
       }
       return DurableRecoveryResult(
         session: session,
-        issues: result.issues + quarantineIssues
+        issues: result.issues + repairIssues
       )
     }
   }
