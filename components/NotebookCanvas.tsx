@@ -24,7 +24,18 @@ import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Haptics from 'expo-haptics';
 import * as ImagePicker from 'expo-image-picker';
-import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import {
+  forwardRef,
+  memo,
+  useCallback,
+  useEffect,
+  useId,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import {
   Alert,
   Animated,
@@ -61,9 +72,17 @@ import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
 import type { NoteImage, NotePoint, NoteStroke } from '@/lib/models';
 import { useT } from '@/lib/i18n';
 import {
+  appendStrokePoint,
+  NOTEBOOK_MIN_POINT_DISTANCE,
+  strokeToPath,
+} from '@/lib/notebookStroke';
+import {
   addPencilDoubleTapListener,
   isPencilDoubleTapAvailable,
 } from '@/lib/pencilInteraction';
+
+/** Re-export for callers/tests that historically imported path helpers from this module. */
+export { strokeToPath } from '@/lib/notebookStroke';
 
 const PEN_COLORS: { key: string; value: string }[] = [
   { key: 'Charcoal', value: '#222630' },
@@ -119,7 +138,7 @@ const ERASER_SIZES: { key: EraserSizeKey; label: string; radius: number }[] = [
 
 const LINE_GAP = 34;
 const MARGIN_X = 56;
-const MIN_POINT_DISTANCE = 1.8;
+const MIN_POINT_DISTANCE = NOTEBOOK_MIN_POINT_DISTANCE;
 /**
  * Page-based paper. The notebook is a vertical stack of A4-like sheets in one
  * continuous coordinate space: a stroke/image at canvas-y N belongs to the sheet
@@ -457,24 +476,6 @@ function strokeNearPoint(stroke: NoteStroke, x: number, y: number, eraserRadius:
   return false;
 }
 
-/** Build a smooth SVG path (quadratic midpoints) from freehand points. */
-export function strokeToPath(points: NotePoint[]): string {
-  if (points.length === 0) return '';
-  if (points.length === 1) {
-    const p = points[0];
-    return `M ${p.x} ${p.y} L ${p.x + 0.1} ${p.y}`;
-  }
-  let d = `M ${points[0].x} ${points[0].y}`;
-  for (let i = 1; i < points.length - 1; i += 1) {
-    const midX = (points[i].x + points[i + 1].x) / 2;
-    const midY = (points[i].y + points[i + 1].y) / 2;
-    d += ` Q ${points[i].x} ${points[i].y} ${midX} ${midY}`;
-  }
-  const last = points[points.length - 1];
-  d += ` L ${last.x} ${last.y}`;
-  return d;
-}
-
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
@@ -539,8 +540,11 @@ function toolbarRect(
  * One rendered stroke. A single-point stroke (a tap) is drawn as a small dot,
  * a multi-point stroke as a smooth path. Each stroke is its own SVG node with
  * its own points, so distinct strokes can never visually connect.
+ *
+ * Memoized so completed strokes do not rebuild SVG path strings when only the
+ * active stroke's points change.
  */
-function StrokeShape({
+const StrokeShape = memo(function StrokeShape({
   stroke,
 }: {
   stroke: { points: NotePoint[]; color: string; width: number; tool?: 'pen' | 'highlighter'; opacity?: number };
@@ -564,7 +568,175 @@ function StrokeShape({
       fill="none"
     />
   );
-}
+});
+
+type ActiveInkHandle = {
+  begin: (point: NotePoint) => void;
+  append: (point: NotePoint) => void;
+  clear: () => void;
+  getPoints: () => NotePoint[];
+};
+
+type ActiveInkHostProps = {
+  canvasHeight: number;
+  tool: 'pen' | 'highlighter';
+  color: string;
+  width: number;
+  opacity: number;
+};
+
+/**
+ * Live ink only. Owns its own React state so each Pencil sample updates this
+ * overlay without re-rendering the parent canvas, toolbar, or completed strokes.
+ * Points accumulate in a ref (in-place push) to avoid O(n) array copies per event.
+ */
+const ActiveInkHost = memo(
+  forwardRef<ActiveInkHandle, ActiveInkHostProps>(function ActiveInkHost(
+    { canvasHeight, tool, color, width, opacity },
+    ref,
+  ) {
+    const pointsRef = useRef<NotePoint[]>([]);
+    const [revision, setRevision] = useState(0);
+
+    useImperativeHandle(
+      ref,
+      () => ({
+        begin(point: NotePoint) {
+          pointsRef.current = [point];
+          setRevision((value) => value + 1);
+        },
+        append(point: NotePoint) {
+          if (!appendStrokePoint(pointsRef.current, point, MIN_POINT_DISTANCE)) return;
+          setRevision((value) => value + 1);
+        },
+        clear() {
+          if (pointsRef.current.length === 0) return;
+          pointsRef.current = [];
+          setRevision((value) => value + 1);
+        },
+        getPoints() {
+          return pointsRef.current;
+        },
+      }),
+      [],
+    );
+
+    // revision is the render trigger; points live in the ref.
+    void revision;
+    const points = pointsRef.current;
+    if (points.length === 0) {
+      return <View style={StyleSheet.absoluteFill} pointerEvents="none" />;
+    }
+
+    return (
+      <View style={StyleSheet.absoluteFill} pointerEvents="none">
+        <Svg width="100%" height={canvasHeight}>
+          <StrokeShape
+            // New stroke props object each revision so memoized StrokeShape updates
+            // even though points accumulate by mutating one array in place.
+            stroke={{ points, tool, color, width, opacity }}
+          />
+        </Svg>
+      </View>
+    );
+  }),
+);
+
+type CompletedStrokeLayerProps = {
+  canvasHeight: number;
+  unselectedShapes: ReactNode;
+  selectedShapes: ReactNode;
+  selectionMoveOffset: NotePoint;
+  erasePoint: NotePoint | null;
+  eraserRadius: number;
+  showEraseCursor: boolean;
+  lassoPoints: NotePoint[];
+  showLasso: boolean;
+  selectionRect: NotebookOverlayRect | null;
+  showSelectionRect: boolean;
+  selectionBounds: { x: number; y: number; w: number; h: number } | null;
+  showSelectionBounds: boolean;
+};
+
+/** Stable SVG layer for committed ink + selection chrome (not live pen samples). */
+const CompletedStrokeLayer = memo(function CompletedStrokeLayer({
+  canvasHeight,
+  unselectedShapes,
+  selectedShapes,
+  selectionMoveOffset,
+  erasePoint,
+  eraserRadius,
+  showEraseCursor,
+  lassoPoints,
+  showLasso,
+  selectionRect,
+  showSelectionRect,
+  selectionBounds,
+  showSelectionBounds,
+}: CompletedStrokeLayerProps) {
+  return (
+    <View style={StyleSheet.absoluteFill} pointerEvents="none">
+      <Svg width="100%" height={canvasHeight}>
+        {unselectedShapes}
+        <G translateX={selectionMoveOffset.x} translateY={selectionMoveOffset.y}>
+          {selectedShapes}
+        </G>
+        {showEraseCursor && erasePoint ? (
+          <>
+            <Circle
+              cx={erasePoint.x}
+              cy={erasePoint.y}
+              r={eraserRadius}
+              stroke="rgba(6, 27, 52, 0.88)"
+              strokeWidth={2}
+              fill="rgba(120, 214, 255, 0.22)"
+            />
+            <Circle
+              cx={erasePoint.x}
+              cy={erasePoint.y}
+              r={2.4}
+              fill="rgba(6, 27, 52, 0.88)"
+            />
+          </>
+        ) : null}
+        {showLasso && lassoPoints.length > 1 ? (
+          <Path
+            d={`M ${lassoPoints.map((p) => `${p.x} ${p.y}`).join(' L ')} Z`}
+            stroke="#5F86E8"
+            strokeWidth={1.6}
+            strokeDasharray="5 3"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            fill="rgba(95,134,232,0.08)"
+          />
+        ) : null}
+        {showSelectionRect && selectionRect ? (
+          <Rect
+            x={selectionRect.x}
+            y={selectionRect.y}
+            width={selectionRect.width}
+            height={selectionRect.height}
+            rx={3}
+            stroke="#5F86E8"
+            strokeWidth={1.6}
+            strokeDasharray="6 4"
+            fill="rgba(95,134,232,0.08)"
+          />
+        ) : null}
+        {showSelectionBounds && selectionBounds ? (
+          <Path
+            d={`M ${selectionBounds.x + selectionMoveOffset.x} ${selectionBounds.y + selectionMoveOffset.y} h ${selectionBounds.w} v ${selectionBounds.h} h ${-selectionBounds.w} Z`}
+            stroke="#5F86E8"
+            strokeWidth={1.5}
+            strokeDasharray="6 3"
+            strokeLinecap="round"
+            fill="rgba(95,134,232,0.06)"
+          />
+        ) : null}
+      </Svg>
+    </View>
+  );
+});
 
 type ToolbarGlyphName =
   | 'pen'
@@ -1038,7 +1210,7 @@ function ModeIconBase({
 }
 
 // Memoized pure presentational components. The canvas re-renders on every
-// drawing frame (setCurrentPoints) and on every tool/toolbar state change;
+// drawing frame (ActiveInkHost) and on every tool/toolbar state change;
 // these leaves take stable props, so memo keeps each render from reconciling
 // the whole toolbar (SVG glyphs, navy gradient) and every image object.
 const ToolbarGlyph = memo(ToolbarGlyphBase);
@@ -1105,7 +1277,6 @@ export function NotebookCanvas({
   const [toolbarPreferencesLoaded, setToolbarPreferencesLoaded] = useState(false);
   const eraserRadius = ERASER_SIZES.find((option) => option.key === eraserSizeKey)?.radius ?? 26;
   const [, setTemporaryEraser] = useState(false);
-  const [currentPoints, setCurrentPoints] = useState<NotePoint[]>([]);
   const [erasedIds, setErasedIds] = useState<string[]>([]);
   const [erasePoint, setErasePoint] = useState<NotePoint | null>(null);
   /**
@@ -1170,11 +1341,10 @@ export function NotebookCanvas({
   /** True between a Pencil touch-down and the drawing gesture finishing. */
   const drawingRef = useRef(false);
   /**
-   * Authoritative in-progress stroke points. Held in a ref so the gesture
-   * callbacks read and commit them synchronously; `currentPoints` state mirrors
-   * it only for rendering. Every stroke starts this from scratch.
+   * Live ink host — owns active-stroke React state so parent canvas / completed
+   * strokes do not re-render on every Pencil sample.
    */
-  const currentPointsRef = useRef<NotePoint[]>([]);
+  const activeInkRef = useRef<ActiveInkHandle>(null);
   /**
    * id of the touch that started the live stroke. Only that touch lifting ends
    * the stroke — a resting palm or any other touch is ignored.
@@ -2158,10 +2328,10 @@ export function NotebookCanvas({
     onImagesChangeRef.current(newImages);
   }, [recordHistory]);
 
-  // Commit the in-progress stroke (read synchronously from the ref) as its own
-  // new stroke, then clear it. A 1-point stroke is kept — it renders as a dot.
+  // Commit the in-progress stroke (read synchronously from the active-ink host)
+  // as its own new stroke, then clear it. A 1-point stroke is kept — it renders as a dot.
   const commitStroke = useCallback(() => {
-    const pts = currentPointsRef.current;
+    const pts = activeInkRef.current?.getPoints() ?? [];
     if (pts.length > 0) {
       const isHighlighter = modeRef.current === 'highlight';
       const stroke: NoteStroke = {
@@ -2170,14 +2340,14 @@ export function NotebookCanvas({
         color: isHighlighter ? highlighterColorRef.current : penColorRef.current,
         width: isHighlighter ? highlighterWidthRef.current : penWidthRef.current,
         opacity: isHighlighter ? 0.34 : 1,
-        points: pts,
+        // Copy on commit so later ActiveInk clears cannot mutate the saved stroke.
+        points: pts.map((point) => ({ ...point })),
         createdAt: new Date().toISOString(),
       };
       recordHistory();
       onStrokesChangeRef.current([...strokesRef.current, stroke]);
     }
-    currentPointsRef.current = [];
-    setCurrentPoints([]);
+    activeInkRef.current?.clear();
   }, [recordHistory]);
 
   // Erase any not-yet-erased stroke whose path passes within the eraser
@@ -2239,7 +2409,7 @@ export function NotebookCanvas({
   const abortStroke = useCallback(() => {
     drawingRef.current = false;
     activeTouchIdRef.current = null;
-    currentPointsRef.current = [];
+    activeInkRef.current?.clear();
     erasedIdsRef.current = [];
     selectActionRef.current = 'idle';
     lassoPointsRef.current = [];
@@ -2248,7 +2418,6 @@ export function NotebookCanvas({
     selectionMoveOffsetRef.current = { x: 0, y: 0 };
     imageGestureStartRef.current = null;
     setStylusStrokeActive(false);
-    setCurrentPoints([]);
     setErasePoint(null);
     setErasedIds([]);
     setLassoPoints([]);
@@ -2370,8 +2539,7 @@ export function NotebookCanvas({
 
           if (activeMode === 'write' || activeMode === 'highlight') {
             // A brand-new stroke — its point list starts from scratch.
-            currentPointsRef.current = [point];
-            setCurrentPoints([point]);
+            activeInkRef.current?.begin(point);
           } else {
             erasedIdsRef.current = [];
             setErasePoint(point);
@@ -2410,17 +2578,7 @@ export function NotebookCanvas({
           }
 
           if (modeRef.current === 'write' || modeRef.current === 'highlight') {
-            const pts = currentPointsRef.current;
-            const last = pts[pts.length - 1];
-            if (
-              last &&
-              Math.hypot(point.x - last.x, point.y - last.y) < MIN_POINT_DISTANCE
-            ) {
-              return;
-            }
-            const next = [...pts, point];
-            currentPointsRef.current = next;
-            setCurrentPoints(next);
+            activeInkRef.current?.append(point);
           } else if (modeRef.current === 'erase') {
             setErasePoint(point);
             eraseAt(point.x, point.y);
@@ -2820,7 +2978,8 @@ export function NotebookCanvas({
     [],
   );
 
-  const isEmpty = strokes.length === 0 && currentPoints.length === 0 && text.length === 0 && images.length === 0;
+  const isEmpty =
+    strokes.length === 0 && !stylusStrokeActive && text.length === 0 && images.length === 0;
 
   const handleContainerLayout = (event: LayoutChangeEvent) => {
     const { width, height } = event.nativeEvent.layout;
@@ -3196,81 +3355,32 @@ export function NotebookCanvas({
             );
           })}
 
-          {/* Handwriting + selection overlay (never captures touches) */}
-          <View style={StyleSheet.absoluteFill} pointerEvents="none">
-            <Svg width="100%" height={canvasHeight}>
-              {unselectedShapes}
-              {/* Selected strokes rendered inside a translate group during move. */}
-              <G translateX={selectionMoveOffset.x} translateY={selectionMoveOffset.y}>
-                {selectedShapes}
-              </G>
-              {currentPoints.length > 0 ? (
-                <StrokeShape
-                  stroke={{
-                    points: currentPoints,
-                    tool: mode === 'highlight' ? 'highlighter' : 'pen',
-                    color: mode === 'highlight' ? highlighterColor : penColor,
-                    width: mode === 'highlight' ? highlighterWidth : penWidth,
-                    opacity: mode === 'highlight' ? 0.34 : 1,
-                  }}
-                />
-              ) : null}
-              {mode === 'erase' && erasePoint ? (
-                <>
-                  <Circle
-                    cx={erasePoint.x}
-                    cy={erasePoint.y}
-                    r={eraserRadius}
-                    stroke="rgba(6, 27, 52, 0.88)"
-                    strokeWidth={2}
-                    fill="rgba(120, 214, 255, 0.22)"
-                  />
-                  <Circle
-                    cx={erasePoint.x}
-                    cy={erasePoint.y}
-                    r={2.4}
-                    fill="rgba(6, 27, 52, 0.88)"
-                  />
-                </>
-              ) : null}
-              {/* Lasso path while drawing */}
-              {mode === 'select' && lassoPoints.length > 1 ? (
-                <Path
-                  d={`M ${lassoPoints.map((p) => `${p.x} ${p.y}`).join(' L ')} Z`}
-                  stroke="#5F86E8"
-                  strokeWidth={1.6}
-                  strokeDasharray="5 3"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  fill="rgba(95,134,232,0.08)"
-                />
-              ) : null}
-              {mode === 'select' && selectionRect ? (
-                <Rect
-                  x={selectionRect.x}
-                  y={selectionRect.y}
-                  width={selectionRect.width}
-                  height={selectionRect.height}
-                  rx={3}
-                  stroke="#5F86E8"
-                  strokeWidth={1.6}
-                  strokeDasharray="6 4"
-                  fill="rgba(95,134,232,0.08)"
-                />
-              ) : null}
-              {/* Selection bounding box */}
-              {selectionBounds && mode === 'select' ? (
-                <Path
-                  d={`M ${selectionBounds.x + selectionMoveOffset.x} ${selectionBounds.y + selectionMoveOffset.y} h ${selectionBounds.w} v ${selectionBounds.h} h ${-selectionBounds.w} Z`}
-                  stroke="#5F86E8"
-                  strokeWidth={1.5}
-                  strokeDasharray="6 3"
-                  strokeLinecap="round"
-                  fill="rgba(95,134,232,0.06)"
-                />
-              ) : null}
-            </Svg>
-          </View>
+          {/* Handwriting + selection overlay (never captures touches).
+              Completed ink is memoized separately from live ActiveInkHost so
+              each Pencil sample does not rebuild every committed path. */}
+          <CompletedStrokeLayer
+            canvasHeight={canvasHeight}
+            unselectedShapes={unselectedShapes}
+            selectedShapes={selectedShapes}
+            selectionMoveOffset={selectionMoveOffset}
+            erasePoint={erasePoint}
+            eraserRadius={eraserRadius}
+            showEraseCursor={mode === 'erase'}
+            lassoPoints={lassoPoints}
+            showLasso={mode === 'select'}
+            selectionRect={selectionRect}
+            showSelectionRect={mode === 'select'}
+            selectionBounds={selectionBounds}
+            showSelectionBounds={mode === 'select'}
+          />
+          <ActiveInkHost
+            ref={activeInkRef}
+            canvasHeight={canvasHeight}
+            tool={mode === 'highlight' ? 'highlighter' : 'pen'}
+            color={mode === 'highlight' ? highlighterColor : penColor}
+            width={mode === 'highlight' ? highlighterWidth : penWidth}
+            opacity={mode === 'highlight' ? 0.34 : 1}
+          />
 
           {/* Floating action bar for the selected object (e.g. an image) — a compact
               dark capsule pinned directly above the selection, like Apple Notes /

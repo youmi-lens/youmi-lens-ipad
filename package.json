@@ -11,6 +11,7 @@
     "lint": "expo lint",
     "test:phase3": "node scripts/phase3-purchases.test.mjs",
     "test:recording": "node scripts/verify-recording.mjs",
+    "test:notebook": "node --experimental-strip-types scripts/notebook-stroke.test.mjs",
     "verify:recording": "node scripts/verify-recording.mjs",
     "release:recording": "node scripts/verify-release.mjs",
     "release:recording:fast": "node scripts/verify-release.mjs --fast"
