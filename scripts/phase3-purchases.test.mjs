@@ -180,6 +180,6 @@ assert.equal(storekit.products[0].displayPrice, '4.99');
 assert.equal(storekit.products[1].productID, legacyProductId);
 assert.equal(storekit.products[1].type, 'NonConsumable');
 assert.equal(appConfig.expo.version, '0.1.6');
-assert.equal(appConfig.expo.ios.buildNumber, '37');
+assert.equal(appConfig.expo.ios.buildNumber, '38');
 
 console.log('Phase 3 purchase hardening tests passed.');
