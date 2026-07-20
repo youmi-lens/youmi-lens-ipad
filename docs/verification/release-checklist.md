@@ -94,12 +94,17 @@ no user is enrolled. A release build must never set that flag. Activation steps:
 
 | Gate | Status |
 | --- | --- |
-| Automated recording suite | Passing |
-| Physical native normal flow | Passed |
-| Physical pre-termination durability (SIGKILL, byte-identical) | Passed |
+| Automated recording suite | Passing (17/17 as of R5/R6 baseline) |
+| Simulator build + launch with dogfood env | Passed (R6) |
+| Physical iPad Debug install + launch with dogfood env | Passed (R6) |
+| Interactive Simulator native scenarios (S1–S7) | **Blocked — Guest session forces legacy** |
+| Physical checkpoint-boundary audio (P2) | **Not performed — no UI automation / operator pass** |
+| Physical force-kill / forced-pause / long-duration (P4–P8) | **Not performed** |
 | Physical resume-from-recovery | **Deferred — not yet run** |
 | Physical discard | **Deferred — not yet run** |
+| R6 readiness | **NOT READY** — see [r6-device-verification.md](r6-device-verification.md) |
 
-Deferred means not executed, not failed. Both are covered automatically by
-`durable-recorder-recovery.test.mjs`; the physical run is the final
-hardware-level confirmation before rollout.
+Deferred / blocked means not executed or not executable in the agent session,
+not that the feature failed. Automated coverage remains in
+`durable-recorder-*.test.mjs` / Swift harnesses; hardware listening is still
+required before any production engine flip.
