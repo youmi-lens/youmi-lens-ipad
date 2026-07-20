@@ -2,6 +2,7 @@
 
 Date: 2026-07-20  
 Base commit: `e99c08ca3cc165c49c63f4562d7b82f9d6693567` (R5 checkpoint)  
+Docs update (checkpoint PASS): after manual physical iPad test the same day  
 Production engine (committed): `legacy` (`CONFIGURED_RECORDING_ENGINE`)
 
 ## Purpose
@@ -45,7 +46,7 @@ Notes:
 - `npx expo run:ios --device <coredevice-uuid>` failed (devicectl JSON version /
   UDID matching). Device install used `xcodebuild` + `devicectl device install app`.
 - Metro showed a signed-in store fetch on the physical device after launch.
-- Simulator session observed as **Guest** (native engine unavailable).
+- Simulator session observed as **Guest** (native engine unavailable for S1–S7).
 
 ## Scenario matrix
 
@@ -61,66 +62,98 @@ Notes:
 | S6 | Cold recovery + direct Finish | **blocked** |
 | S7 | Recovery + Resume | **blocked** |
 
-### Physical iPad (signed-in session present; no UI automation)
+### Physical iPad
 
 | ID | Scenario | Result |
 | --- | --- | --- |
-| P1 | Real microphone basic recording | **blocked** — no remote UI automation (no Maestro/idb/WDA) |
-| P2 | Audible checkpoint-boundary | **blocked** |
-| P3 | Pause/Resume after checkpoints | **blocked** |
-| P4 | App background forced pause | **blocked** |
-| P5 | Force-kill bounded-loss | **blocked** |
-| P6 | Interruption | **blocked** |
-| P7 | Route change | **blocked** |
-| P8 | Long-duration stability | **blocked** / **not performed** |
-| P9 | Repeated sessions | **blocked** |
+| P1 | Real microphone basic recording | **passed** — native durable capture started via dogfood override |
+| P2 | Audible checkpoint-boundary | **passed** — see below |
+| P3 | Pause/Resume after checkpoints | **not performed** |
+| P4 | App background forced pause | **not performed** |
+| P5 | Force-kill bounded-loss (direct Finish / Resume) | **not performed** |
+| P6 | Interruption | **not performed** |
+| P7 | Route change | **not performed** |
+| P8 | Long-duration stability (≥10 min) | **not performed** |
+| P9 | Repeated sessions (≥3 sequential) | **not performed** |
 
-Deep link `youmilens://recording` was attempted; Metro did not show a native
-recording start diagnostic, so interactive capture was not confirmed.
+The full R6 matrix is **not** complete. Remaining rows above are still required
+before any **production-candidate** classification.
 
-## Filesystem evidence (pre-existing device sessions)
+## Physical checkpoint-continuity test (completed)
 
-Device already contains `Library/Application Support/YoumiLens/DurableRecorder/sessions/`
-from earlier dogfood (2026-07-19). Example finalized session
-`fb7bddf4-…`:
+Operator-driven recording on the physical iPad with the native durable recorder
+(dogfood override only):
 
-- segments: sequence `1` (4480 ms), `2` (9031 ms)
-- `finalAsset.durationMs`: 13511
-- `handoffCompletedAt`: set
-- no `interruptionReason: "checkpoint"` (pre-R5 capture)
+- Native recording started successfully.
+- Capture continued across **at least two** real **60-second** checkpoint
+  boundaries.
+- UI remained in the recording state throughout.
+- Timer remained continuous (no reset / pause flicker at checkpoints).
+- No visible pause/resume animation at checkpoint boundaries.
+- Finish completed successfully.
+- Final exported audio played successfully.
 
-These prove prior native durable storage on device, **not** R5 checkpoint
-continuity on 2026-07-20.
+Listening around the approximate **60 s** and **120 s** boundaries:
+
+- no obvious missing speech;
+- no obvious duplicated speech;
+- no obvious silent gap;
+- no obvious truncation;
+- no unacceptable audible artifact.
+
+### Checkpoint continuity result
+
+**PASS** — no perceptible user-facing continuity issue was observed in this
+manual physical iPad test.
+
+This is not a sample-perfect continuity claim; it is a listening PASS for the
+boundaries exercised in that session.
+
+## Filesystem evidence (earlier device sessions)
+
+Device also contains older
+`Library/Application Support/YoumiLens/DurableRecorder/sessions/` entries from
+2026-07-19 dogfood (pre-R5 checkpoint tagging). Those remain historical context
+only; the continuity PASS above is from the 2026-07-20 operator listening test.
 
 ## Audio continuity decision
 
-**INCONCLUSIVE** — physical checkpoint-boundary listening was not performed.
+**PASS** (physical checkpoint boundaries at ~60 s and ~120 s in the completed
+manual test).
 
 ## Readiness
 
-**NOT READY** for dogfood/production activation pending:
+**DOGFOOD READY**
 
-1. Signed-in Simulator or operator-driven physical run of S1–S7 / P1–P9.
-2. Explicit PASS or CONDITIONAL PASS on audible checkpoint boundaries at the
-   committed 60s interval.
-3. Force-kill bounded-loss + forced-pause UI sync on device.
-4. At least one meaningful long-duration recording (≥10 minutes preferred).
+Reason:
+
+- automated R1–R5 suites pass;
+- Simulator and physical-device build/install/launch pass;
+- real physical iPad recording passed multiple checkpoint boundaries;
+- final audio was playable;
+- no perceptible checkpoint discontinuity was observed;
+- remaining scenarios (force-kill Finish/Resume, background forced pause,
+  interruption/route-change, ≥10-minute recording, three sequential sessions)
+  are still required before **production-candidate** readiness.
+
+**Not** production-candidate ready. Do not flip `CONFIGURED_RECORDING_ENGINE`.
 
 ## Production confirmation
 
-`CONFIGURED_RECORDING_ENGINE = 'legacy'` unchanged. No rollout flags enabled in
-committed sources. No push. No R7.
+- `CONFIGURED_RECORDING_ENGINE` remains `'legacy'`.
+- Production default is unchanged.
+- Native recorder is enabled only through local/dogfood override
+  (`EXPO_PUBLIC_NATIVE_RECORDER_DOGFOOD=1` in gitignored `.env.local`).
+- No R7 activation occurred.
+- No push occurred.
 
-## How to finish R6 manually (operator)
+## Remaining operator checklist (before production-candidate)
 
-With Metro running and `.env.local` dogfood `=1`, on the physical iPad (signed in):
-
-1. Confirm console shows `[recorder] diagnostics` with `engine: nativeDurable`,
-   `source: internal_dogfood`.
-2. Record through ≥3 real 60s checkpoints with continuous speech/counting.
-3. Finish; listen at ~60s / ~120s / ~180s boundaries.
-4. Background forced-pause; Resume; Finish.
-5. Force-quit mid-segment after ≥1 checkpoint; relaunch via **in-progress lecture**;
-   direct Finish; then a second pass with Resume.
-6. Record ≥10 minutes uninterrupted; Finish; spot-check begin/middle/end.
-7. Update this file’s scenario matrix and readiness classification.
+1. Force-quit mid-segment after ≥1 checkpoint; relaunch via **in-progress lecture**;
+   **direct Finish** without Resume.
+2. Same kill path with **Resume**, then Finish.
+3. Background the app during recording; confirm forced pause + UI/timer stop;
+   manual Resume; Finish.
+4. Practical interruption and/or route-change pass.
+5. Uninterrupted recording ≥10 minutes; Finish; spot-check begin/middle/end.
+6. Three sequential native durable sessions; each Finishes and plays cleanly.
