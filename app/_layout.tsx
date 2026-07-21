@@ -130,6 +130,7 @@ function AuthGate() {
         <Stack.Screen name="mini-caption" options={{ animation: 'fade' }} />
         <Stack.Screen name="processing" />
         <Stack.Screen name="lecture/[id]" />
+        <Stack.Screen name="lecture/[id]/summary-edit" />
         <Stack.Screen name="course/[id]" />
         <Stack.Screen name="recently-deleted" />
         <Stack.Screen name="plans" />

@@ -155,6 +155,12 @@ export type Lecture = {
   summaryEn?: string;
   /** Legacy Chinese summary (kept for backward compatibility + language-based mirroring). */
   summaryZh?: string;
+  /**
+   * ISO timestamp of the last local Summary edit. Cloud merge keeps local
+   * summary fields when this is fresher than the remote row's updated_at,
+   * so a manual edit is not reverted by a stale AI summary.
+   */
+  summaryUpdatedAt?: string;
   keyPoints: string[];
   /** Draft transcript captured from live captions during recording, when available. */
   liveTranscript?: string;

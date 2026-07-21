@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
-import { useLocalSearchParams, useRouter } from 'expo-router';
-import { ComponentProps, useState } from 'react';
+import { Href, useLocalSearchParams, useRouter } from 'expo-router';
+import { ComponentProps, type ReactNode, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -27,15 +27,17 @@ import { exportLectureNotesPdf, hasExportableLectureNotes } from '@/lib/exportLe
 import { formatClock, formatDate, formatDuration } from '@/lib/format';
 import { useI18n, localizeSystemDefaultTitle } from '@/lib/i18n';
 import {
-  getSourceSummary,
   getSourceTranscript,
   getSummarySectionLabel,
   getTranscriptSectionLabel,
-  getTranslatedSummary,
   getTranslatedTranscript,
 } from '@/lib/languageContent';
 import { resolveLectureLanguagePair, shouldTranslate } from '@/lib/contentLanguages.mjs';
 import type { NoteStroke } from '@/lib/models';
+import {
+  getEditableSummaryText,
+  hasUserEditedSummary,
+} from '@/lib/summaryEdit.mjs';
 import {
   SUMMARY_CARD_STYLE,
   SUMMARY_PAGE_SCROLL_STYLE,
@@ -49,13 +51,22 @@ const TABS = ['Summary', 'Transcript', 'Marked', 'Notes'] as const;
 type Tab = (typeof TABS)[number];
 
 /** A study-note style block header: icon tile + label. */
-function BlockHeader({ icon, label }: { icon: IoniconName; label: string }) {
+function BlockHeader({
+  icon,
+  label,
+  trailing,
+}: {
+  icon: IoniconName;
+  label: string;
+  trailing?: ReactNode;
+}) {
   return (
     <View style={styles.blockHeader}>
       <View style={styles.blockIcon}>
         <Ionicons name={icon} size={15} color={colors.textPrimary} />
       </View>
       <Text style={styles.blockLabel}>{label}</Text>
+      {trailing ? <View style={styles.blockTrailing}>{trailing}</View> : null}
     </View>
   );
 }
@@ -107,9 +118,18 @@ export default function LectureDetailScreen() {
   const hasTranslation = shouldTranslate(sourceLanguage, translationLanguage);
   const sourceTranscript = getSourceTranscript(lecture);
   const translatedTranscript = getTranslatedTranscript(lecture);
-  const sourceSummary = getSourceSummary(lecture);
-  const translatedSummary = getTranslatedSummary(lecture);
-  const summariesReady = Boolean(sourceSummary && (!hasTranslation || translatedSummary));
+  const sourceSummary = getEditableSummaryText(lecture, 'source');
+  const translatedSummary = getEditableSummaryText(lecture, 'translated');
+  const summariesReady =
+    Boolean(sourceSummary.trim()) && (!hasTranslation || Boolean(translatedSummary.trim()))
+    || hasUserEditedSummary(lecture)
+    || lecture.processingStatus === 'ready';
+  const canEditSummaries = summariesReady || hasUserEditedSummary(lecture) || lecture.processingStatus === 'ready';
+
+  const openSummaryEditor = (side: 'source' | 'translated') => {
+    if (!canEditSummaries) return;
+    router.push(`/lecture/${lecture.id}/summary-edit?side=${side}` as Href);
+  };
   const cjk = (lang: string) => lang === 'zh-Hans' || lang === 'ja' || lang === 'ko';
   const typedNotes = lecture.notes.trim();
   const strokeCount = lecture.noteStrokes?.length ?? 0;
@@ -299,19 +319,49 @@ export default function LectureDetailScreen() {
           {/* ---- Summary — source language, then translation when source != target ---- */}
           {tab === 'Summary' && (
             <View style={styles.summaryStack}>
-              <GlassCard style={styles.summaryCard}>
-                <BlockHeader icon="language-outline" label={getSummarySectionLabel(sourceLanguage)} />
-                {summariesReady && sourceSummary ? (
-                  <Text style={[styles.bodyText, cjk(sourceLanguage) && styles.bodyZh]}>{sourceSummary}</Text>
+              <GlassCard
+                style={styles.summaryCard}
+                onPress={canEditSummaries ? () => openSummaryEditor('source') : undefined}
+              >
+                <BlockHeader
+                  icon="language-outline"
+                  label={getSummarySectionLabel(sourceLanguage)}
+                  trailing={
+                    canEditSummaries ? (
+                      <Ionicons name="create-outline" size={16} color={colors.textTertiary} />
+                    ) : null
+                  }
+                />
+                {canEditSummaries ? (
+                  sourceSummary.trim() ? (
+                    <Text style={[styles.bodyText, cjk(sourceLanguage) && styles.bodyZh]}>{sourceSummary}</Text>
+                  ) : (
+                    <Text style={styles.emptyInline}>{t('lecture.summaryEmpty')}</Text>
+                  )
                 ) : (
                   <Text style={styles.emptyInline}>{t('lecture.summaryPending')}</Text>
                 )}
               </GlassCard>
               {hasTranslation ? (
-                <GlassCard style={styles.summaryCard}>
-                  <BlockHeader icon="chatbubbles-outline" label={getSummarySectionLabel(translationLanguage)} />
-                  {summariesReady && translatedSummary ? (
-                    <Text style={[styles.bodyText, cjk(translationLanguage) && styles.bodyZh]}>{translatedSummary}</Text>
+                <GlassCard
+                  style={styles.summaryCard}
+                  onPress={canEditSummaries ? () => openSummaryEditor('translated') : undefined}
+                >
+                  <BlockHeader
+                    icon="chatbubbles-outline"
+                    label={getSummarySectionLabel(translationLanguage)}
+                    trailing={
+                      canEditSummaries ? (
+                        <Ionicons name="create-outline" size={16} color={colors.textTertiary} />
+                      ) : null
+                    }
+                  />
+                  {canEditSummaries ? (
+                    translatedSummary.trim() ? (
+                      <Text style={[styles.bodyText, cjk(translationLanguage) && styles.bodyZh]}>{translatedSummary}</Text>
+                    ) : (
+                      <Text style={styles.emptyInline}>{t('lecture.summaryEmpty')}</Text>
+                    )
                   ) : (
                     <Text style={styles.emptyInline}>{t('lecture.summaryPending')}</Text>
                   )}
@@ -735,6 +785,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.sm,
     marginBottom: spacing.lg,
+  },
+  blockTrailing: {
+    marginLeft: 'auto',
   },
   blockIcon: {
     width: 30,

@@ -397,10 +397,24 @@ function mergeRemoteRecordingsIntoStore(
     const transcript = keepLocalIfRemoteContentEmpty(row.transcript, local?.transcript);
     const transcriptZh = keepLocalIfRemoteContentEmpty(row.transcript_zh, local?.transcriptZh);
     const translatedTranscript = keepLocalIfRemoteContentEmpty(row.translated_transcript, local?.translatedTranscript);
-    const summaryEn = keepLocalIfRemoteContentEmpty(row.summary_en, local?.summaryEn);
-    const summaryZh = keepLocalIfRemoteContentEmpty(row.summary_zh, local?.summaryZh);
-    const sourceSummary = keepLocalIfRemoteContentEmpty(row.source_summary, local?.sourceSummary);
-    const translatedSummary = keepLocalIfRemoteContentEmpty(row.translated_summary, local?.translatedSummary);
+    // Summary freshness: after a local manual edit, keep local summary fields
+    // until a newer remote row arrives (same pattern as titleUpdatedAt).
+    const localSummaryUpdatedAt = local?.summaryUpdatedAt;
+    const preferLocalSummary =
+      Boolean(localSummaryUpdatedAt) &&
+      (!row.updated_at || localSummaryUpdatedAt! > row.updated_at);
+    const summaryEn = preferLocalSummary
+      ? local?.summaryEn
+      : keepLocalIfRemoteContentEmpty(row.summary_en, local?.summaryEn);
+    const summaryZh = preferLocalSummary
+      ? local?.summaryZh
+      : keepLocalIfRemoteContentEmpty(row.summary_zh, local?.summaryZh);
+    const sourceSummary = preferLocalSummary
+      ? local?.sourceSummary
+      : keepLocalIfRemoteContentEmpty(row.source_summary, local?.sourceSummary);
+    const translatedSummary = preferLocalSummary
+      ? local?.translatedSummary
+      : keepLocalIfRemoteContentEmpty(row.translated_summary, local?.translatedSummary);
     const liveTranscript = keepLocalIfRemoteContentEmpty(row.live_transcript, local?.liveTranscript);
     const translatedLiveTranscript = keepLocalIfRemoteContentEmpty(row.translated_live_transcript, local?.translatedLiveTranscript);
 
@@ -447,6 +461,7 @@ function mergeRemoteRecordingsIntoStore(
       summaryZh,
       sourceSummary,
       translatedSummary,
+      summaryUpdatedAt: localSummaryUpdatedAt,
       keyPoints: local?.keyPoints ?? [],
       liveTranscript,
       translatedLiveTranscript,

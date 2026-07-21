@@ -9,8 +9,16 @@ import {
 
 const source = readFileSync(new URL('../app/lecture/[id].tsx', import.meta.url), 'utf8');
 
-assert.match(source, /<GlassCard style=\{styles\.summaryCard\}>/);
-assert.match(source, /\{hasTranslation \? \(\s*<GlassCard style=\{styles\.summaryCard\}>/);
+assert.match(
+  source,
+  /<GlassCard\s+style=\{styles\.summaryCard\}/,
+  'source summary remains a full-width GlassCard',
+);
+assert.match(
+  source,
+  /\{hasTranslation \? \(\s*<GlassCard\s+style=\{styles\.summaryCard\}/,
+  'translated summary card mounts when languages differ',
+);
 assert.doesNotMatch(
   source,
   /hasTranslation && translatedSummary \?/,
@@ -38,11 +46,14 @@ assert.equal('maxHeight' in SUMMARY_CARD_STYLE, false);
 assert.equal('overflow' in SUMMARY_CARD_STYLE, false);
 assert.match(
   source,
-  /const summariesReady = Boolean\(sourceSummary && \(!hasTranslation \|\| translatedSummary\)\)/,
-  'source and translated summaries must reveal as one coordinated pair',
+  /openSummaryEditor\('source'\)/,
+  'English/source summary card opens the dedicated editor',
 );
-assert.match(source, /summariesReady && sourceSummary/);
-assert.match(source, /summariesReady && translatedSummary/);
+assert.match(
+  source,
+  /openSummaryEditor\('translated'\)/,
+  'Chinese/translated summary card opens the dedicated editor',
+);
 
 const sourceCardIndex = source.indexOf('getSummarySectionLabel(sourceLanguage)');
 const translatedCardIndex = source.indexOf('getSummarySectionLabel(translationLanguage)');

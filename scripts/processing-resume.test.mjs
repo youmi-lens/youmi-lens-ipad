@@ -144,4 +144,27 @@ assert.equal('summaryEn' in partial, false);
 const doneButEmpty = mergeProcessingSnapshot({}, { ai_status: 'done', transcript: null });
 assert.equal(doneButEmpty.processingStatus, 'processing', 'done without data does not mark ready');
 
+// Manual Summary edit must not be overwritten by a later processing poll.
+const afterUserEdit = mergeProcessingSnapshot(
+  {
+    summaryUpdatedAt: '2026-07-21T12:00:00.000Z',
+    sourceSummary: 'User English',
+    translatedSummary: '用户中文',
+    summaryEn: 'User English',
+    summaryZh: '用户中文',
+  },
+  {
+    ai_status: 'done',
+    transcript: 'T',
+    summary_en: 'AI English',
+    summary_zh: 'AI 中文',
+    source_summary: 'AI English',
+    translated_summary: 'AI 中文',
+  },
+);
+assert.equal('summaryEn' in afterUserEdit, false, 'user English summary preserved');
+assert.equal('summaryZh' in afterUserEdit, false, 'user Chinese summary preserved');
+assert.equal('sourceSummary' in afterUserEdit, false);
+assert.equal('translatedSummary' in afterUserEdit, false);
+
 console.log('Processing resume/orchestration tests passed.');
