@@ -38,8 +38,7 @@ export function shouldAcceptStrokePoint(
   return Math.hypot(candidate.x - last.x, candidate.y - last.y) >= minDistance;
 }
 
-/**
- * Append `candidate` to `points` in place when it clears the distance filter.
+/** Append `candidate` to `points` in place when it clears the distance filter.
  * Returns true when a point was added.
  */
 export function appendStrokePoint(
@@ -51,6 +50,51 @@ export function appendStrokePoint(
   if (!shouldAcceptStrokePoint(last, candidate, minDistance)) return false;
   points.push(candidate);
   return true;
+}
+
+/**
+ * Live-ink render snapshot: always return a NEW array reference after each
+ * accepted sample so React (and React Compiler) cannot skip SVG path updates.
+ * Mutating a shared ref alone is not enough for visible in-progress ink.
+ */
+export function snapshotLiveInkPoints(
+  points: readonly NotebookStrokePoint[],
+): NotebookStrokePoint[] {
+  return points.map((point) => ({ x: point.x, y: point.y }));
+}
+
+/**
+ * Pure model of ActiveInk begin → move → up (commit) without React.
+ * Used to prove continuous samples grow the live snapshot before "up".
+ */
+export function reduceLiveInkAction(
+  state: { live: NotebookStrokePoint[]; committed: NotebookStrokePoint[][] },
+  action:
+    | { type: 'down'; point: NotebookStrokePoint }
+    | { type: 'move'; point: NotebookStrokePoint }
+    | { type: 'up' }
+    | { type: 'finger-down'; point: NotebookStrokePoint }
+    | { type: 'finger-move'; point: NotebookStrokePoint },
+  minDistance: number = NOTEBOOK_MIN_POINT_DISTANCE,
+): { live: NotebookStrokePoint[]; committed: NotebookStrokePoint[][] } {
+  // Fingers never create or extend ink in write mode.
+  if (action.type === 'finger-down' || action.type === 'finger-move') {
+    return state;
+  }
+  if (action.type === 'down') {
+    return { live: [action.point], committed: state.committed };
+  }
+  if (action.type === 'move') {
+    const live = state.live.slice();
+    appendStrokePoint(live, action.point, minDistance);
+    return { live: snapshotLiveInkPoints(live), committed: state.committed };
+  }
+  // up
+  if (state.live.length === 0) return state;
+  return {
+    live: [],
+    committed: [...state.committed, snapshotLiveInkPoints(state.live)],
+  };
 }
 
 /**

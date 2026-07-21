@@ -34,6 +34,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentRef,
   type ReactNode,
 } from 'react';
 import {
@@ -76,6 +77,14 @@ import {
   NOTEBOOK_MIN_POINT_DISTANCE,
   strokeToPath,
 } from '@/lib/notebookStroke';
+import {
+  NOTEBOOK_DEFAULT_SCALE,
+  NOTEBOOK_PALM_GRACE_MS,
+  applyPinchZoomFromStart,
+  clampNotebookTranslateX,
+  screenToCanvasPoint,
+  shouldLockNotebookScroll,
+} from '@/lib/notebookViewport';
 import {
   addPencilDoubleTapListener,
   isPencilDoubleTapAvailable,
@@ -279,23 +288,6 @@ const PRIMARY_TOOLS: { key: CanvasMode; label: string }[] = [
 ];
 /** All valid saved-preference modes. */
 const DRAW_MODES = PRIMARY_TOOLS;
-
-type PointerLabel = 'STYLUS' | 'TOUCH' | 'MOUSE' | 'KEY' | 'OTHER';
-
-function pointerLabel(pointerType: PointerType): PointerLabel {
-  switch (pointerType) {
-    case PointerType.STYLUS:
-      return 'STYLUS';
-    case PointerType.TOUCH:
-      return 'TOUCH';
-    case PointerType.MOUSE:
-      return 'MOUSE';
-    case PointerType.KEY:
-      return 'KEY';
-    default:
-      return 'OTHER';
-  }
-}
 
 function makeStrokeId(): string {
   return `stroke_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
@@ -588,7 +580,12 @@ type ActiveInkHostProps = {
 /**
  * Live ink only. Owns its own React state so each Pencil sample updates this
  * overlay without re-rendering the parent canvas, toolbar, or completed strokes.
- * Points accumulate in a ref (in-place push) to avoid O(n) array copies per event.
+ *
+ * Points still accumulate in a ref for O(1) append + synchronous commit reads,
+ * but the RENDERED snapshot is always a fresh `livePoints` state array. A bare
+ * `revision` counter + reading `pointsRef.current` during render is unsafe under
+ * React Compiler (the counter can be treated as unused), which made strokes
+ * invisible until Pencil-up committed them into the completed layer.
  */
 const ActiveInkHost = memo(
   forwardRef<ActiveInkHandle, ActiveInkHostProps>(function ActiveInkHost(
@@ -596,23 +593,24 @@ const ActiveInkHost = memo(
     ref,
   ) {
     const pointsRef = useRef<NotePoint[]>([]);
-    const [revision, setRevision] = useState(0);
+    const [livePoints, setLivePoints] = useState<NotePoint[]>([]);
 
     useImperativeHandle(
       ref,
       () => ({
         begin(point: NotePoint) {
           pointsRef.current = [point];
-          setRevision((value) => value + 1);
+          setLivePoints([point]);
         },
         append(point: NotePoint) {
           if (!appendStrokePoint(pointsRef.current, point, MIN_POINT_DISTANCE)) return;
-          setRevision((value) => value + 1);
+          // Slice so React sees a new points array and StrokeShape rebuilds the path.
+          setLivePoints(pointsRef.current.slice());
         },
         clear() {
           if (pointsRef.current.length === 0) return;
           pointsRef.current = [];
-          setRevision((value) => value + 1);
+          setLivePoints([]);
         },
         getPoints() {
           return pointsRef.current;
@@ -621,10 +619,7 @@ const ActiveInkHost = memo(
       [],
     );
 
-    // revision is the render trigger; points live in the ref.
-    void revision;
-    const points = pointsRef.current;
-    if (points.length === 0) {
+    if (livePoints.length === 0) {
       return <View style={StyleSheet.absoluteFill} pointerEvents="none" />;
     }
 
@@ -632,9 +627,7 @@ const ActiveInkHost = memo(
       <View style={StyleSheet.absoluteFill} pointerEvents="none">
         <Svg width="100%" height={canvasHeight}>
           <StrokeShape
-            // New stroke props object each revision so memoized StrokeShape updates
-            // even though points accumulate by mutating one array in place.
-            stroke={{ points, tool, color, width, opacity }}
+            stroke={{ points: livePoints, tool, color, width, opacity }}
           />
         </Svg>
       </View>
@@ -1303,15 +1296,14 @@ export function NotebookCanvas({
   const [selectionRect, setSelectionRect] = useState<NotebookOverlayRect | null>(null);
   /** Offset applied to selected objects while a move drag is in progress. */
   const [selectionMoveOffset, setSelectionMoveOffset] = useState<NotePoint>({ x: 0, y: 0 });
-  /** Dev-only diagnostic to verify what real hardware reports in Expo Go. */
-  const [lastPointerType, setLastPointerType] = useState<PointerLabel | null>(null);
-  const [lastGestureDecision, setLastGestureDecision] = useState<'activated' | 'failed' | null>(
-    null,
-  );
-  /** Disable page scrolling only while a confirmed stylus stroke is live. */
+  /** Disable page scrolling only while a confirmed stylus stroke is live (React mirror). */
   const [stylusStrokeActive, setStylusStrokeActive] = useState(false);
   /** Disable page scrolling while an image is being dragged or pinch-resized. */
   const [imageManipulationActive, setImageManipulationActive] = useState(false);
+  /** Page pinch-zoom scale (session-local; does not rewrite stored stroke points). */
+  const [canvasScale, setCanvasScale] = useState(NOTEBOOK_DEFAULT_SCALE);
+  /** Horizontal pan paired with scale for focal-point zoom (Notability-style). */
+  const [canvasTranslateX, setCanvasTranslateX] = useState(0);
 
   // Latest-value refs so the memoized gesture never sees a stale closure.
   const penColorRef = useRef(penColor);
@@ -1352,8 +1344,78 @@ export function NotebookCanvas({
   const activeTouchIdRef = useRef<number | null>(null);
   /** Current page offset so viewport-local Pencil coordinates map onto the long paper. */
   const scrollOffsetYRef = useRef(0);
+  const scrollViewRef = useRef<ComponentRef<typeof GestureScrollView>>(null);
+  /** Sync scroll lock (stroke / palm grace / pinch) — must not wait for React render. */
+  const stylusStrokeLockRef = useRef(false);
+  const palmGraceActiveRef = useRef(false);
+  const palmGraceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pinchActiveRef = useRef(false);
+  const pinchStartScaleRef = useRef(NOTEBOOK_DEFAULT_SCALE);
+  const pinchStartTranslateXRef = useRef(0);
+  const pinchStartScrollYRef = useRef(0);
+  const pinchStartFocalXRef = useRef(0);
+  const pinchStartFocalYRef = useRef(0);
+  const canvasScaleRef = useRef(NOTEBOOK_DEFAULT_SCALE);
+  canvasScaleRef.current = canvasScale;
+  const canvasTranslateXRef = useRef(0);
+  canvasTranslateXRef.current = canvasTranslateX;
+  const imageManipulationActiveRef = useRef(false);
+  imageManipulationActiveRef.current = imageManipulationActive;
   /** Live page geometry (set each render) so stable callbacks can read it without re-creating. */
   const pageGeomRef = useRef({ pageHeight: PAGE_HEIGHT, pageStride: PAGE_HEIGHT + PAGE_GAP, totalPages: 1, canvasHeight: PAGE_HEIGHT });
+
+  const applyNotebookScrollEnabled = useCallback(() => {
+    const locked = shouldLockNotebookScroll({
+      strokeActive: stylusStrokeLockRef.current,
+      palmGrace: palmGraceActiveRef.current,
+      pinchActive: pinchActiveRef.current,
+      imageManipulation: imageManipulationActiveRef.current,
+    });
+    scrollViewRef.current?.setNativeProps({ scrollEnabled: !locked });
+  }, []);
+
+  const clearPalmGraceTimer = useCallback(() => {
+    if (palmGraceTimerRef.current) {
+      clearTimeout(palmGraceTimerRef.current);
+      palmGraceTimerRef.current = null;
+    }
+  }, []);
+
+  const beginStylusScrollLock = useCallback(() => {
+    clearPalmGraceTimer();
+    palmGraceActiveRef.current = false;
+    stylusStrokeLockRef.current = true;
+    setStylusStrokeActive(true);
+    applyNotebookScrollEnabled();
+  }, [applyNotebookScrollEnabled, clearPalmGraceTimer]);
+
+  const endStylusScrollLock = useCallback(
+    (opts?: { grace?: boolean }) => {
+      stylusStrokeLockRef.current = false;
+      setStylusStrokeActive(false);
+      clearPalmGraceTimer();
+      if (opts?.grace) {
+        palmGraceActiveRef.current = true;
+        applyNotebookScrollEnabled();
+        palmGraceTimerRef.current = setTimeout(() => {
+          palmGraceTimerRef.current = null;
+          palmGraceActiveRef.current = false;
+          applyNotebookScrollEnabled();
+        }, NOTEBOOK_PALM_GRACE_MS);
+        return;
+      }
+      palmGraceActiveRef.current = false;
+      applyNotebookScrollEnabled();
+    },
+    [applyNotebookScrollEnabled, clearPalmGraceTimer],
+  );
+
+  useEffect(
+    () => () => {
+      clearPalmGraceTimer();
+    },
+    [clearPalmGraceTimer],
+  );
   const toolbarPosition = useRef(new Animated.ValueXY({ x: TOOLBAR_EDGE_MARGIN, y: TOOLBAR_EDGE_MARGIN })).current;
   const toolbarTransition = useRef(
     new Animated.Value(DEFAULT_TOOLBAR_PREFERENCES.collapsed ? 0 : 1),
@@ -2145,12 +2207,16 @@ export function NotebookCanvas({
    */
   const holdImageScrollLock = useCallback(() => {
     setImageManipulationActive(true);
+    imageManipulationActiveRef.current = true;
+    applyNotebookScrollEnabled();
     if (imageScrollLockTimerRef.current) clearTimeout(imageScrollLockTimerRef.current);
     imageScrollLockTimerRef.current = setTimeout(() => {
       imageScrollLockTimerRef.current = null;
+      imageManipulationActiveRef.current = false;
       setImageManipulationActive(false);
+      applyNotebookScrollEnabled();
     }, 220);
-  }, []);
+  }, [applyNotebookScrollEnabled]);
 
   const beginImageGesture = useCallback(
     (id: string) => {
@@ -2265,9 +2331,11 @@ export function NotebookCanvas({
       clearTimeout(imageScrollLockTimerRef.current);
       imageScrollLockTimerRef.current = null;
     }
+    imageManipulationActiveRef.current = false;
     setImageManipulationActive(false);
+    applyNotebookScrollEnabled();
     imageGestureStartRef.current = null;
-  }, []);
+  }, [applyNotebookScrollEnabled]);
 
   // ---- Selection engine helpers ----
 
@@ -2385,7 +2453,7 @@ export function NotebookCanvas({
     if (!drawingRef.current) return;
     drawingRef.current = false;
     activeTouchIdRef.current = null;
-    setStylusStrokeActive(false);
+    endStylusScrollLock({ grace: true });
     if (modeRef.current === 'select') {
       if (selectActionRef.current === 'lasso') commitLasso();
       else if (selectActionRef.current === 'rect') commitRectSelection();
@@ -2403,7 +2471,7 @@ export function NotebookCanvas({
     commitStroke();
     commitErase();
     restoreTemporaryEraserIfNeeded();
-  }, [commitLasso, commitMove, commitRectSelection, commitStroke, commitErase, restoreTemporaryEraserIfNeeded]);
+  }, [commitLasso, commitMove, commitRectSelection, commitStroke, commitErase, restoreTemporaryEraserIfNeeded, endStylusScrollLock]);
 
   /** Discard the in-progress stroke without committing it (used on tool change). */
   const abortStroke = useCallback(() => {
@@ -2417,12 +2485,22 @@ export function NotebookCanvas({
     selectionRectEndRef.current = null;
     selectionMoveOffsetRef.current = { x: 0, y: 0 };
     imageGestureStartRef.current = null;
-    setStylusStrokeActive(false);
+    endStylusScrollLock({ grace: false });
     setErasePoint(null);
     setErasedIds([]);
     setLassoPoints([]);
     setSelectionRect(null);
     setSelectionMoveOffset({ x: 0, y: 0 });
+  }, [endStylusScrollLock]);
+
+  const touchToCanvasPoint = useCallback((touchX: number, touchY: number) => {
+    return screenToCanvasPoint(
+      touchX,
+      touchY,
+      scrollOffsetYRef.current,
+      canvasScaleRef.current,
+      canvasTranslateXRef.current,
+    );
   }, []);
 
   /**
@@ -2430,16 +2508,12 @@ export function NotebookCanvas({
    *
    * `manualActivation` lets us inspect the pointer type on touch-down before
    * deciding what the drag means: confirmed stylus input activates the gesture
-   * (drawing or erasing), while every non-stylus pointer fails immediately so
-   * the underlying ScrollView scrolls instead — that is what keeps finger
-   * scrolling working with no manual mode switch.
+   * (drawing or erasing), while every non-stylus pointer fails immediately so the
+   * underlying ScrollView scrolls instead — that is what keeps finger scrolling
+   * working with no manual mode switch.
    *
-   * Stroke lifecycle is driven by the touch-events API, never by Pan state
-   * alone: every fresh touch-down begins a brand-new stroke, and the stroke
-   * ends the instant its own touch lifts (`onTouchesUp`) or is cancelled.
-   * `onFinalize` is only a backstop. This is what guarantees two separate taps
-   * can never be merged into one connected line.
-   * `runOnJS` keeps the callbacks on the JS thread for direct setState.
+   * Stylus activation also locks ScrollView synchronously via setNativeProps so
+   * a resting palm cannot scroll during the React render gap.
    */
   const drawGesture = useMemo(
     () =>
@@ -2449,6 +2523,7 @@ export function NotebookCanvas({
         .onTouchesDown((event, manager) => {
           // An extra touch landing on top of a live stroke (e.g. a resting
           // palm) — keep the current stroke and ignore the extra finger.
+          // Scroll is already natively locked for the stylus session.
           if (event.numberOfTouches > 1) return;
 
           // First touch of a fresh gesture. If a previous stroke somehow never
@@ -2462,11 +2537,10 @@ export function NotebookCanvas({
             return;
           }
 
-          setLastPointerType(pointerLabel(event.pointerType));
-
           // Draw/erase modes require a stylus; select mode accepts any pointer.
+          // While a stylus session / palm grace is active, non-stylus touches
+          // still fail the draw gesture but ScrollView stays locked.
           if (activeMode !== 'select' && event.pointerType !== PointerType.STYLUS) {
-            setLastGestureDecision('failed');
             manager.fail();
             return;
           }
@@ -2477,9 +2551,8 @@ export function NotebookCanvas({
             return;
           }
 
-          const point = { x: touch.x, y: touch.y + scrollOffsetYRef.current };
+          const point = touchToCanvasPoint(touch.x, touch.y);
           if (findImageAtPoint(point)) {
-            setLastGestureDecision('failed');
             manager.fail();
             return;
           }
@@ -2487,16 +2560,12 @@ export function NotebookCanvas({
           manager.activate();
           drawingRef.current = true;
           activeTouchIdRef.current = touch.id;
-          setLastGestureDecision('activated');
-          setStylusStrokeActive(true);
+          beginStylusScrollLock();
 
           if (activeMode === 'select') {
-            // If touch lands inside the existing selection bounding box → move mode.
-            // Otherwise start a fresh lasso.
             const ids = selectedIdsRef.current;
             let inBounds = false;
             if (ids.size > 0) {
-              // Quick bounding-box check from the current strokes/images.
               let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
               for (const s of strokesRef.current) {
                 if (!ids.has(s.id)) continue;
@@ -2538,7 +2607,6 @@ export function NotebookCanvas({
           }
 
           if (activeMode === 'write' || activeMode === 'highlight') {
-            // A brand-new stroke — its point list starts from scratch.
             activeInkRef.current?.begin(point);
           } else {
             erasedIdsRef.current = [];
@@ -2548,12 +2616,11 @@ export function NotebookCanvas({
         })
         .onTouchesMove((event) => {
           if (!drawingRef.current) return;
-          // Follow only the touch that started this stroke.
           const touch =
             event.changedTouches.find((t) => t.id === activeTouchIdRef.current) ??
             event.allTouches.find((t) => t.id === activeTouchIdRef.current);
           if (!touch) return;
-          const point = { x: touch.x, y: touch.y + scrollOffsetYRef.current };
+          const point = touchToCanvasPoint(touch.x, touch.y);
 
           if (modeRef.current === 'select') {
             if (selectActionRef.current === 'lasso') {
@@ -2585,8 +2652,6 @@ export function NotebookCanvas({
           }
         })
         .onTouchesUp((event) => {
-          // End the stroke the moment its own touch lifts. The touch-events
-          // API reports this reliably even when the Pan's onFinalize does not.
           if (!drawingRef.current) return;
           if (event.changedTouches.some((t) => t.id === activeTouchIdRef.current)) {
             endStroke();
@@ -2599,10 +2664,84 @@ export function NotebookCanvas({
           }
         })
         .onFinalize(() => {
-          // Backstop — commit + clear anything still in progress (idempotent).
           endStroke();
         }),
-    [endStroke, eraseAt, findImageAtPoint],
+    [beginStylusScrollLock, endStroke, eraseAt, findImageAtPoint, touchToCanvasPoint],
+  );
+
+  /** Two-finger page zoom around the pinch midpoint. Stylus / palm-grace reject pinch. */
+  const pinchGesture = useMemo(
+    () =>
+      Gesture.Pinch()
+        .runOnJS(true)
+        .onBegin((event) => {
+          if (stylusStrokeLockRef.current || palmGraceActiveRef.current || drawingRef.current) {
+            return;
+          }
+          pinchActiveRef.current = true;
+          pinchStartScaleRef.current = canvasScaleRef.current;
+          pinchStartTranslateXRef.current = canvasTranslateXRef.current;
+          pinchStartScrollYRef.current = scrollOffsetYRef.current;
+          pinchStartFocalXRef.current = event.focalX;
+          pinchStartFocalYRef.current = event.focalY;
+          applyNotebookScrollEnabled();
+        })
+        .onUpdate((event) => {
+          if (!pinchActiveRef.current) return;
+          if (stylusStrokeLockRef.current || drawingRef.current) return;
+          const viewportW = containerSizeRef.current.width || 0;
+          const viewportH = containerSizeRef.current.height || 0;
+          const contentH = pageGeomRef.current.canvasHeight || 0;
+          const contentW = viewportW;
+          const next = applyPinchZoomFromStart({
+            startScale: pinchStartScaleRef.current,
+            startTranslateX: pinchStartTranslateXRef.current,
+            startScrollY: pinchStartScrollYRef.current,
+            startFocalX: pinchStartFocalXRef.current,
+            startFocalY: pinchStartFocalYRef.current,
+            focalX: event.focalX,
+            focalY: event.focalY,
+            gestureScale: event.scale,
+            viewportWidth: viewportW,
+            viewportHeight: viewportH,
+            contentWidth: contentW,
+            contentHeight: contentH,
+          });
+          canvasScaleRef.current = next.scale;
+          canvasTranslateXRef.current = next.translateX;
+          setCanvasScale(next.scale);
+          setCanvasTranslateX(next.translateX);
+          scrollOffsetYRef.current = next.scrollY;
+          scrollViewRef.current?.scrollTo({ y: next.scrollY, animated: false });
+        })
+        .onEnd(() => {
+          // Snap small pages to horizontal center when the gesture settles.
+          const viewportW = containerSizeRef.current.width || 0;
+          if (viewportW > 0) {
+            const centered = clampNotebookTranslateX({
+              translateX: canvasTranslateXRef.current,
+              scale: canvasScaleRef.current,
+              viewportWidth: viewportW,
+              contentWidth: viewportW,
+            });
+            if (centered !== canvasTranslateXRef.current) {
+              canvasTranslateXRef.current = centered;
+              setCanvasTranslateX(centered);
+            }
+          }
+          pinchActiveRef.current = false;
+          applyNotebookScrollEnabled();
+        })
+        .onFinalize(() => {
+          pinchActiveRef.current = false;
+          applyNotebookScrollEnabled();
+        }),
+    [applyNotebookScrollEnabled],
+  );
+
+  const notebookGestures = useMemo(
+    () => Gesture.Simultaneous(pinchGesture, drawGesture),
+    [pinchGesture, drawGesture],
   );
 
   // A tool change must never leave a half-finished stroke behind for the next
@@ -2967,8 +3106,9 @@ export function NotebookCanvas({
   );
   const pageForScroll = useCallback((scrollY: number) => {
     const { pageStride: stride, totalPages: tp } = pageGeomRef.current;
+    const scale = canvasScaleRef.current || NOTEBOOK_DEFAULT_SCALE;
     const viewportH = containerSizeRef.current.height || 0;
-    const centerY = scrollY + viewportH / 2;
+    const centerY = (scrollY + viewportH / 2) / scale;
     return clamp(Math.floor(centerY / Math.max(stride, 1)) + 1, 1, tp);
   }, []);
   useEffect(
@@ -3304,8 +3444,9 @@ export function NotebookCanvas({
           The gesture lives on the actual ScrollView, not on an absolute overlay
           above it. That keeps finger touches in the scroll view's hit-test path
           from the beginning; only confirmed stylus input activates drawing. */}
-      <GestureDetector gesture={drawGesture}>
+      <GestureDetector gesture={notebookGestures}>
         <GestureScrollView
+          ref={scrollViewRef}
           style={styles.scroll}
           keyboardShouldPersistTaps="handled"
           scrollEnabled={!stylusStrokeActive && !imageManipulationActive}
@@ -3317,7 +3458,17 @@ export function NotebookCanvas({
             showPageBadge(pageForScroll(y));
           }}
         >
-          <View style={[styles.paper, { height: canvasHeight }]}>
+          <View style={[styles.paper, { height: canvasHeight * canvasScale }]}>
+          <View
+            style={{
+              height: canvasHeight,
+              width: '100%',
+              // RN applies right-to-left: scale about top-left, then translateX
+              // → screen = content * scale + translateX (focal-point zoom).
+              transform: [{ translateX: canvasTranslateX }, { scale: canvasScale }],
+              transformOrigin: 'top left',
+            }}
+          >
           {/* Stacked A4-like paper sheets (each its own ruled lines + margin),
               separated by a gap so the notebook reads as paper, not one canvas. */}
           {pageSheets}
@@ -3428,6 +3579,7 @@ export function NotebookCanvas({
               </Text>
             </View>
           ) : null}
+          </View>
           </View>
         </GestureScrollView>
       </GestureDetector>
@@ -3831,15 +3983,6 @@ export function NotebookCanvas({
             )}
           </Animated.View>
         </GestureDetector>
-      ) : null}
-
-      {__DEV__ && editable && lastPointerType ? (
-        <View style={styles.pointerDebug} pointerEvents="none">
-          <Text style={styles.pointerDebugText}>
-            {mode.toUpperCase()} · {lastPointerType} · {lastGestureDecision ?? 'idle'} · scroll{' '}
-            {stylusStrokeActive ? 'off' : 'on'}
-          </Text>
-        </View>
       ) : null}
 
       {/* Tool badge — brief feedback after an Apple Pencil double-tap */}
@@ -4741,21 +4884,6 @@ const styles = StyleSheet.create({
     color: colors.textTertiary,
     textAlign: 'center',
   },
-  pointerDebug: {
-    position: 'absolute',
-    right: spacing.md,
-    bottom: spacing.md,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 4,
-    borderRadius: radius.pill,
-    backgroundColor: 'rgba(6, 27, 52, 0.72)',
-  },
-  pointerDebugText: {
-    fontSize: fontSize.xs,
-    fontWeight: '700',
-    color: colors.pearlWhite,
-  },
-
   // ---- Tool badge ----
   toolToastWrap: {
     position: 'absolute',
