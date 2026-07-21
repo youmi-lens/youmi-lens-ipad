@@ -76,6 +76,7 @@ export default function RecordingScreen() {
     addMarkMillis,
     setCurrentDurationMillis,
     setLectureSessionPaused,
+    registerLectureSessionPauseToggle,
     resetDraft,
     hydrateDraft,
   } = useRecordingNotes();
@@ -572,6 +573,21 @@ export default function RecordingScreen() {
       if (!isGuest && !finishedRef.current) persistProgress();
     }
   };
+
+  // Mini / Course popups call the same authoritative Pause↔Resume path.
+  useEffect(() => {
+    registerLectureSessionPauseToggle(() => togglePause());
+    return () => registerLectureSessionPauseToggle(null);
+    // Re-bind whenever pause/resume dependencies change so the handler is fresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    registerLectureSessionPauseToggle,
+    isPaused,
+    isReviewingResume,
+    isGuest,
+    resumeRecording,
+    pauseRecording,
+  ]);
 
   // Leaving via Back keeps an in-progress lecture (no "Recording not saved" for
   // meaningful content). Finalize the current audio segment so it is retained,

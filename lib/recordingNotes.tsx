@@ -53,6 +53,17 @@ type RecordingNotesValue = {
   /** Whether the shared lecture session is paused. */
   isLectureSessionPaused: boolean;
   setLectureSessionPaused: (paused: boolean) => void;
+  /**
+   * True while the Recording screen has registered an authoritative pause toggle
+   * (active record/pause session). Playback must not steal the audio session.
+   */
+  isLectureSessionActive: boolean;
+  /**
+   * Authoritative Pause/Resume toggle registered by the Recording screen.
+   * Mini / Course must call this — never flip local UI-only pause state.
+   */
+  registerLectureSessionPauseToggle: (handler: (() => Promise<void>) | null) => void;
+  toggleLectureSessionPause: () => Promise<void>;
   /** Add an important-moment mark in the canonical millisecond unit. */
   addMarkMillis: (timestampMillis: number, label?: string) => void;
   /** Add a mark at the latest mirrored recorder time. */
@@ -84,6 +95,19 @@ export function RecordingNotesProvider({ children }: { children: ReactNode }) {
   const [marks, setMarks] = useState<RecordingMark[]>([]);
   const [currentDurationMillis, setCurrentDurationMillisState] = useState(0);
   const [isLectureSessionPaused, setLectureSessionPaused] = useState(false);
+  const [isLectureSessionActive, setLectureSessionActive] = useState(false);
+  const lectureSessionPauseToggleRef = useRef<(() => Promise<void>) | null>(null);
+
+  const registerLectureSessionPauseToggle = useCallback((handler: (() => Promise<void>) | null) => {
+    lectureSessionPauseToggleRef.current = handler;
+    setLectureSessionActive(Boolean(handler));
+  }, []);
+
+  const toggleLectureSessionPause = useCallback(async () => {
+    const handler = lectureSessionPauseToggleRef.current;
+    if (!handler) return;
+    await handler();
+  }, []);
 
   const setCurrentDurationMillis = useCallback((durationMillis: number) => {
     setCurrentDurationMillisState(Math.max(0, Math.round(durationMillis)));
@@ -150,6 +174,9 @@ export function RecordingNotesProvider({ children }: { children: ReactNode }) {
       setCurrentDurationMillis,
       isLectureSessionPaused,
       setLectureSessionPaused,
+      isLectureSessionActive,
+      registerLectureSessionPauseToggle,
+      toggleLectureSessionPause,
       addMarkMillis,
       addMarkAtCurrentTime,
       clearMarks,
@@ -164,6 +191,9 @@ export function RecordingNotesProvider({ children }: { children: ReactNode }) {
       currentDurationMillis,
       setCurrentDurationMillis,
       isLectureSessionPaused,
+      isLectureSessionActive,
+      registerLectureSessionPauseToggle,
+      toggleLectureSessionPause,
       addMarkMillis,
       addMarkAtCurrentTime,
       clearMarks,

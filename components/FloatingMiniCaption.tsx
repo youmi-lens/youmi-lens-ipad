@@ -57,12 +57,12 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
     latestFinalLine,
     captionLines,
   } = useLiveCaptions();
-  const { currentDurationMillis, isLectureSessionPaused, addMarkMillis } = useRecordingNotes();
+  const { currentDurationMillis, isLectureSessionPaused, toggleLectureSessionPause, addMarkMillis } =
+    useRecordingNotes();
 
   const [panelVisible, setPanelVisible] = useState(true);
   const [markFlash, setMarkFlash] = useState(false);
-  const [paused, setPaused] = useState(false);
-  const panelPaused = isLectureSessionPaused || paused;
+  const panelPaused = isLectureSessionPaused;
   const [autoFollowFeed, setAutoFollowFeed] = useState(true);
   const [panelSize, setPanelSize] = useState({ width: DEFAULT_PANEL_WIDTH, height: DEFAULT_PANEL_HEIGHT });
 
@@ -584,8 +584,7 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
             accessibilityRole="button"
             accessibilityLabel={panelPaused ? t('mini.resume') : t('mini.pause')}
             onPress={() => {
-              if (isLectureSessionPaused) return;
-              setPaused((p) => !p);
+              void toggleLectureSessionPause();
             }}
             style={({ pressed }) => [
               styles.controlBtn,

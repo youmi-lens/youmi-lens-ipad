@@ -71,12 +71,12 @@ export default function MiniCaptionScreen() {
     setDraftImages,
     currentDurationMillis,
     isLectureSessionPaused,
+    toggleLectureSessionPause,
     addMarkMillis,
   } = useRecordingNotes();
 
   const [fallbackMillis, setFallbackMillis] = useState((Number(params.elapsed ?? 0) || 0) * 1000);
-  const [paused, setPaused] = useState(false);
-  const panelPaused = isLectureSessionPaused || paused;
+  const panelPaused = isLectureSessionPaused;
   const [markFlash, setMarkFlash] = useState(false);
   const [panelVisible, setPanelVisible] = useState(true);
   const [autoFollowFeed, setAutoFollowFeed] = useState(true);
@@ -785,8 +785,7 @@ export default function MiniCaptionScreen() {
               accessibilityRole="button"
               accessibilityLabel={panelPaused ? t('mini.resume') : t('mini.pause')}
               onPress={() => {
-                if (isLectureSessionPaused) return;
-                setPaused((p) => !p);
+                void toggleLectureSessionPause();
               }}
               style={({ pressed }) => [
                 styles.controlBtn,
