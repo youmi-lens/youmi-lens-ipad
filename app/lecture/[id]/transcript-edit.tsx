@@ -2,23 +2,23 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { LectureDocumentEditor } from '@/components/LectureDocumentEditor';
-import { getSummarySectionLabel, resolveLectureLanguagePair } from '@/lib/contentLanguages.mjs';
+import { getTranscriptSectionLabel, resolveLectureLanguagePair } from '@/lib/contentLanguages.mjs';
 import { useI18n } from '@/lib/i18n';
-import {
-  buildSummaryEditPatch,
-  getEditableSummaryText,
-  isSummaryDraftDirty,
-} from '@/lib/summaryEdit.mjs';
 import { useData } from '@/lib/store';
+import {
+  buildTranscriptEditPatch,
+  getEditableTranscriptText,
+  isTranscriptDraftDirty,
+} from '@/lib/transcriptEdit.mjs';
 
-type SummaryEditSide = 'source' | 'translated';
+type TranscriptEditSide = 'source' | 'translated';
 
-function resolveSide(raw: string | undefined): SummaryEditSide | null {
+function resolveSide(raw: string | undefined): TranscriptEditSide | null {
   if (raw === 'source' || raw === 'translated') return raw;
   return null;
 }
 
-export default function SummaryEditScreen() {
+export default function TranscriptEditScreen() {
   const { t } = useI18n();
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string; side?: string }>();
@@ -30,15 +30,15 @@ export default function SummaryEditScreen() {
   const seededRef = useRef(false);
   useEffect(() => {
     if (!lecture || !side || seededRef.current) return;
-    setDraft(getEditableSummaryText(lecture, side));
+    setDraft(getEditableTranscriptText(lecture, side));
     seededRef.current = true;
   }, [lecture, side]);
 
   const title = useMemo(() => {
-    if (!lecture || !side) return t('lecture.summaryEditTitle');
+    if (!lecture || !side) return t('lecture.transcriptEditTitle');
     const { sourceLanguage, translationLanguage } = resolveLectureLanguagePair(lecture);
     const language = side === 'source' ? sourceLanguage : translationLanguage;
-    return getSummarySectionLabel(language);
+    return getTranscriptSectionLabel(language);
   }, [lecture, side, t]);
 
   const contentLanguage = useMemo(() => {
@@ -47,9 +47,11 @@ export default function SummaryEditScreen() {
     return side === 'source' ? sourceLanguage : translationLanguage;
   }, [lecture, side]);
 
-  const dirty = lecture && side ? isSummaryDraftDirty(lecture, side, draft) : false;
+  const dirty = lecture && side ? isTranscriptDraftDirty(lecture, side, draft) : false;
   const emptyConfirmTitle =
-    contentLanguage === 'zh-Hans' ? t('lecture.summarySaveEmptyZh') : t('lecture.summarySaveEmptyEn');
+    contentLanguage === 'zh-Hans'
+      ? t('lecture.transcriptSaveEmptyZh')
+      : t('lecture.transcriptSaveEmptyEn');
 
   const leave = useCallback(() => {
     if (router.canGoBack()) router.back();
@@ -59,7 +61,7 @@ export default function SummaryEditScreen() {
 
   const persist = useCallback(() => {
     if (!lecture || !side) return;
-    updateLecture(lecture.id, buildSummaryEditPatch(lecture, side, draft));
+    updateLecture(lecture.id, buildTranscriptEditPatch(lecture, side, draft));
     leave();
   }, [draft, leave, lecture, side, updateLecture]);
 
@@ -69,12 +71,12 @@ export default function SummaryEditScreen() {
       title={title}
       draft={draft}
       onChangeDraft={setDraft}
-      placeholder={t('lecture.summaryEditPlaceholder')}
+      placeholder={t('lecture.transcriptEditPlaceholder')}
       dirty={dirty}
       onLeave={leave}
       onPersist={persist}
       emptyConfirmTitle={emptyConfirmTitle}
-      emptyConfirmBody={t('lecture.summarySaveEmptyBody')}
+      emptyConfirmBody={t('lecture.transcriptSaveEmptyBody')}
     />
   );
 }

@@ -147,6 +147,11 @@ export type Lecture = {
   /** Chinese transcript, translated backend-side from the English transcript. */
   transcriptZh?: string;
   translatedTranscript?: string;
+  /**
+   * ISO timestamp of the last local Transcript edit. Cloud merge keeps local
+   * transcript fields when this is fresher than the remote row's updated_at.
+   */
+  transcriptUpdatedAt?: string;
   /** Summary in the lecture's source language (authoritative for multilingual lectures). */
   sourceSummary?: string;
   /** Summary in the lecture's translation language; absent when source === target. */

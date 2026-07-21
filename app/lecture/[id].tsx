@@ -27,10 +27,8 @@ import { exportLectureNotesPdf, hasExportableLectureNotes } from '@/lib/exportLe
 import { formatClock, formatDate, formatDuration } from '@/lib/format';
 import { useI18n, localizeSystemDefaultTitle } from '@/lib/i18n';
 import {
-  getSourceTranscript,
   getSummarySectionLabel,
   getTranscriptSectionLabel,
-  getTranslatedTranscript,
 } from '@/lib/languageContent';
 import { resolveLectureLanguagePair, shouldTranslate } from '@/lib/contentLanguages.mjs';
 import type { NoteStroke } from '@/lib/models';
@@ -38,6 +36,10 @@ import {
   getEditableSummaryText,
   hasUserEditedSummary,
 } from '@/lib/summaryEdit.mjs';
+import {
+  getEditableTranscriptText,
+  hasUserEditedTranscript,
+} from '@/lib/transcriptEdit.mjs';
 import {
   SUMMARY_CARD_STYLE,
   SUMMARY_PAGE_SCROLL_STYLE,
@@ -116,8 +118,8 @@ export default function LectureDetailScreen() {
   // Transcript + summary follow the lecture's persisted source/translation pair.
   const { sourceLanguage, translationLanguage } = resolveLectureLanguagePair(lecture);
   const hasTranslation = shouldTranslate(sourceLanguage, translationLanguage);
-  const sourceTranscript = getSourceTranscript(lecture);
-  const translatedTranscript = getTranslatedTranscript(lecture);
+  const sourceTranscript = getEditableTranscriptText(lecture, 'source');
+  const translatedTranscript = getEditableTranscriptText(lecture, 'translated');
   const sourceSummary = getEditableSummaryText(lecture, 'source');
   const translatedSummary = getEditableSummaryText(lecture, 'translated');
   const summariesReady =
@@ -125,10 +127,19 @@ export default function LectureDetailScreen() {
     || hasUserEditedSummary(lecture)
     || lecture.processingStatus === 'ready';
   const canEditSummaries = summariesReady || hasUserEditedSummary(lecture) || lecture.processingStatus === 'ready';
+  const canEditTranscripts =
+    lecture.processingStatus === 'ready'
+    || hasUserEditedTranscript(lecture)
+    || Boolean(sourceTranscript.trim())
+    || Boolean(translatedTranscript.trim());
 
   const openSummaryEditor = (side: 'source' | 'translated') => {
     if (!canEditSummaries) return;
     router.push(`/lecture/${lecture.id}/summary-edit?side=${side}` as Href);
+  };
+  const openTranscriptEditor = (side: 'source' | 'translated') => {
+    if (!canEditTranscripts) return;
+    router.push(`/lecture/${lecture.id}/transcript-edit?side=${side}` as Href);
   };
   const cjk = (lang: string) => lang === 'zh-Hans' || lang === 'ja' || lang === 'ko';
   const typedNotes = lecture.notes.trim();
@@ -287,27 +298,52 @@ export default function LectureDetailScreen() {
         keyboardShouldPersistTaps="handled"
       >
         <View style={styles.content}>
-          {/* ---- Transcript — English then Chinese (fixed for V1) ---- */}
+          {/* ---- Transcript — source language, then translation when source != target ---- */}
           {tab === 'Transcript' && (
             <>
-              <GlassCard>
+              <GlassCard
+                onPress={canEditTranscripts ? () => openTranscriptEditor('source') : undefined}
+              >
                 <BlockHeader
                   icon="document-text-outline"
                   label={getTranscriptSectionLabel(sourceLanguage)}
+                  trailing={
+                    canEditTranscripts ? (
+                      <Ionicons name="create-outline" size={16} color={colors.textTertiary} />
+                    ) : null
+                  }
                 />
-                {sourceTranscript ? (
-                  <NativeLookupText style={styles.bodyText}>{sourceTranscript}</NativeLookupText>
+                {canEditTranscripts ? (
+                  sourceTranscript.trim() ? (
+                    <NativeLookupText style={styles.bodyText}>{sourceTranscript}</NativeLookupText>
+                  ) : (
+                    <Text style={styles.emptyInline}>{t('lecture.transcriptEmpty')}</Text>
+                  )
                 ) : (
                   <Text style={styles.emptyInline}>{t('lecture.transcriptPending')}</Text>
                 )}
               </GlassCard>
               {hasTranslation ? (
-                <GlassCard>
-                  <BlockHeader icon="language-outline" label={getTranscriptSectionLabel(translationLanguage)} />
-                  {translatedTranscript ? (
-                    <Text style={[styles.bodyText, cjk(translationLanguage) && styles.bodyZh]}>
-                      {translatedTranscript}
-                    </Text>
+                <GlassCard
+                  onPress={canEditTranscripts ? () => openTranscriptEditor('translated') : undefined}
+                >
+                  <BlockHeader
+                    icon="language-outline"
+                    label={getTranscriptSectionLabel(translationLanguage)}
+                    trailing={
+                      canEditTranscripts ? (
+                        <Ionicons name="create-outline" size={16} color={colors.textTertiary} />
+                      ) : null
+                    }
+                  />
+                  {canEditTranscripts ? (
+                    translatedTranscript.trim() ? (
+                      <Text style={[styles.bodyText, cjk(translationLanguage) && styles.bodyZh]}>
+                        {translatedTranscript}
+                      </Text>
+                    ) : (
+                      <Text style={styles.emptyInline}>{t('lecture.transcriptEmpty')}</Text>
+                    )
                   ) : (
                     <Text style={styles.emptyInline}>{t('lecture.transcriptPending')}</Text>
                   )}

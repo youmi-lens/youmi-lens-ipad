@@ -394,9 +394,21 @@ function mergeRemoteRecordingsIntoStore(
     const processingStatus = processingStatusFromRemote(row.ai_status);
     const date = row.created_at ?? local?.date ?? new Date().toISOString();
 
-    const transcript = keepLocalIfRemoteContentEmpty(row.transcript, local?.transcript);
-    const transcriptZh = keepLocalIfRemoteContentEmpty(row.transcript_zh, local?.transcriptZh);
-    const translatedTranscript = keepLocalIfRemoteContentEmpty(row.translated_transcript, local?.translatedTranscript);
+    // Transcript freshness: after a local manual edit, keep local transcript
+    // fields until a newer remote row arrives (same pattern as summaryUpdatedAt).
+    const localTranscriptUpdatedAt = local?.transcriptUpdatedAt;
+    const preferLocalTranscript =
+      Boolean(localTranscriptUpdatedAt) &&
+      (!row.updated_at || localTranscriptUpdatedAt! > row.updated_at);
+    const transcript = preferLocalTranscript
+      ? local?.transcript
+      : keepLocalIfRemoteContentEmpty(row.transcript, local?.transcript);
+    const transcriptZh = preferLocalTranscript
+      ? local?.transcriptZh
+      : keepLocalIfRemoteContentEmpty(row.transcript_zh, local?.transcriptZh);
+    const translatedTranscript = preferLocalTranscript
+      ? local?.translatedTranscript
+      : keepLocalIfRemoteContentEmpty(row.translated_transcript, local?.translatedTranscript);
     // Summary freshness: after a local manual edit, keep local summary fields
     // until a newer remote row arrives (same pattern as titleUpdatedAt).
     const localSummaryUpdatedAt = local?.summaryUpdatedAt;
@@ -457,6 +469,7 @@ function mergeRemoteRecordingsIntoStore(
       transcript,
       transcriptZh,
       translatedTranscript,
+      transcriptUpdatedAt: localTranscriptUpdatedAt,
       summaryEn,
       summaryZh,
       sourceSummary,

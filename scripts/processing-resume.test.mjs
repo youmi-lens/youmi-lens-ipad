@@ -167,4 +167,24 @@ assert.equal('summaryZh' in afterUserEdit, false, 'user Chinese summary preserve
 assert.equal('sourceSummary' in afterUserEdit, false);
 assert.equal('translatedSummary' in afterUserEdit, false);
 
+// Manual Transcript edit must not be overwritten by a later processing poll.
+const afterTranscriptEdit = mergeProcessingSnapshot(
+  {
+    transcriptUpdatedAt: '2026-07-21T12:00:00.000Z',
+    transcript: 'User EN transcript',
+    translatedTranscript: '用户中文转录',
+    transcriptZh: '用户中文转录',
+  },
+  {
+    ai_status: 'done',
+    transcript: 'AI EN transcript',
+    transcript_zh: 'AI 中文转录',
+    translated_transcript: 'AI 中文转录',
+    summary_en: 'S',
+  },
+);
+assert.equal('transcript' in afterTranscriptEdit, false, 'user English transcript preserved');
+assert.equal('transcriptZh' in afterTranscriptEdit, false);
+assert.equal('translatedTranscript' in afterTranscriptEdit, false);
+
 console.log('Processing resume/orchestration tests passed.');
