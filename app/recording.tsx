@@ -43,6 +43,7 @@ import {
   captionsToTranscript,
   hasMeaningfulRecordingContent,
 } from '@/lib/recordingPersistence.mjs';
+import { persistLectureLocalAudio } from '@/lib/lectureLocalAudio';
 
 export default function RecordingScreen() {
   const router = useRouter();
@@ -663,13 +664,14 @@ export default function RecordingScreen() {
         );
         return;
       }
+      const durableGuestAudio = await persistLectureLocalAudio(uri, pendingLectureId);
       createLecture({
         id: pendingLectureId,
         courseId: params.courseId ?? '',
         title: (params.lectureTitle ?? '').trim() || 'Untitled Lecture',
         durationMillis: finalDuration,
         recordingEngine,
-        localAudioUri: uri,
+        localAudioUri: durableGuestAudio ?? uri,
         markedTimestamps: marks.map((mark) => mark.timestampMillis),
         liveTranscript: '',
         notes: draftNotes,
@@ -706,7 +708,10 @@ export default function RecordingScreen() {
       ...marks.map((mark) => mark.timestampMillis),
     ];
     const existing = getLecture(pendingLectureId);
-    const finalAudio = uri ?? priorAudioUriRef.current;
+    const rawFinalAudio = uri ?? priorAudioUriRef.current;
+    const finalAudio = rawFinalAudio
+      ? (await persistLectureLocalAudio(rawFinalAudio, pendingLectureId)) ?? rawFinalAudio
+      : null;
     const savedDuration = Math.max(existing?.durationMillis ?? 0, finalDuration);
     const currentLinks = materialLinksForLecture(pendingLectureId);
     const currentAnnotations = materialAnnotations.filter(

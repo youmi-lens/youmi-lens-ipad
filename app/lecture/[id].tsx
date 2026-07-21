@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
+import { useAudioPlayer, useAudioPlayerStatus, setAudioModeAsync } from 'expo-audio';
 import { Href, useLocalSearchParams, useRouter } from 'expo-router';
-import { ComponentProps, type ReactNode, useState } from 'react';
+import { ComponentProps, type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -46,6 +46,11 @@ import {
   SUMMARY_STACK_STYLE,
 } from '@/lib/summaryLayout.mjs';
 import { useData } from '@/lib/store';
+import {
+  resolveLectureAudioPlaybackState,
+  shouldShowLocalAudioPlayer,
+} from '@/lib/lectureLocalAudio';
+import { useRecordingNotes } from '@/lib/recordingNotes';
 
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
 
@@ -78,6 +83,7 @@ export default function LectureDetailScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string }>();
   const { getLecture, getCourse, updateLecture, renameLecture } = useData();
+  const { isLectureSessionActive } = useRecordingNotes();
 
   const lecture = getLecture(params.id);
   const course = getCourse(lecture?.courseId);
@@ -91,11 +97,63 @@ export default function LectureDetailScreen() {
   const [exportingPdf, setExportingPdf] = useState(false);
   const { width } = useWindowDimensions();
   const compactLayout = width < 1180;
-  const audioAvailable = Boolean(lecture?.localAudioUri);
-  const player = useAudioPlayer(audioAvailable ? { uri: lecture?.localAudioUri ?? '' } : null, { updateInterval: 250 });
+  const audioPlayback = useMemo(
+    () =>
+      resolveLectureAudioPlaybackState({
+        localAudioUri: lecture?.localAudioUri,
+        storagePath: lecture?.storagePath,
+        lectureId: lecture?.id,
+      }),
+    [lecture?.localAudioUri, lecture?.storagePath, lecture?.id],
+  );
+  const audioAvailable = shouldShowLocalAudioPlayer(audioPlayback);
+  const player = useAudioPlayer(audioAvailable ? { uri: audioPlayback.uri ?? '' } : null, { updateInterval: 250 });
   const audioStatus = useAudioPlayerStatus(player);
   const playbackDuration = audioStatus.duration || (lecture?.durationMillis ?? 0) / 1000;
   const playbackProgress = playbackDuration > 0 ? Math.min(audioStatus.currentTime / playbackDuration, 1) : 0;
+
+  // Heal stale sandbox URIs once a playable path is resolved.
+  useEffect(() => {
+    if (!lecture) return;
+    if (
+      audioPlayback.kind === 'local' &&
+      audioPlayback.uri &&
+      audioPlayback.uri !== lecture.localAudioUri
+    ) {
+      updateLecture(lecture.id, { localAudioUri: audioPlayback.uri });
+    }
+  }, [lecture, audioPlayback.kind, audioPlayback.uri, updateLecture]);
+
+  useEffect(() => {
+    return () => {
+      try {
+        player.pause();
+      } catch {
+        /* best-effort cleanup on navigate away */
+      }
+    };
+  }, [player]);
+
+  const togglePlayback = useCallback(async () => {
+    if (!audioAvailable) return;
+    if (isLectureSessionActive) {
+      Alert.alert(t('lecture.audioUnavailable'), t('lecture.playbackBlockedRecording'));
+      return;
+    }
+    try {
+      if (audioStatus.playing) {
+        player.pause();
+        return;
+      }
+      // Recording leave/stop leaves the session in ambient/record mode;
+      // switch to audible playback before starting the player.
+      await setAudioModeAsync({ playsInSilentMode: true, allowsRecording: false });
+      player.play();
+    } catch (err) {
+      console.warn('[lecture] playback failed', err);
+      Alert.alert(t('lecture.audioUnavailable'), t('lecture.tryAgain'));
+    }
+  }, [audioAvailable, audioStatus.playing, isLectureSessionActive, player, t]);
 
   if (!lecture) {
     return (
@@ -251,7 +309,7 @@ export default function LectureDetailScreen() {
         <GlassCard padding={16}>
           {audioAvailable ? (
             <View style={[styles.compactPlayer, compactLayout && styles.compactPlayerNarrow]}>
-              <Pressable accessibilityRole="button" onPress={() => audioStatus.playing ? player.pause() : player.play()} style={styles.playPauseButton}>
+              <Pressable accessibilityRole="button" onPress={() => void togglePlayback()} style={styles.playPauseButton}>
                 <Ionicons name={audioStatus.playing ? 'pause' : 'play'} size={20} color={colors.textOnNavy} />
               </Pressable>
               <Pressable accessibilityRole="button" accessibilityLabel={t('lecture.skipBack')} onPress={() => void skipBy(-10)} style={styles.skipButton}><Text style={styles.skipText}>↺ 10s</Text></Pressable>
@@ -262,7 +320,11 @@ export default function LectureDetailScreen() {
             </View>
           ) : (
             <Text style={styles.emptyInline}>
-              {lecture.storagePath ? t('lecture.audioCloudSoon') : t('lecture.audioUnavailable')}
+              {audioPlayback.kind === 'local-missing'
+                ? t('lecture.audioLocalMissing')
+                : audioPlayback.kind === 'cloud-soon'
+                  ? t('lecture.audioCloudSoon')
+                  : t('lecture.audioUnavailable')}
             </Text>
           )}
         </GlassCard>

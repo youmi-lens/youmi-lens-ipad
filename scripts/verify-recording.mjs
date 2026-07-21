@@ -24,6 +24,8 @@ const passed = await runSteps('Native recording verification', [
   nodeStep('processing resume', 'scripts/processing-resume.test.mjs'),
   nodeStep('lecture startup state', 'scripts/lecture-startup-state.test.mjs'),
   nodeStep('Pause→Resume caption history continuity', 'scripts/recording-caption-pause-resume.test.mjs'),
+  nodeStep('Mini/Course Resume + lecture playback audio mode', 'scripts/lecture-session-resume-playback.test.mjs'),
+  nodeStep('Lecture local playback gating', 'scripts/lecture-local-playback.test.mjs'),
   nodeStep('Transcript edit continuity', 'scripts/transcript-edit.test.mjs'),
 ]);
 

@@ -79,7 +79,7 @@ export function useLegacyLectureRecorder(enabled: boolean): LectureRecorder {
       setError(`${base}${devHint}`); setErrorDetail(detail.trim() || null);
       activeRef.current = false;
       await recorder.stop().catch(() => {});
-      await setAudioModeAsync({ allowsRecording: false }).catch(() => {});
+      await setAudioModeAsync({ playsInSilentMode: true, allowsRecording: false }).catch(() => {});
       return false;
     }
   }, [enabled, recorder]);
@@ -96,7 +96,7 @@ export function useLegacyLectureRecorder(enabled: boolean): LectureRecorder {
     try {
       await recorder.stop(); activeRef.current = false; setIsPaused(false);
       const uri = recorder.uri ?? null; setRecordingUri(uri);
-      await setAudioModeAsync({ allowsRecording: false }).catch(() => {});
+      await setAudioModeAsync({ playsInSilentMode: true, allowsRecording: false }).catch(() => {});
       return uri;
     } catch (stopError) {
       if (__DEV__) console.warn('[recorder] local recording stop failed', { message: stopError instanceof Error ? stopError.message : 'unknown' });
