@@ -390,15 +390,20 @@ export default function RecordingScreen() {
   // recorder is already running by this point (recorder-first order), so the
   // mic stream configures the iOS audio session and attaches its tap last.
   // The no-PCM watchdog and single defensive retry live inside liveMicStream.
-  const startCaptionPipeline = async () => {
+  // Fresh starts clear caption history. Pause→Resume / mid-session reconnect
+  // must preserveHistory so accumulated live captions stay visible.
+  const startCaptionPipeline = async (options?: { preserveHistory?: boolean }) => {
     if (__DEV__) {
       console.info('[recording] live caption pipeline requested', {
         courseSelected: Boolean(course),
         localRecordingActive: isRecordingRef.current,
+        preserveHistory: Boolean(options?.preserveHistory),
       });
     }
 
-    resetCaptions();
+    if (!options?.preserveHistory) {
+      resetCaptions();
+    }
     setMicStreamError(null);
     firstPcmFrameLoggedRef.current = false;
     await startLiveCaptions(48_000, sourceLanguage, translationLanguage);
@@ -512,7 +517,7 @@ export default function RecordingScreen() {
       liveCaptionStatus === 'idle'
     ) {
       logLiveCaptionEvent('foreground_caption_recovery', { liveCaptionStatus });
-      void startCaptionPipeline();
+      void startCaptionPipeline({ preserveHistory: true });
     }
   };
 
@@ -557,7 +562,8 @@ export default function RecordingScreen() {
     }
     if (isPaused) {
       await resumeRecording();
-      if (!isGuest) await startCaptionPipeline();
+      // Reconnect captions/mic only — never wipe accumulated live history.
+      if (!isGuest) await startCaptionPipeline({ preserveHistory: true });
     } else {
       await pauseRecording();
       stopMicStream();
@@ -1021,7 +1027,7 @@ export default function RecordingScreen() {
                     <SecondaryButton
                       label={t('recording.retryCaptions')}
                       icon="refresh-outline"
-                      onPress={() => void startCaptionPipeline()}
+                      onPress={() => void startCaptionPipeline({ preserveHistory: true })}
                       style={styles.retryCaptionsButton}
                     />
                   </View>

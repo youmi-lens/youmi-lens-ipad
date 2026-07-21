@@ -23,6 +23,7 @@ const passed = await runSteps('Native recording verification', [
   nodeStep('recording persistence (lecture side)', 'scripts/recording-persistence.test.mjs'),
   nodeStep('processing resume', 'scripts/processing-resume.test.mjs'),
   nodeStep('lecture startup state', 'scripts/lecture-startup-state.test.mjs'),
+  nodeStep('Pause→Resume caption history continuity', 'scripts/recording-caption-pause-resume.test.mjs'),
 ]);
 
 if (passed) {
