@@ -1,3 +1,4 @@
+import { boundedFetch, isBoundedFetchTimeout } from './boundedFetch';
 import { API_BASE_URL } from './config';
 
 /**
@@ -157,11 +158,16 @@ export async function fetchPlanStatus(accessToken: string | null | undefined): P
 
   let response: Response;
   try {
-    response = await fetch(`${API_BASE_URL}/api/quota/status`, {
+    response = await boundedFetch(`${API_BASE_URL}/api/quota/status`, {
       method: 'GET',
       headers: { Authorization: `Bearer ${accessToken}` },
     });
-  } catch {
+  } catch (error) {
+    // A hung plan/status fetch must not keep a foreground refresh spinning;
+    // it fails fast and the caller keeps the last-known (possibly active) plan.
+    if (isBoundedFetchTimeout(error)) {
+      throw new Error('Account status is taking longer than expected. Please try again.');
+    }
     throw new Error('Network unavailable. Check your connection and try again.');
   }
 

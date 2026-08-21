@@ -16,6 +16,7 @@ import {
 import { Platform } from 'react-native';
 
 import { API_BASE_URL } from './config';
+import { boundedFetch, isBoundedFetchTimeout } from './boundedFetch';
 import { logIap } from './iapLog';
 import type { BackendEntitlement, EntitlementResponse } from './purchases';
 import {
@@ -46,6 +47,7 @@ export type SubscriptionResultCode =
   | 'expired'
   | 'revoked'
   | 'offline'
+  | 'verify_timeout'
   | 'storekit_error';
 
 export type SubscriptionResult = {
@@ -104,13 +106,18 @@ function result(code: SubscriptionResultCode, message?: string): SubscriptionRes
     expired: 'The subscription has expired.',
     revoked: 'The subscription was refunded or revoked.',
     offline: 'Network unavailable. Check your connection and try again.',
+    verify_timeout:
+      'Purchase verification is taking longer than expected. You will not be charged again. Please refresh access or restore purchases.',
     storekit_error: 'The Apple purchase could not be completed. Please try again.',
   };
   return { ok: code === 'success', code, message: message ?? defaults[code] };
 }
 
 async function fetchJson<T>(url: string, accessToken: string, init?: RequestInit): Promise<{ status: number; payload: T }> {
-  const response = await fetch(url, {
+  // Bounded: a hung backend can no longer leave the Subscribe spinner spinning
+  // forever. On timeout boundedFetch rejects with BoundedFetchTimeoutError,
+  // which callers map to a recoverable `verify_timeout` result.
+  const response = await boundedFetch(url, {
     ...init,
     headers: {
       Accept: 'application/json',
@@ -172,18 +179,21 @@ class SubscriptionService {
     if (!API_BASE_URL) return result('offline');
     if (this.purchaseInFlight) return result('purchase_in_progress');
     this.purchaseInFlight = true;
+    logIap('IAP_PURCHASE_START', productIdForPlan(plan));
     try {
       const catalog = await this.loadProducts();
       const availablePlan = chooseAvailablePlan(plan, catalog);
       if (availablePlan !== plan || !catalog[plan]) return result('product_unavailable');
       const purchase = await this.requestWithTimeout(plan, accountId);
       if (purchase.purchaseState === 'pending') return result('pending');
+      logIap('IAP_VERIFY_START');
       return await this.verify(purchase, accessToken);
     } catch (error) {
       return this.mapError(error);
     } finally {
       this.pending = null;
       this.purchaseInFlight = false;
+      logIap('IAP_PURCHASE_FINISH');
     }
   }
 
@@ -208,6 +218,11 @@ class SubscriptionService {
         resolve: (purchase) => finish('resolve', purchase),
         reject: (error) => finish('reject', error),
       };
+      // expo-iap delivers the purchase outcome through purchaseUpdatedListener /
+      // purchaseErrorListener — NOT requestPurchase's return value. Keeping a
+      // single authoritative completion path (the listeners + the 120s bound)
+      // prevents the "dispatched payload" from double-resolving and short-
+      // circuiting the real transaction.
       requestPurchase({
         type: 'subs',
         request: {
@@ -217,10 +232,6 @@ class SubscriptionService {
             andDangerouslyFinishTransactionAutomatically: false,
           },
         },
-      }).then((value) => {
-        const values = Array.isArray(value) ? value : value ? [value] : [];
-        const direct = values.find((candidate) => candidate.productId === requestedProductId);
-        if (direct) finish('resolve', direct);
       }).catch((error) => finish('reject', error instanceof Error ? error : new Error(String(error))));
     });
   }
@@ -239,8 +250,9 @@ class SubscriptionService {
           originalTransactionId: originalTransactionId(purchase),
         }),
       });
-    } catch {
-      return result('offline');
+    } catch (error) {
+      logIap('IAP_VERIFY_RESULT', isBoundedFetchTimeout(error) ? 'timeout' : 'network');
+      return isBoundedFetchTimeout(error) ? result('verify_timeout') : result('offline');
     }
     const payload = response.payload ?? {};
     if (shouldFinishSubscriptionTransaction(payload)) {
@@ -301,8 +313,13 @@ class SubscriptionService {
 
   async getEntitlement(accessToken: string | null): Promise<EntitlementResponse | null> {
     if (!accessToken || !API_BASE_URL) return null;
-    const response = await fetchJson<EntitlementResponse>(`${API_BASE_URL}/api/iap/entitlement`, accessToken, { method: 'GET' });
-    return response.status >= 200 && response.status < 300 ? response.payload : null;
+    try {
+      const response = await fetchJson<EntitlementResponse>(`${API_BASE_URL}/api/iap/entitlement`, accessToken, { method: 'GET' });
+      return response.status >= 200 && response.status < 300 ? response.payload : null;
+    } catch (error) {
+      logIap('IAP_ENTITLEMENT_REFRESH', isBoundedFetchTimeout(error) ? 'timeout' : 'error');
+      return null;
+    }
   }
 
   async manageSubscriptions(): Promise<void> {
@@ -311,6 +328,7 @@ class SubscriptionService {
   }
 
   private mapError(error: unknown): SubscriptionResult {
+    if (isBoundedFetchTimeout(error)) return result('verify_timeout');
     const name = error instanceof Error ? error.name.toLowerCase() : '';
     const message = error instanceof Error ? error.message.toLowerCase() : '';
     if (name === ErrorCode.UserCancelled || name.includes('cancel') || message.includes('cancel')) return result('cancelled');

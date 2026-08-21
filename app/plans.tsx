@@ -167,6 +167,11 @@ export default function PlansScreen() {
         Alert.alert(t('plans.purchasePending'), result.message);
         return;
       }
+      if (result.code === 'verify_timeout') {
+        // Apple may already have completed the transaction — never claim it failed.
+        Alert.alert(t('plans.refreshNeeded'), result.message);
+        return;
+      }
       if (!result.ok) {
         Alert.alert(t('plans.purchaseIncomplete'), result.message);
         return;
