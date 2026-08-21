@@ -1,33 +1,34 @@
 /**
- * TEMPORARY preview configuration for the Student Basic subscription page.
+ * Live-subscription release gate for the Student Access subscription surface.
  *
- * The real auto-renewable Monthly / Annual subscription products do NOT exist in
- * App Store Connect yet, so `app/plans.tsx` is a VISUAL PREVIEW only:
+ * The live surface (real StoreKit product fetch, the Subscribe action, and
+ * localized StoreKit prices) is enabled ONLY when
+ * `EXPO_PUBLIC_SUBSCRIPTIONS_LIVE=true` is set in the build environment. While
+ * the flag is absent/false the Plans screen stays a safe VISUAL PREVIEW:
  *
  *   • SUBSCRIPTIONS_LIVE gates the Subscribe button off. While it is `false`, no
- *     purchase can be made and neither the Monthly nor the Annual card calls the
- *     existing consumable purchase method (`purchaseStudentPass`).
- *   • PREVIEW_PRICES are placeholder display strings shown ONLY while the page is
- *     a preview. They are display-only; no purchase or verification logic reads
- *     them, so they can never influence what a user is actually charged.
+ *     purchase can be made and no product fetch is issued.
+ *   • PREVIEW_PRICES are placeholder display strings shown ONLY in preview mode.
+ *     They are display-only; no purchase or verification logic reads them, so
+ *     they can never influence what a user is actually charged.
  *
- * ── Commercialization V2 (when the subscription products are created) ──
- *   1. Set SUBSCRIPTIONS_LIVE = true.
- *   2. DELETE PREVIEW_PRICES. Render each plan's price from StoreKit's localized
- *      `product.displayPrice` (fetched in lib/purchases.ts) — NEVER from a
- *      hard-coded value. StoreKit is the single source of truth for live prices,
- *      including per-storefront currency and formatting.
+ * The existence/status of the products in App Store Connect is a mutable
+ * external fact and is intentionally NOT encoded here. This gate is purely a
+ * build-time switch: production is live, everything else (dev/preview/CI) stays
+ * safely gated unless the flag is explicitly set.
  */
 
 /**
- * Release gate. Production defaults to false until ASC products, backend
- * deployment, notifications, and true-device Sandbox verification are complete.
+ * Build-time release gate. `true` only when the production build environment
+ * sets `EXPO_PUBLIC_SUBSCRIPTIONS_LIVE=true`; defaults to the safe preview in
+ * every other environment.
  */
 export const SUBSCRIPTIONS_LIVE = process.env.EXPO_PUBLIC_SUBSCRIPTIONS_LIVE === 'true';
 
 /**
- * Placeholder prices for the preview only. Temporary — replace with StoreKit
- * `product.displayPrice` when SUBSCRIPTIONS_LIVE becomes true (see file header).
+ * Preview-only placeholder prices. When SUBSCRIPTIONS_LIVE is true these are
+ * never rendered — `app/plans.tsx` uses StoreKit's localized `product.displayPrice`
+ * (the single source of truth for live prices, including per-storefront currency).
  */
 export const PREVIEW_PRICES = {
   monthly: 'US$4.99',
