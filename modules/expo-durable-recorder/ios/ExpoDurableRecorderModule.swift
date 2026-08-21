@@ -40,7 +40,7 @@ public final class ExpoDurableRecorderModule: Module {
         "moduleAvailable": true,
         "contractVersion": 1,
         "platform": "ios",
-        "implementation": "native-foreground-audio"
+        "implementation": "native-background-audio"
       ]
     }
 

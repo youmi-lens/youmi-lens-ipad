@@ -6,6 +6,8 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import type { ComponentType } from 'react';
 
+import { TutorialOverlay } from '@/components/TutorialOverlay';
+import { TutorialTourOverlay } from '@/components/TutorialTourOverlay';
 import { colors } from '@/constants/theme';
 import { AuthProvider, useAuth } from '@/lib/auth';
 import { I18nProvider } from '@/lib/i18n';
@@ -14,6 +16,8 @@ import { useProcessingOrchestrator } from '@/lib/useProcessingOrchestrator';
 import { RecordingNotesProvider } from '@/lib/recordingNotes';
 import { isR6SimulatorVerifyEnabled } from '@/lib/recording/r6VerifyGate';
 import { DataProvider } from '@/lib/store';
+import { TutorialProvider } from '@/lib/tutorial';
+import { TutorialTourProvider } from '@/lib/tutorialTour';
 
 export const unstable_settings = {
   anchor: '(tabs)',
@@ -36,7 +40,13 @@ export default function RootLayout() {
             <DataProvider>
               <RecordingNotesProvider>
                 <ProcessingOrchestrator />
-                <AuthGate />
+                <TutorialProvider>
+                  <TutorialTourProvider>
+                    <AuthGate />
+                    <TutorialOverlay />
+                    <TutorialTourOverlay />
+                  </TutorialTourProvider>
+                </TutorialProvider>
               </RecordingNotesProvider>
               <StatusBar style="dark" />
             </DataProvider>
@@ -137,6 +147,7 @@ function AuthGate() {
         <Stack.Screen name="plans" />
         <Stack.Screen name="material/[id]" />
         <Stack.Screen name="lecture-material/[lectureId]/[materialId]" />
+        {__DEV__ && process.env.EXPO_PUBLIC_VISUAL_FIXTURE === '1' ? <Stack.Screen name="dev-visual-fixture" /> : null}
       </Stack.Protected>
     </Stack>
     {R6SimulatorVerifyHost ? <R6SimulatorVerifyHost /> : null}

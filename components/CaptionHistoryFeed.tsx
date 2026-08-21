@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   FlatList,
+  Pressable,
   StyleSheet,
   Text,
   View,
@@ -9,8 +10,15 @@ import {
 } from 'react-native';
 
 import { NativeLookupText } from '@/components/NativeLookupText';
+import { useIsCompactWidth } from '@/constants/responsive';
 import { colors } from '@/constants/theme';
-import { historyLineCount, isNearBottom } from '@/lib/captionFeed.mjs';
+import {
+  CAPTION_FOLLOW_MODE,
+  CAPTION_SCROLL_ORIGIN,
+  followModeAfterScroll,
+  historyLineCount,
+  shouldRequestCaptionAutoScroll,
+} from '@/lib/captionFeed.mjs';
 import type { LiveCaptionLine } from '@/lib/liveCaptions';
 import { useT } from '@/lib/i18n';
 
@@ -38,7 +46,7 @@ export type CaptionHistoryFeedProps = {
  *     updating live even while the student scrolls the history above.
  *
  * History auto-follows new lines only while the user is at/near the bottom; once
- * they scroll up it stays where they left it (no jump-to-latest button). English
+ * they scroll up it stays where they left it and offers Jump to Latest. English
  * text stays selectable for Copy and supports direct native dictionary lookup.
  */
 export function CaptionHistoryFeed({
@@ -48,8 +56,18 @@ export function CaptionHistoryFeed({
   translatingPending,
 }: CaptionHistoryFeedProps) {
   const t = useT();
+  const isCompact = useIsCompactWidth();
   const listRef = useRef<FlatList<LiveCaptionLine>>(null);
-  const [autoFollow, setAutoFollow] = useState(true);
+  const [followMode, setFollowMode] = useState<string>(CAPTION_FOLLOW_MODE.FOLLOWING);
+  const followModeRef = useRef<string>(followMode);
+  const scrollOriginRef = useRef<string>(CAPTION_SCROLL_ORIGIN.NONE);
+  const pendingAutoScrollRef = useRef(false);
+  const previousUpdateRef = useRef({ lineCount: lines.length, partialEnglish });
+
+  const updateFollowMode = useCallback((next: string) => {
+    followModeRef.current = next;
+    setFollowMode(next);
+  }, []);
 
   const hasLive = partialEnglish.trim().length > 0;
 
@@ -62,22 +80,54 @@ export function CaptionHistoryFeed({
   const hasCurrent = currentEnglish.trim().length > 0;
 
   const scrollHistoryToEnd = useCallback((animated: boolean) => {
+    scrollOriginRef.current = CAPTION_SCROLL_ORIGIN.PROGRAMMATIC;
     listRef.current?.scrollToEnd({ animated });
   }, []);
 
-  // Keep the newest history line in view as content moves up into the list — but
-  // only while the user is following at the bottom of the history area.
+  // A caption mutation creates at most one logical request. onContentSizeChange
+  // may complete that request after FlatList measures the new row, but never
+  // initiates a request of its own.
   useEffect(() => {
-    if (!autoFollow) return;
-    const id = requestAnimationFrame(() => scrollHistoryToEnd(true));
+    const previous = previousUpdateRef.current;
+    const reason = lines.length !== previous.lineCount ? 'final-caption'
+      : partialEnglish !== previous.partialEnglish ? 'interim-caption'
+      : null;
+    previousUpdateRef.current = { lineCount: lines.length, partialEnglish };
+    if (!reason || !shouldRequestCaptionAutoScroll({ mode: followModeRef.current, reason })) return;
+    pendingAutoScrollRef.current = true;
+    const id = requestAnimationFrame(() => {
+      scrollHistoryToEnd(true);
+      pendingAutoScrollRef.current = false;
+    });
     return () => cancelAnimationFrame(id);
-  }, [autoFollow, historyLines.length, scrollHistoryToEnd]);
+  }, [lines.length, partialEnglish, scrollHistoryToEnd]);
 
   const handleScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    if (scrollOriginRef.current !== CAPTION_SCROLL_ORIGIN.USER) return;
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
     const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y;
-    setAutoFollow(isNearBottom(distanceFromBottom));
+    updateFollowMode(followModeAfterScroll({
+      mode: followModeRef.current,
+      origin: scrollOriginRef.current,
+      distanceFromBottomPx: distanceFromBottom,
+    }));
+  }, [updateFollowMode]);
+
+  const beginUserScroll = useCallback(() => {
+    scrollOriginRef.current = CAPTION_SCROLL_ORIGIN.USER;
   }, []);
+
+  const endUserScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    handleScroll(event);
+    scrollOriginRef.current = CAPTION_SCROLL_ORIGIN.NONE;
+  }, [handleScroll]);
+
+  const jumpToLatest = useCallback(() => {
+    updateFollowMode(CAPTION_FOLLOW_MODE.FOLLOWING);
+    pendingAutoScrollRef.current = true;
+    scrollHistoryToEnd(true);
+    pendingAutoScrollRef.current = false;
+  }, [scrollHistoryToEnd, updateFollowMode]);
 
   const renderItem = useCallback(({ item }: { item: LiveCaptionLine }) => (
     <View style={styles.historyBlock}>
@@ -101,20 +151,36 @@ export function CaptionHistoryFeed({
         data={historyLines}
         keyExtractor={(item) => item.id}
         renderItem={renderItem}
-        contentContainerStyle={styles.historyContent}
+        contentContainerStyle={[styles.historyContent, isCompact && styles.historyContentCompact]}
+        maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
         showsVerticalScrollIndicator={false}
         scrollEventThrottle={16}
         onScroll={handleScroll}
+        onScrollBeginDrag={beginUserScroll}
+        onScrollEndDrag={endUserScroll}
+        onMomentumScrollBegin={beginUserScroll}
+        onMomentumScrollEnd={endUserScroll}
         onContentSizeChange={() => {
-          if (autoFollow) scrollHistoryToEnd(false);
+          if (pendingAutoScrollRef.current) scrollHistoryToEnd(false);
         }}
         initialNumToRender={12}
         maxToRenderPerBatch={12}
         windowSize={11}
       />
 
+      {followMode === CAPTION_FOLLOW_MODE.BROWSING_HISTORY ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Jump to latest caption"
+          onPress={jumpToLatest}
+          style={({ pressed }) => [styles.jumpToLatest, pressed && styles.jumpToLatestPressed]}
+        >
+          <Text style={styles.jumpToLatestText}>Jump to Latest</Text>
+        </Pressable>
+      ) : null}
+
       {/* Fixed current caption — stays put and updates live while history scrolls. */}
-      <View style={styles.currentBlock}>
+      <View style={[styles.currentBlock, isCompact && styles.currentBlockCompact]}>
         {hasCurrent ? (
           <>
             <NativeLookupText
@@ -159,6 +225,9 @@ const styles = StyleSheet.create({
     paddingBottom: 8,
     gap: 14,
   },
+  historyContentCompact: {
+    paddingHorizontal: 20,
+  },
   historyBlock: {
     maxWidth: 900,
     gap: 2,
@@ -183,6 +252,9 @@ const styles = StyleSheet.create({
     paddingTop: 12,
     paddingBottom: 20,
     gap: 3,
+  },
+  currentBlockCompact: {
+    paddingHorizontal: 20,
   },
   enCurrent: {
     fontSize: 29,
@@ -209,4 +281,14 @@ const styles = StyleSheet.create({
     color: colors.textTertiary,
     fontWeight: '500',
   },
+  jumpToLatest: {
+    alignSelf: 'center',
+    marginBottom: 4,
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    backgroundColor: colors.deepNavy,
+  },
+  jumpToLatestPressed: { opacity: 0.8 },
+  jumpToLatestText: { color: colors.pearlWhite, fontSize: 13, fontWeight: '700' },
 });

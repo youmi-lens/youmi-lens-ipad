@@ -121,7 +121,13 @@ export default function ProcessingScreen() {
           </GlassCard>
 
           <View style={styles.actions}>
-            {processingDone ? <PrimaryButton label={t('processing.viewLecture')} icon="document-text" onPress={viewLecture} /> : null}
+            {/* HARD INVARIANT: AI processing failure/stall must NEVER trap the
+                user outside the Lecture. The recording is valid content the
+                moment it is captured, so "View Lecture" is available as soon as
+                the lecture exists — not gated on processing completing.
+                Transcript/summary simply show pending/unavailable inside until
+                (or unless) processing finishes. */}
+            {lecture ? <PrimaryButton label={t('processing.viewLecture')} icon="document-text" onPress={viewLecture} /> : null}
             <SecondaryButton label={t('processing.backToLectures')} icon="chevron-back" onPress={backToLectures} />
           </View>
         </View>

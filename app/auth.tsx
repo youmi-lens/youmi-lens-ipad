@@ -25,6 +25,14 @@ import { PrimaryButton } from '@/components/PrimaryButton';
 import { SecondaryButton } from '@/components/SecondaryButton';
 import { colors, fontSize, radius, spacing } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
+import {
+  canEnterSignupCode,
+  decideSignupResendGate,
+  normalizeEmail,
+  signupCodeDetailMessageKey,
+  signupCodeSuccessMessageKey,
+  type SignupCodeEntryReason,
+} from '@/lib/authSignup';
 import { useT } from '@/lib/i18n';
 import { checkEmailExists } from '@/lib/checkEmail';
 
@@ -40,7 +48,6 @@ type AuthStep =
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const RESEND_COOLDOWN_MS = 60_000;
-const RESEND_RATE_LIMIT_PATTERN = /only request this|rate limit|too many|security purposes/i;
 
 export default function AuthScreen() {
   const t = useT();
@@ -69,7 +76,9 @@ export default function AuthScreen() {
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [pendingEmail, setPendingEmail] = useState('');
+  const [signupCodeReason, setSignupCodeReason] = useState<SignupCodeEntryReason | null>(null);
   const [code, setCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [persistentError, setPersistentError] = useState<string | null>(null);
@@ -78,6 +87,7 @@ export default function AuthScreen() {
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [signInPasswordVisible, setSignInPasswordVisible] = useState(false);
   const [createPasswordVisible, setCreatePasswordVisible] = useState(false);
+  const [createConfirmPasswordVisible, setCreateConfirmPasswordVisible] = useState(false);
   const [resetPasswordVisible, setResetPasswordVisible] = useState(false);
   const [resetConfirmPasswordVisible, setResetConfirmPasswordVisible] = useState(false);
   const [busyAction, setBusyAction] = useState<'send' | 'verify' | 'signin' | 'resend' | 'updatePassword' | 'provider' | 'username' | 'signout' | null>(null);
@@ -181,46 +191,53 @@ export default function AuthScreen() {
     setResendCooldownUntil(nextCooldownUntil);
   };
 
-  const mapSignupResendError = (message: string) =>
-    RESEND_RATE_LIMIT_PATTERN.test(message) ? t('auth.resendWait') : message;
+  const mapSignupResendError = (message: string, kind: 'rateLimited' | 'failed') =>
+    kind === 'rateLimited' ? t('auth.resendWait') : t('auth.resendFailed');
+
+  const enterSignupCodeStep = (normalizedEmail: string, reason: SignupCodeEntryReason) => {
+    setPendingEmail(normalizedEmail);
+    setCode('');
+    setError(null);
+    setPersistentError(null);
+    setSignupCodeReason(reason);
+    const successKey = signupCodeSuccessMessageKey(reason);
+    setSuccessMessage(successKey ? t(successKey) : null);
+    if (reason === 'sent' || reason === 'resent') startResendCooldown();
+    setStep('signupCode');
+  };
 
   /**
    * Resume a known PENDING (unconfirmed) signup for this email. Call this only
    * after a trusted signal, such as the backend status or password sign-in's
-   * "Email not confirmed" response; Supabase resend itself is enumeration-safe
-   * and cannot classify completed vs pending accounts reliably.
+   * "Email not confirmed" response. Enter verification only when resend succeeds.
    */
-  const resumePendingVerification = async (trimmedEmail: string): Promise<boolean> => {
-    const { error: resendError } = await resendSignupCode(trimmedEmail);
-    setPendingEmail(trimmedEmail);
-    setCode('');
-    setError(null);
-    setPersistentError(null);
-    startResendCooldown();
-    if (resendError && !RESEND_RATE_LIMIT_PATTERN.test(resendError)) {
+  const resumePendingVerification = async (normalizedEmail: string): Promise<boolean> => {
+    const { error: resendError } = await resendSignupCode(normalizedEmail);
+    const gate = decideSignupResendGate(resendError);
+    if (gate.startCooldown) startResendCooldown();
+    if (!gate.enterSignupCode) {
       setSuccessMessage(null);
-      setError(resendError);
-      setStep('signupCode');
-      return true;
+      setError(
+        gate.messageKind === 'rateLimited'
+          ? t('auth.resendWait')
+          : mapSignupResendError(resendError ?? '', 'failed'),
+      );
+      return false;
     }
-    if (resendError) setError(t('auth.resendWait'));
-    setSuccessMessage(
-      resendError
-        ? t('auth.existingCode')
-        : t('auth.sentCode'),
-    );
-    setStep('signupCode');
+    enterSignupCodeStep(normalizedEmail, 'resent');
     return true;
   };
 
   // ── Create Profile: step 1 — Supabase signUp, which emails the code ─────────
   const handleCreateProfile = async () => {
-    const trimmedEmail = email.trim();
+    const normalized = normalizeEmail(email);
 
-    const emailError = validateEmail(trimmedEmail);
+    const emailError = validateEmail(normalized);
     if (emailError) return setError(emailError);
     if (!password) return setError(t('auth.enterPassword'));
     if (password.length < 8) return setError(t('auth.passwordLength'));
+    if (!confirmPassword) return setError(t('auth.confirmRequired'));
+    if (password !== confirmPassword) return setError(t('auth.passwordMismatch'));
 
     setBusyAction('send');
     setError(null);
@@ -230,24 +247,26 @@ export default function AuthScreen() {
     // One email = one account. Check BEFORE signUp: with email enumeration
     // protection on, Supabase signUp returns a fake success for an existing
     // email, so this pre-check is what blocks duplicates before Verify Email.
-    const emailCheck = await checkEmailExists(trimmedEmail);
+    const emailCheck = await checkEmailExists(normalized);
     if (!emailCheck.ok) {
       setBusyAction(null);
       setError(emailCheck.message);
       return;
     }
     if (emailCheck.exists) {
-      if (pendingEmail && pendingEmail.trim().toLowerCase() === trimmedEmail.toLowerCase()) {
+      if (pendingEmail && normalizeEmail(pendingEmail) === normalized && signupCodeReason) {
+        // Already confirmed a send/resend in this session — reopen code entry neutrally.
         setBusyAction(null);
         setCode('');
         setError(null);
         setPersistentError(null);
-        setSuccessMessage(t('auth.codeAlreadySent'));
+        setSuccessMessage(null);
+        setSignupCodeReason('neutral');
         setStep('signupCode');
         return;
       }
       if (emailCheck.status === 'pending') {
-        await resumePendingVerification(trimmedEmail);
+        await resumePendingVerification(normalized);
         setBusyAction(null);
         return;
       }
@@ -258,10 +277,14 @@ export default function AuthScreen() {
       return;
     }
 
-    const { error: createError, session: nextSession } = await createProfileWithPassword(trimmedEmail, password);
-    setBusyAction(null);
+    const {
+      error: createError,
+      session: nextSession,
+      signupStatus,
+    } = await createProfileWithPassword(normalized, password);
 
     if (createError) {
+      setBusyAction(null);
       if (createError.includes('already has a Youmi Lens account')) {
         setEntryMode('signIn');
         setStep('entry');
@@ -273,15 +296,38 @@ export default function AuthScreen() {
     }
 
     // Email confirmation disabled → signed in immediately.
-    if (nextSession) {
+    if (nextSession || signupStatus === 'authenticated') {
+      setBusyAction(null);
       return;
     }
 
-    // Email confirmation enabled → verify the emailed code next.
-    setPendingEmail(trimmedEmail);
-    setCode('');
-    startResendCooldown();
-    setStep('signupCode');
+    if (signupStatus === 'confirmationRequired' && canEnterSignupCode({ classification: signupStatus })) {
+      setBusyAction(null);
+      enterSignupCodeStep(normalized, 'sent');
+      return;
+    }
+
+    // Obfuscated / empty identities: one remedial resend; enter only if it succeeds.
+    if (signupStatus === 'existingOrObfuscated') {
+      const { error: resendError } = await resendSignupCode(normalized);
+      const gate = decideSignupResendGate(resendError);
+      setBusyAction(null);
+      if (gate.startCooldown) startResendCooldown();
+      if (!gate.enterSignupCode) {
+        setSuccessMessage(null);
+        setError(
+          gate.messageKind === 'rateLimited'
+            ? t('auth.resendWait')
+            : t('auth.cannotCreateAccount'),
+        );
+        return;
+      }
+      enterSignupCodeStep(normalized, 'resent');
+      return;
+    }
+
+    setBusyAction(null);
+    setError(t('auth.cannotCreateAccount'));
   };
 
   // ── Create Profile: step 2 — verify the Supabase signup code ────────────────
@@ -292,7 +338,8 @@ export default function AuthScreen() {
 
     setBusyAction('verify');
     setError(null);
-    const { error: verifyError } = await verifySignupCode(email.trim(), trimmedCode);
+    const verifyEmail = normalizeEmail(pendingEmail || email);
+    const { error: verifyError } = await verifySignupCode(verifyEmail, trimmedCode);
     setBusyAction(null);
 
     if (verifyError) {
@@ -341,17 +388,21 @@ export default function AuthScreen() {
       setSuccessMessage(null);
       return;
     }
-    const resendEmail = pendingEmail || email.trim();
+    const resendEmail = normalizeEmail(pendingEmail || email);
     setBusyAction('resend');
     setError(null);
     setSuccessMessage(null);
     const { error: resendError } = await resendSignupCode(resendEmail);
     setBusyAction(null);
-    if (resendError) {
-      if (RESEND_RATE_LIMIT_PATTERN.test(resendError)) startResendCooldown();
-      setError(mapSignupResendError(resendError));
+    const gate = decideSignupResendGate(resendError);
+    if (!gate.enterSignupCode) {
+      if (gate.startCooldown) startResendCooldown();
+      setSuccessMessage(null);
+      setError(mapSignupResendError(resendError ?? '', gate.messageKind === 'rateLimited' ? 'rateLimited' : 'failed'));
       return;
     }
+    setPendingEmail(resendEmail);
+    setSignupCodeReason('resent');
     startResendCooldown();
     setSuccessMessage(t('auth.sentCode'));
   };
@@ -363,6 +414,7 @@ export default function AuthScreen() {
     setResetPassword('');
     setResetConfirmPassword('');
     setSuccessMessage(null);
+    setSignupCodeReason(null);
   };
 
   // Escape hatch for the session-gated onboarding states — "Choose your username"
@@ -383,6 +435,7 @@ export default function AuthScreen() {
       setUsername('');
       setCode('');
       setPassword('');
+      setConfirmPassword('');
       setResetPassword('');
       setResetConfirmPassword('');
       setSuccessMessage(null);
@@ -394,21 +447,21 @@ export default function AuthScreen() {
   };
 
   const handleSendSignInCode = async () => {
-    const trimmedEmail = email.trim();
-    const emailError = validateEmail(trimmedEmail);
+    const normalized = normalizeEmail(email);
+    const emailError = validateEmail(normalized);
     if (emailError) return setError(emailError);
 
     setBusyAction('send');
     setError(null);
     setPersistentError(null);
-    const { error: sendError } = await sendSignInCode(trimmedEmail);
+    const { error: sendError } = await sendSignInCode(normalized);
     setBusyAction(null);
     if (sendError) {
       setError(sendError);
       return;
     }
 
-    setPendingEmail(trimmedEmail);
+    setPendingEmail(normalized);
     setCode('');
     setStep('signInCodeVerify');
   };
@@ -420,7 +473,10 @@ export default function AuthScreen() {
 
     setBusyAction('verify');
     setError(null);
-    const { error: verifyError, session: nextSession } = await verifySignInCode(pendingEmail, trimmedCode);
+    const { error: verifyError, session: nextSession } = await verifySignInCode(
+      normalizeEmail(pendingEmail),
+      trimmedCode,
+    );
     setBusyAction(null);
     if (verifyError) {
       setError(verifyError);
@@ -433,14 +489,14 @@ export default function AuthScreen() {
   const handleResendSignInCode = async () => {
     setBusyAction('resend');
     setError(null);
-    const { error: resendError } = await sendSignInCode(pendingEmail);
+    const { error: resendError } = await sendSignInCode(normalizeEmail(pendingEmail));
     setBusyAction(null);
     if (resendError) setError(resendError);
   };
 
   const handleSignIn = async () => {
-    const trimmedEmail = email.trim();
-    const emailError = validateEmail(trimmedEmail);
+    const normalized = normalizeEmail(email);
+    const emailError = validateEmail(normalized);
     if (emailError) return setError(emailError);
     if (!password) return setError(t('auth.passwordRequired'));
 
@@ -459,12 +515,12 @@ export default function AuthScreen() {
     // authenticated session mounted, so the REPLACE was dropped and the login card
     // was left blank on release builds (build 22). Removing it fixes that.
     try {
-      const { error: signInError } = await signInWithPassword(trimmedEmail, password);
+      const { error: signInError } = await signInWithPassword(normalized, password);
       if (signInError) {
         // Pending signup: the account exists but its email was never verified.
         // Route to the verification screen instead of a dead-end error.
         if (/not confirmed/i.test(signInError)) {
-          const resumed = await resumePendingVerification(trimmedEmail);
+          const resumed = await resumePendingVerification(normalized);
           if (resumed) return;
           setError(t('auth.emailUnverified'));
           return;
@@ -520,14 +576,14 @@ export default function AuthScreen() {
   };
 
   const handleSendPasswordResetCode = async () => {
-    const trimmedEmail = email.trim();
-    const emailError = validateEmail(trimmedEmail);
+    const normalized = normalizeEmail(email);
+    const emailError = validateEmail(normalized);
     if (emailError) return setError(emailError);
 
     setBusyAction('send');
     setError(null);
     setSuccessMessage(null);
-    const { error: sendError } = await sendPasswordResetCode(trimmedEmail);
+    const { error: sendError } = await sendPasswordResetCode(normalized);
     setBusyAction(null);
 
     if (sendError && !sendError.toLowerCase().includes('user not found')) {
@@ -535,7 +591,7 @@ export default function AuthScreen() {
       return;
     }
 
-    setPendingEmail(trimmedEmail);
+    setPendingEmail(normalized);
     setCode('');
     setSuccessMessage(t('auth.resetCodeSent'));
     setStep('resetVerify');
@@ -548,7 +604,10 @@ export default function AuthScreen() {
 
     setBusyAction('verify');
     setError(null);
-    const { error: verifyError, session: recoverySession } = await verifyPasswordResetCode(pendingEmail, trimmedCode);
+    const { error: verifyError, session: recoverySession } = await verifyPasswordResetCode(
+      normalizeEmail(pendingEmail),
+      trimmedCode,
+    );
     setBusyAction(null);
     if (verifyError) {
       setError(verifyError);
@@ -597,6 +656,7 @@ export default function AuthScreen() {
     await signOut();
     setBusyAction(null);
     setPassword('');
+    setConfirmPassword('');
     setResetPassword('');
     setResetConfirmPassword('');
     setCode('');
@@ -667,7 +727,7 @@ export default function AuthScreen() {
               <View style={styles.codeWrap}>
                 <View style={styles.headerCopy}>
                   <Text style={styles.cardTitle}>{t('auth.verifyEmail')}</Text>
-                  <Text style={styles.cardSubtitle}>{t('auth.verifyDetail')}</Text>
+                  <Text style={styles.cardSubtitle}>{t(signupCodeDetailMessageKey(signupCodeReason))}</Text>
                 </View>
                 {successMessage ? <Text style={styles.success}>{successMessage}</Text> : null}
                 <View style={styles.fieldGroup}>
@@ -903,6 +963,10 @@ export default function AuthScreen() {
                     <View style={styles.fieldGroup}>
                       <Text style={styles.label}>{t('auth.password')}</Text>
                       <PasswordInput value={password} onChangeText={(value) => { setPassword(value); setError(null); }} placeholder={t('auth.passwordCreatePlaceholder')} visible={createPasswordVisible} onToggleVisible={() => setCreatePasswordVisible((current) => !current)} textContentType="newPassword" />
+                    </View>
+                    <View style={styles.fieldGroup}>
+                      <Text style={styles.label}>{t('auth.confirmPassword')}</Text>
+                      <PasswordInput value={confirmPassword} onChangeText={(value) => { setConfirmPassword(value); setError(null); }} placeholder={t('auth.confirmPasswordPlaceholder')} visible={createConfirmPasswordVisible} onToggleVisible={() => setCreateConfirmPasswordVisible((current) => !current)} textContentType="newPassword" confirm />
                       <Text style={styles.hint}>{t('auth.verifyHint')}</Text>
                     </View>
                   </>

@@ -1,0 +1,793 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Youmi Lens — 前端 · 后端 · 数据库 怎么一起跑</title>
+  <style>
+    :root {
+      --navy: #061B34;
+      --ink: #0A2342;
+      --muted: #5A6B7D;
+      --line: #D7E0EA;
+      --ice: #F6F9FC;
+      --card: #FFFFFF;
+      --front: #1B4F72;
+      --back: #0E6655;
+      --db: #7D6608;
+      --front-soft: #E8F1F8;
+      --back-soft: #E8F6F2;
+      --db-soft: #F8F3E0;
+      --accent: #C0392B;
+      --shadow: 0 8px 28px rgba(6, 27, 52, 0.08);
+      --radius: 16px;
+      font-family: "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--ice);
+      color: var(--ink);
+      line-height: 1.55;
+    }
+
+    .wrap {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 28px 20px 64px;
+    }
+
+    header h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+      letter-spacing: -0.02em;
+      color: var(--navy);
+    }
+    header p {
+      margin: 0;
+      color: var(--muted);
+      max-width: 62ch;
+    }
+
+    .legend {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin: 22px 0 28px;
+    }
+    @media (max-width: 800px) {
+      .legend { grid-template-columns: 1fr; }
+    }
+
+    .role {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 16px;
+      box-shadow: var(--shadow);
+    }
+    .role .tag {
+      display: inline-block;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 4px 8px;
+      border-radius: 999px;
+      margin-bottom: 8px;
+    }
+    .role.front .tag { background: var(--front-soft); color: var(--front); }
+    .role.back .tag { background: var(--back-soft); color: var(--back); }
+    .role.db .tag { background: var(--db-soft); color: var(--db); }
+    .role h2 { margin: 0 0 6px; font-size: 18px; }
+    .role p { margin: 0; color: var(--muted); font-size: 14px; }
+    .role code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      background: var(--ice);
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+
+    .panel {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 18px;
+      margin-bottom: 18px;
+    }
+    .panel h3 {
+      margin: 0 0 10px;
+      font-size: 16px;
+      color: var(--navy);
+    }
+
+    .scenarios {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .scenarios button {
+      border: 1px solid var(--line);
+      background: var(--ice);
+      color: var(--ink);
+      border-radius: 999px;
+      padding: 8px 14px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    .scenarios button.active {
+      background: var(--navy);
+      border-color: var(--navy);
+      color: #fff;
+    }
+    .scenarios button:hover:not(.active) {
+      border-color: var(--navy);
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-top: 14px;
+    }
+    .controls button {
+      border: 0;
+      background: var(--navy);
+      color: #fff;
+      border-radius: 10px;
+      padding: 10px 16px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .controls button.secondary {
+      background: transparent;
+      color: var(--navy);
+      border: 1px solid var(--line);
+    }
+    .controls button:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    .step-meta {
+      margin-left: auto;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .stage {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 12px;
+      margin-top: 16px;
+      min-height: 320px;
+    }
+    @media (max-width: 800px) {
+      .stage { grid-template-columns: 1fr; }
+    }
+
+    .actor {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--ice);
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .actor.speaking.front { border-color: var(--front); background: var(--front-soft); }
+    .actor.speaking.back { border-color: var(--back); background: var(--back-soft); }
+    .actor.speaking.db { border-color: var(--db); background: var(--db-soft); }
+
+    .actor-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .avatar {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      font-weight: 800;
+      font-size: 14px;
+      flex-shrink: 0;
+    }
+    .actor.front .avatar { background: var(--front); }
+    .actor.back .avatar { background: var(--back); }
+    .actor.db .avatar { background: var(--db); }
+    .actor-head strong { display: block; font-size: 15px; }
+    .actor-head span { color: var(--muted); font-size: 12px; }
+
+    .bubble {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px;
+      min-height: 120px;
+      opacity: 0.35;
+      transform: translateY(4px);
+      transition: opacity 0.25s, transform 0.25s;
+    }
+    .actor.speaking .bubble {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    .bubble .kind {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+      color: var(--muted);
+    }
+    .bubble .say {
+      font-size: 15px;
+      color: var(--ink);
+      margin: 0 0 8px;
+    }
+    .bubble .tech {
+      margin: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      color: var(--muted);
+      background: var(--ice);
+      border-radius: 8px;
+      padding: 8px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .wire {
+      margin-top: 14px;
+      border: 1px dashed var(--line);
+      border-radius: 12px;
+      padding: 12px 14px;
+      background: #fff;
+    }
+    .wire strong { color: var(--navy); }
+    .wire p { margin: 4px 0 0; color: var(--muted); font-size: 14px; }
+
+    .map {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr;
+      gap: 12px;
+    }
+    @media (max-width: 800px) {
+      .map { grid-template-columns: 1fr; }
+    }
+    .map ul {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .map li { margin-bottom: 6px; }
+    .map code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      background: var(--ice);
+      padding: 1px 5px;
+      border-radius: 4px;
+      color: var(--ink);
+    }
+
+    footer {
+      margin-top: 28px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Youmi Lens：三方怎么一起把 App 跑起来</h1>
+      <p>
+        把 iPad 前端、云端后端、数据库想成三个会说话的同事。
+        点下面的场景，一步步看它们互相说「我要什么 / 我给你什么」。内容按你们仓库真实代码来。
+      </p>
+    </header>
+
+    <section class="legend">
+      <article class="role front">
+        <div class="tag">Frontend</div>
+        <h2>前端 · iPad App</h2>
+        <p>
+          用户看得见的界面与本机状态。<br />
+          代码：<code>app/</code> <code>components/</code> <code>lib/store.tsx</code><br />
+          本机小本本：AsyncStorage（课程 / 讲座先存在手机）
+        </p>
+      </article>
+      <article class="role back">
+        <div class="tag">Backend</div>
+        <h2>后端 · API + Auth</h2>
+        <p>
+          干重活：鉴权、收音频、触发 AI 转写。<br />
+          代码：<code>lib/auth.tsx</code> <code>uploadRecording.ts</code> <code>processRecording.ts</code><br />
+          接口：<code>/api/upload-audio</code> <code>/api/process-recording</code>
+        </p>
+      </article>
+      <article class="role db">
+        <div class="tag">Database</div>
+        <h2>数据库 · Supabase</h2>
+        <p>
+          长期保存账号与录音处理结果。<br />
+          表：<code>auth.users</code> <code>profiles</code> <code>recordings</code><br />
+          读回：<code>lib/syncRecording.ts</code> / <code>store.tsx</code>
+        </p>
+      </article>
+    </section>
+
+    <section class="panel">
+      <h3>1. 选一个真实场景</h3>
+      <div class="scenarios" id="scenarios"></div>
+      <div class="controls">
+        <button id="btnPlay" type="button">播放对话</button>
+        <button id="btnPrev" class="secondary" type="button">上一步</button>
+        <button id="btnNext" class="secondary" type="button">下一步</button>
+        <button id="btnReset" class="secondary" type="button">从头</button>
+        <div class="step-meta" id="stepMeta">步骤 0 / 0</div>
+      </div>
+
+      <div class="stage" aria-live="polite">
+        <div class="actor front" id="actor-front">
+          <div class="actor-head">
+            <div class="avatar">FE</div>
+            <div>
+              <strong>前端</strong>
+              <span>iPad App</span>
+            </div>
+          </div>
+          <div class="bubble">
+            <div class="kind" id="front-kind">等待开场…</div>
+            <p class="say" id="front-say">点「播放对话」开始。</p>
+            <pre class="tech" id="front-tech"></pre>
+          </div>
+        </div>
+        <div class="actor back" id="actor-back">
+          <div class="actor-head">
+            <div class="avatar">BE</div>
+            <div>
+              <strong>后端</strong>
+              <span>API + Auth</span>
+            </div>
+          </div>
+          <div class="bubble">
+            <div class="kind" id="back-kind">等待开场…</div>
+            <p class="say" id="back-say">我会听前端的请求。</p>
+            <pre class="tech" id="back-tech"></pre>
+          </div>
+        </div>
+        <div class="actor db" id="actor-db">
+          <div class="actor-head">
+            <div class="avatar">DB</div>
+            <div>
+              <strong>数据库</strong>
+              <span>Supabase tables</span>
+            </div>
+          </div>
+          <div class="bubble">
+            <div class="kind" id="db-kind">等待开场…</div>
+            <p class="say" id="db-say">我会存结果、回答案。</p>
+            <pre class="tech" id="db-tech"></pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="wire">
+        <strong id="wireTitle">当前在干什么</strong>
+        <p id="wireBody">选一个场景，看三方怎么接力。</p>
+      </div>
+    </section>
+
+    <section class="panel map">
+      <div>
+        <h3>2. 一张「谁找谁」总图</h3>
+        <ul>
+          <li><strong>登录</strong>：前端 → Supabase Auth（后端身份服务）→ 数据库里的用户 / <code>profiles</code></li>
+          <li><strong>上课录音</strong>：前端自己用麦克风写本地文件，先不上传</li>
+          <li><strong>结束课程</strong>：前端 → <code>POST /api/upload-audio</code> → 后端把文件放进存储，并在 <code>recordings</code> 记一行</li>
+          <li><strong>开始 AI</strong>：前端 → <code>POST /api/process-recording</code> → 后端改 <code>ai_status</code> 并处理音频</li>
+          <li><strong>拿结果</strong>：前端轮询读 <code>recordings</code>（转录 / 摘要）→ 写回本机 store，再画到讲座页</li>
+        </ul>
+      </div>
+      <div>
+        <h3>3. 对应你们仓库的文件</h3>
+        <ul>
+          <li>页面外壳：<code>app/_layout.tsx</code></li>
+          <li>本机数据管家：<code>lib/store.tsx</code></li>
+          <li>登录：<code>lib/auth.tsx</code> + <code>app/auth.tsx</code></li>
+          <li>录音：<code>lib/useLectureRecorder.ts</code> + <code>app/recording.tsx</code></li>
+          <li>上传：<code>lib/uploadRecording.ts</code></li>
+          <li>触发处理：<code>lib/processRecording.ts</code></li>
+          <li>后台流水线：<code>lib/useProcessingOrchestrator.ts</code></li>
+          <li>读云端结果：<code>lib/syncRecording.ts</code></li>
+          <li>结构说明：<code>lib/models.ts</code>（Course / Lecture）</li>
+        </ul>
+      </div>
+    </section>
+
+    <footer>
+      打开方式：在 Finder 里双击本文件，或拖进 Chrome / Safari。
+      路径：<code>docs/frontend-backend-database-demo.html</code>
+    </footer>
+  </div>
+
+  <script>
+    /**
+     * Each step highlights ONE speaker. Others keep their last line dimmed.
+     * kind: what kind of message (I need / I give / I ask / I store…)
+     */
+    const SCENARIOS = [
+      {
+        id: "login",
+        title: "场景 A · 注册 / 登录",
+        summary: "前端要身份，后端 Auth 验密码/验证码，数据库记住用户档案。",
+        steps: [
+          {
+            speaker: "front",
+            kind: "前端说：我需要",
+            say: "用户填了邮箱和密码。我想登录，请给我一个 session（通行证）。",
+            tech: "app/auth.tsx → lib/auth.tsx\nsignInWithPassword({ email, password })",
+            wire: "用户点 Sign In。前端还没进主页，先要证明「你是谁」。",
+          },
+          {
+            speaker: "back",
+            kind: "后端说：我需要",
+            say: "把邮箱、密码给我。我去 Auth 服务核对；对了就发通行证。",
+            tech: "Supabase Auth\n(由 lib/supabase.ts 客户端调用)",
+            wire: "这里的「后端」是 Supabase Auth，不是你们自己写的 Node 路由。",
+          },
+          {
+            speaker: "db",
+            kind: "数据库说：我给你",
+            say: "我这儿有 auth.users。核对通过后，前端还能读/写 profiles 用户名。",
+            tech: "tables: auth.users, profiles\nlib/auth.tsx → from('profiles')",
+            wire: "登录成功 → session 存进 AsyncStorage → AuthGate 放行进 (tabs)。",
+          },
+          {
+            speaker: "front",
+            kind: "前端说：我拿到了",
+            say: "有了 access_token。之后上传录音、触发处理，都会在请求头带上它。",
+            tech: "Authorization: Bearer <access_token>\nuseAuth().session",
+            wire: "通行证 = 后面所有云端动作的入场券。",
+          },
+        ],
+      },
+      {
+        id: "record-local",
+        title: "场景 B · 上课录音（先本机）",
+        summary: "这一段几乎只发生在前端 + 手机本地。后端/数据库先休息。",
+        steps: [
+          {
+            speaker: "front",
+            kind: "前端说：我自己干",
+            say: "用户选了课程，点开始录音。我要麦克风权限，把声音写成本地 .m4a。",
+            tech: "app/(tabs)/index.tsx → app/recording.tsx\nlib/useLectureRecorder.ts",
+            wire: "还没上传。网络挂了也能录，这是「本地优先」。",
+          },
+          {
+            speaker: "front",
+            kind: "前端说：我存本地",
+            say: "同时记下字幕、笔记、笔画。整节课先落成一个 Lecture，放进本机 store。",
+            tech: "lib/store.tsx + AsyncStorage\nkey: youmi.lectures.v1.<userId>",
+            wire: "数据库此时还没有完整 AI 结果；本机已经能继续录、暂停、恢复。",
+          },
+          {
+            speaker: "back",
+            kind: "后端说：我先等着",
+            say: "你录音时不用找我。等你点「Finish lecture」，再把文件和 metadata 给我。",
+            tech: "(idle)",
+            wire: "设计意图：课堂中别被网络卡住。",
+          },
+          {
+            speaker: "db",
+            kind: "数据库说：我也等着",
+            say: "等上传成功后，我会有一行 recordings。现在你可以只靠手机小本本活着。",
+            tech: "recordings 表尚未写入（或只有占位 id）",
+            wire: "Lecture.remoteRecordingId 会先在本机生成 UUID，后面上传用。",
+          },
+        ],
+      },
+      {
+        id: "upload",
+        title: "场景 C · 结束课程 → 上传",
+        summary: "前端把音频交给后端；后端写入存储 + recordings 行。",
+        steps: [
+          {
+            speaker: "front",
+            kind: "前端说：我需要",
+            say: "课结束了。请帮我收这份音频，并登记这节课。这是我的 token 和 recordingId。",
+            tech: "lib/uploadRecording.ts\nPOST {API}/api/upload-audio\nFormData: file, recordingId, course, title, languages…",
+            wire: "useProcessingOrchestrator 在根布局挂着，即使用户离开处理页也会继续。",
+          },
+          {
+            speaker: "back",
+            kind: "后端说：我需要",
+            say: "给我 Bearer token（证明你是谁）、音频文件、recordingId。我校验通过才收。",
+            tech: "Authorization: Bearer …\nfile = lectureId.m4a",
+            wire: "对应代码：uploadLectureAudio()。",
+          },
+          {
+            speaker: "back",
+            kind: "后端说：我去做",
+            say: "文件放到对象存储，并在数据库创建/更新 recordings 行（路径、时长、课程名…）。",
+            tech: "storage_path, duration_sec, course, title,\nlive_transcript, source_language…",
+            wire: "后端是「搬运工 + 登记员」。",
+          },
+          {
+            speaker: "db",
+            kind: "数据库说：我给你",
+            say: "行写好了。以后前端可以用这个 id 来问：AI 好了没？转录在哪？",
+            tech: "public.recordings\nid, user_id, storage_path, ai_status, …",
+            wire: "前端把 uploadStatus 标成 uploaded。",
+          },
+          {
+            speaker: "front",
+            kind: "前端说：我拿到了",
+            say: "上传成功。下一步我会请你开始处理（转写 / 摘要）。",
+            tech: "updateLecture({ uploadStatus: 'uploaded', storagePath })",
+            wire: "流水线下一步：process-recording。",
+          },
+        ],
+      },
+      {
+        id: "process",
+        title: "场景 D · 触发 AI 处理 + 轮询结果",
+        summary: "后端改状态并跑 AI；数据库吐出 transcript/summary；前端展示。",
+        steps: [
+          {
+            speaker: "front",
+            kind: "前端说：我需要",
+            say: "recordingId 已上传。请开始处理这节课，给我双语转录和摘要。",
+            tech: "lib/processRecording.ts\nPOST /api/process-recording\n{ recordingId }",
+            wire: "仍然带着 access_token。",
+          },
+          {
+            speaker: "back",
+            kind: "后端说：我去做",
+            say: "收到。我去取音频、跑转写/翻译/摘要，并不断更新 ai_status。",
+            tech: "ai_status: processing → ready / failed\nai_error 若失败会写原因",
+            wire: "处理可能要几十秒；前端用轮询，而不是干等一个超长请求。",
+          },
+          {
+            speaker: "db",
+            kind: "数据库说：我存着",
+            say: "处理中我会改 ai_status；完成后写入 transcript、transcript_zh、summary…",
+            tech: "recordings columns:\ntranscript, transcript_zh, summary_en, summary_zh,\nsource_summary, translated_summary, ai_status",
+            wire: "数据库是「结果公告板」。",
+          },
+          {
+            speaker: "front",
+            kind: "前端说：我来问",
+            say: "每隔几秒我问一次：这行好了吗？（最多约 80 次）",
+            tech: "lib/syncRecording.ts → supabase.from('recordings').select(…)\nlib/useProcessingOrchestrator.ts 轮询",
+            wire: "processing.tsx 只是进度大屏；调度中心是 orchestrator。",
+          },
+          {
+            speaker: "db",
+            kind: "数据库说：我给你",
+            say: "ai_status=ready。这是英文转录、中文转录、摘要。拿去吧。",
+            tech: "fetchRemoteRecording() → RemoteRecordingSnapshot",
+            wire: "内容从云端合并进本机 Lecture。",
+          },
+          {
+            speaker: "front",
+            kind: "前端说：我画出来",
+            say: "讲座详情页可以看 Transcript / Summary / Notes 了。用户感觉「课准备好了」。",
+            tech: "app/lecture/[id].tsx\nstore.updateLecture(…transcript, summary…)",
+            wire: "三方接力完成：录 → 传 → 算 → 存 → 读 → 显示。",
+          },
+        ],
+      },
+      {
+        id: "rename",
+        title: "场景 E · 改讲座标题（本地立刻 + 云端跟上）",
+        summary: "前端先改本机；再请数据库改 recordings.title，避免换设备又变回去。",
+        steps: [
+          {
+            speaker: "front",
+            kind: "前端说：我先改本地",
+            say: "用户把标题改成新名字。我立刻更新本机 store，界面马上变。",
+            tech: "lib/store.tsx → renameLecture()\ntitleUpdatedAt = now",
+            wire: "先快后稳：UI 不等网络。",
+          },
+          {
+            speaker: "front",
+            kind: "前端说：我也需要云端改",
+            say: "请把 recordings 里同一行的 title 改成一样，否则下次登录云端旧名会盖回来。",
+            tech: "supabase.from('recordings').update({ title })\n.eq('id', remoteRecordingId).eq('user_id', …)",
+            wire: "前端有时会「直连数据库」（经 Supabase + RLS），不必每次都经自定义 API。",
+          },
+          {
+            speaker: "db",
+            kind: "数据库说：我给你确认",
+            say: "在 RLS 允许的范围内，title 已更新。其它设备 hydrate 时会看到新名。",
+            tech: "public.recordings.title / updated_at",
+            wire: "课程改名同理：改该课下所有 recordings.course。",
+          },
+          {
+            speaker: "back",
+            kind: "后端说：这次我闲着",
+            say: "这种小更新走 Supabase 客户端直写即可。上传/AI 那种重活才走 /api/*。",
+            tech: "(no custom API call)",
+            wire: "记住：不是所有事都经过同一扇门。",
+          },
+        ],
+      },
+    ];
+
+    let scenarioIndex = 0;
+    let stepIndex = -1;
+    let timer = null;
+    const lastLines = {
+      front: { kind: "待命", say: "点「播放对话」开始。", tech: "" },
+      back: { kind: "待命", say: "我会听前端的请求。", tech: "" },
+      db: { kind: "待命", say: "我会存结果、回答案。", tech: "" },
+    };
+
+    const els = {
+      scenarios: document.getElementById("scenarios"),
+      stepMeta: document.getElementById("stepMeta"),
+      wireTitle: document.getElementById("wireTitle"),
+      wireBody: document.getElementById("wireBody"),
+      btnPlay: document.getElementById("btnPlay"),
+      btnPrev: document.getElementById("btnPrev"),
+      btnNext: document.getElementById("btnNext"),
+      btnReset: document.getElementById("btnReset"),
+      actors: {
+        front: document.getElementById("actor-front"),
+        back: document.getElementById("actor-back"),
+        db: document.getElementById("actor-db"),
+      },
+      kind: {
+        front: document.getElementById("front-kind"),
+        back: document.getElementById("back-kind"),
+        db: document.getElementById("db-kind"),
+      },
+      say: {
+        front: document.getElementById("front-say"),
+        back: document.getElementById("back-say"),
+        db: document.getElementById("db-say"),
+      },
+      tech: {
+        front: document.getElementById("front-tech"),
+        back: document.getElementById("back-tech"),
+        db: document.getElementById("db-tech"),
+      },
+    };
+
+    function currentScenario() {
+      return SCENARIOS[scenarioIndex];
+    }
+
+    function renderScenarioButtons() {
+      els.scenarios.innerHTML = "";
+      SCENARIOS.forEach((s, i) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = s.title;
+        btn.className = i === scenarioIndex ? "active" : "";
+        btn.addEventListener("click", () => {
+          stopPlay();
+          scenarioIndex = i;
+          resetScene(true);
+          renderScenarioButtons();
+        });
+        els.scenarios.appendChild(btn);
+      });
+    }
+
+    function paintBubbles(activeSpeaker) {
+      ["front", "back", "db"].forEach((who) => {
+        const line = lastLines[who];
+        els.kind[who].textContent = line.kind;
+        els.say[who].textContent = line.say;
+        els.tech[who].textContent = line.tech || " ";
+        els.actors[who].classList.toggle("speaking", who === activeSpeaker);
+      });
+    }
+
+    function applyStep(index) {
+      const scene = currentScenario();
+      const total = scene.steps.length;
+      stepIndex = index;
+      els.stepMeta.textContent = `步骤 ${Math.max(0, stepIndex + 1)} / ${total}`;
+
+      if (stepIndex < 0) {
+        lastLines.front = { kind: "待命", say: "点「播放对话」或「下一步」开始。", tech: "" };
+        lastLines.back = { kind: "待命", say: "等前端开口。", tech: "" };
+        lastLines.db = { kind: "待命", say: "等写入或查询。", tech: "" };
+        paintBubbles(null);
+        els.wireTitle.textContent = scene.title;
+        els.wireBody.textContent = scene.summary;
+        return;
+      }
+
+      const step = scene.steps[stepIndex];
+      lastLines[step.speaker] = {
+        kind: step.kind,
+        say: step.say,
+        tech: step.tech,
+      };
+      paintBubbles(step.speaker);
+      els.wireTitle.textContent = `第 ${stepIndex + 1} 步 · ${step.kind}`;
+      els.wireBody.textContent = step.wire;
+      els.btnPrev.disabled = stepIndex <= 0;
+      els.btnNext.disabled = stepIndex >= total - 1;
+    }
+
+    function resetScene(updateWire) {
+      stepIndex = -1;
+      lastLines.front = { kind: "待命", say: "点「播放对话」或「下一步」开始。", tech: "" };
+      lastLines.back = { kind: "待命", say: "等前端开口。", tech: "" };
+      lastLines.db = { kind: "待命", say: "等写入或查询。", tech: "" };
+      applyStep(-1);
+      if (updateWire) {
+        const scene = currentScenario();
+        els.wireTitle.textContent = scene.title;
+        els.wireBody.textContent = scene.summary;
+      }
+      els.btnPrev.disabled = true;
+      els.btnNext.disabled = false;
+    }
+
+    function stopPlay() {
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+      els.btnPlay.textContent = "播放对话";
+    }
+
+    function play() {
+      if (timer) {
+        stopPlay();
+        return;
+      }
+      const scene = currentScenario();
+      if (stepIndex >= scene.steps.length - 1) {
+        resetScene(true);
+      }
+      els.btnPlay.textContent = "暂停";
+      const tick = () => {
+        const s = currentScenario();
+        if (stepIndex >= s.steps.length - 1) {
+          stopPlay();
+          return;
+        }
+        applyStep(stepIndex + 1);
+      };
+      tick();
+      timer = setInterval(tick, 2600);
+    }
+
+    els.btnPlay.addEventListener("click", play);
+    els.btnPrev.addEventListener("click", () => {
+      stopPlay();
+      if (stepIndex > 0) applyStep(stepIndex - 1);
+      else resetScene(true);
+    });
+    els.btnNext.addEventListener("click", () => {
+      stopPlay();
+      const scene = currentScenario();
+      if (stepIndex < scene.steps.length - 1) applyStep(stepIndex + 1);
+    });
+    els.btnReset.addEventListener("click", () => {
+      stopPlay();
+      resetScene(true);
+    });
+
+    renderScenarioButtons();
+    resetScene(true);
+  </script>
+</body>
+</html>

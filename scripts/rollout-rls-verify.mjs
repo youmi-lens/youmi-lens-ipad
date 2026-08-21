@@ -118,6 +118,10 @@ async function main() {
     process.exit(2);
   }
 
+  // The table's user_id references auth.users, so an admin write needs a real
+  // user. ROLLOUT_ADMIN_TEST_UUID supplies a disposable one; without it the
+  // admin rows are reported as skipped rather than failing on a foreign key.
+  const adminSubject = env.ROLLOUT_ADMIN_TEST_UUID ?? null;
   const fakeId = '00000000-0000-4000-8000-000000000000';
   const writeBody = { user_id: fakeId, engine: 'nativeDurable', enabled: true, cohort: 'internal' };
 

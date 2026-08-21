@@ -1,5 +1,5 @@
-import { ComponentProps, ReactNode, useRef } from 'react';
-import { Animated, Pressable, StyleProp, ViewStyle } from 'react-native';
+import { ComponentProps, ReactNode, useRef, useState } from 'react';
+import { Animated, Easing, Pressable, StyleProp, ViewStyle } from 'react-native';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
@@ -10,6 +10,15 @@ type PressableScaleProps = Omit<ComponentProps<typeof Pressable>, 'style' | 'chi
   scaleTo?: number;
   /** Resting → pressed opacity. */
   opacityTo?: number;
+  /**
+   * Extra style applied only while pressed.
+   *
+   * For flat list rows, a background tint is the native affordance a scale
+   * cannot stand in for — a full-width row that shrinks reads as the list
+   * flexing. This exists so those rows can share this primitive instead of
+   * forking a second press system; it is not a general-purpose escape hatch.
+   */
+  pressedStyle?: StyleProp<ViewStyle>;
 };
 
 /**
@@ -24,8 +33,9 @@ type PressableScaleProps = Omit<ComponentProps<typeof Pressable>, 'style' | 'chi
 export function PressableScale({
   children,
   style,
-  scaleTo = 0.96,
-  opacityTo = 0.9,
+  scaleTo = 0.98,
+  opacityTo = 0.94,
+  pressedStyle,
   disabled = false,
   onPressIn,
   onPressOut,
@@ -33,6 +43,9 @@ export function PressableScale({
 }: PressableScaleProps) {
   const scale = useRef(new Animated.Value(1)).current;
   const opacity = useRef(new Animated.Value(1)).current;
+  // Only tracked when a caller actually needs a pressed style, so the common
+  // case still re-renders zero times per press.
+  const [pressed, setPressed] = useState(false);
 
   const animatedStyle = { transform: [{ scale }], opacity } as unknown as ViewStyle;
 
@@ -41,23 +54,29 @@ export function PressableScale({
       disabled={disabled}
       onPressIn={(event) => {
         if (!disabled) {
+          if (pressedStyle) setPressed(true);
+          scale.stopAnimation();
+          opacity.stopAnimation();
           Animated.parallel([
-            Animated.spring(scale, { toValue: scaleTo, useNativeDriver: true, speed: 50, bounciness: 0 }),
-            Animated.timing(opacity, { toValue: opacityTo, duration: 90, useNativeDriver: true }),
+            Animated.timing(scale, { toValue: scaleTo, duration: 70, easing: Easing.out(Easing.quad), useNativeDriver: true }),
+            Animated.timing(opacity, { toValue: opacityTo, duration: 70, useNativeDriver: true }),
           ]).start();
         }
         onPressIn?.(event);
       }}
       onPressOut={(event) => {
         if (!disabled) {
+          if (pressedStyle) setPressed(false);
+          scale.stopAnimation();
+          opacity.stopAnimation();
           Animated.parallel([
-            Animated.spring(scale, { toValue: 1, useNativeDriver: true, speed: 38, bounciness: 6 }),
-            Animated.timing(opacity, { toValue: 1, duration: 140, useNativeDriver: true }),
+            Animated.timing(scale, { toValue: 1, duration: 150, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+            Animated.timing(opacity, { toValue: 1, duration: 130, easing: Easing.out(Easing.quad), useNativeDriver: true }),
           ]).start();
         }
         onPressOut?.(event);
       }}
-      style={[style, disabled ? null : animatedStyle]}
+      style={[style, disabled ? null : animatedStyle, pressed && !disabled ? pressedStyle : null]}
       {...rest}
     >
       {children}

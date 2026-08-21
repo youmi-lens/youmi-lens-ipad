@@ -27,6 +27,7 @@ import {
   type NotebookOverlayRect,
 } from '@/components/NotebookCanvas';
 import { NativeLookupText } from '@/components/NativeLookupText';
+import { PressableScale } from '@/components/PressableScale';
 import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
 import { formatClock } from '@/lib/format';
 import { useT } from '@/lib/i18n';
@@ -53,6 +54,13 @@ export default function MiniCaptionScreen() {
   const params = useLocalSearchParams<{ elapsed?: string }>();
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
+  const insetTop = insets.top;
+  const insetBottom = insets.bottom;
+  const insetLeft = insets.left;
+  const insetRight = insets.right;
+  // Phone portrait is much narrower than the panel's iPad-era default — keep a
+  // comfortable margin instead of letting it nearly span the screen.
+  const initialPanelWidth = Math.min(DEFAULT_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, width - EDGE_MARGIN * 4));
 
   const {
     status,
@@ -81,7 +89,7 @@ export default function MiniCaptionScreen() {
   const [panelVisible, setPanelVisible] = useState(true);
   const [autoFollowFeed, setAutoFollowFeed] = useState(true);
   const [panelSize, setPanelSize] = useState({
-    width: DEFAULT_PANEL_WIDTH,
+    width: initialPanelWidth,
     height: DEFAULT_PANEL_HEIGHT,
   });
 
@@ -102,7 +110,7 @@ export default function MiniCaptionScreen() {
 
   // ---- Draggable floating panel ----
   const initial = useRef({
-    x: Math.max(EDGE_MARGIN, width - DEFAULT_PANEL_WIDTH - 16),
+    x: Math.max(EDGE_MARGIN + insetLeft, width - initialPanelWidth - 16 - insetRight),
     y: insets.top + MINI_NAV_HEIGHT + CAPTION_DEFAULT_LOCAL_TOP,
   });
   const pan = useRef(new Animated.ValueXY(initial.current)).current;
@@ -114,9 +122,11 @@ export default function MiniCaptionScreen() {
   const isResizingRef = useRef(false);
   const feedScrollRef = useRef<ScrollView | null>(null);
   const feedMetricsRef = useRef({ contentHeight: 0, layoutHeight: 0 });
+  const feedUserScrollingRef = useRef(false);
+  const feedAutoScrollPendingRef = useRef(false);
   const initialListeningPill = useRef({
-    x: Math.max(EDGE_MARGIN, width - LISTENING_PILL_WIDTH - 16),
-    y: Math.max(EDGE_MARGIN, height - LISTENING_PILL_HEIGHT - 24),
+    x: Math.max(EDGE_MARGIN + insetLeft, width - LISTENING_PILL_WIDTH - 16 - insetRight),
+    y: Math.max(EDGE_MARGIN + insetTop, height - LISTENING_PILL_HEIGHT - 24 - insetBottom),
   });
   const listeningPillPan = useRef(new Animated.ValueXY(initialListeningPill.current)).current;
   const listeningPillPosRef = useRef({ ...initialListeningPill.current });
@@ -125,7 +135,7 @@ export default function MiniCaptionScreen() {
   const [captionOverlayRect, setCaptionOverlayRect] = useState<NotebookOverlayRect>({
     x: initial.current.x,
     y: initial.current.y,
-    width: DEFAULT_PANEL_WIDTH,
+    width: initialPanelWidth,
     height: DEFAULT_PANEL_HEIGHT,
   });
 
@@ -140,12 +150,14 @@ export default function MiniCaptionScreen() {
   );
 
   const dragResponder = useMemo(() => {
+    const minX = EDGE_MARGIN + insetLeft;
+    const minY = EDGE_MARGIN + insetTop;
     const settle = (dx: number, dy: number) => {
-      const maxX = Math.max(EDGE_MARGIN, width - panelSizeRef.current.width - EDGE_MARGIN);
-      const maxY = Math.max(EDGE_MARGIN, height - panelSizeRef.current.height - EDGE_MARGIN);
+      const maxX = Math.max(minX, width - panelSizeRef.current.width - EDGE_MARGIN - insetRight);
+      const maxY = Math.max(minY, height - panelSizeRef.current.height - EDGE_MARGIN - insetBottom);
       const next = {
-        x: Math.min(Math.max(dragStart.current.x + dx, EDGE_MARGIN), maxX),
-        y: Math.min(Math.max(dragStart.current.y + dy, EDGE_MARGIN), maxY),
+        x: Math.min(Math.max(dragStart.current.x + dx, minX), maxX),
+        y: Math.min(Math.max(dragStart.current.y + dy, minY), maxY),
       };
       posRef.current = next;
       updateCaptionOverlayRect(next, panelSizeRef.current);
@@ -182,15 +194,17 @@ export default function MiniCaptionScreen() {
         }, 120);
       },
     });
-  }, [width, height, pan, updateCaptionOverlayRect]);
+  }, [width, height, insetTop, insetBottom, insetLeft, insetRight, pan, updateCaptionOverlayRect]);
 
   const listeningPillResponder = useMemo(() => {
+    const minX = EDGE_MARGIN + insetLeft;
+    const minY = EDGE_MARGIN + insetTop;
     const settle = (dx: number, dy: number) => {
-      const maxX = Math.max(EDGE_MARGIN, width - LISTENING_PILL_WIDTH - EDGE_MARGIN);
-      const maxY = Math.max(EDGE_MARGIN, height - LISTENING_PILL_HEIGHT - EDGE_MARGIN);
+      const maxX = Math.max(minX, width - LISTENING_PILL_WIDTH - EDGE_MARGIN - insetRight);
+      const maxY = Math.max(minY, height - LISTENING_PILL_HEIGHT - EDGE_MARGIN - insetBottom);
       const next = {
-        x: Math.min(Math.max(listeningPillDragStart.current.x + dx, EDGE_MARGIN), maxX),
-        y: Math.min(Math.max(listeningPillDragStart.current.y + dy, EDGE_MARGIN), maxY),
+        x: Math.min(Math.max(listeningPillDragStart.current.x + dx, minX), maxX),
+        y: Math.min(Math.max(listeningPillDragStart.current.y + dy, minY), maxY),
       };
       listeningPillPosRef.current = next;
       updateCaptionOverlayRect(next, {
@@ -235,7 +249,7 @@ export default function MiniCaptionScreen() {
         }, 120);
       },
     });
-  }, [height, listeningPillPan, updateCaptionOverlayRect, width]);
+  }, [height, insetTop, insetBottom, insetLeft, insetRight, listeningPillPan, updateCaptionOverlayRect, width]);
 
   const resizeResponder = useMemo(() => {
     const maxWidth = Math.max(MIN_PANEL_WIDTH, width * 0.96);
@@ -257,8 +271,8 @@ export default function MiniCaptionScreen() {
       },
       onPanResponderRelease: () => {
         isResizingRef.current = false;
-        const maxX = Math.max(EDGE_MARGIN, width - panelSizeRef.current.width - EDGE_MARGIN);
-        const maxY = Math.max(EDGE_MARGIN, height - panelSizeRef.current.height - EDGE_MARGIN);
+        const maxX = Math.max(EDGE_MARGIN + insetLeft, width - panelSizeRef.current.width - EDGE_MARGIN - insetRight);
+        const maxY = Math.max(EDGE_MARGIN + insetTop, height - panelSizeRef.current.height - EDGE_MARGIN - insetBottom);
         const nextPos = {
           x: Math.min(posRef.current.x, maxX),
           y: Math.min(posRef.current.y, maxY),
@@ -275,18 +289,77 @@ export default function MiniCaptionScreen() {
         isResizingRef.current = false;
       },
     });
-  }, [height, pan, updateCaptionOverlayRect, width]);
+  }, [height, insetTop, insetBottom, insetLeft, insetRight, pan, updateCaptionOverlayRect, width]);
 
   useEffect(() => {
+    const minX = EDGE_MARGIN + insetLeft;
+    const minY = EDGE_MARGIN + insetTop;
+
     if (panelVisible) {
-      updateCaptionOverlayRect(posRef.current, panelSize);
+      const nextSize = {
+        width: Math.min(
+          panelSize.width,
+          Math.max(MIN_PANEL_WIDTH, width - insetLeft - insetRight - EDGE_MARGIN * 2),
+        ),
+        height: Math.min(
+          panelSize.height,
+          Math.max(MIN_PANEL_HEIGHT, height - insetTop - insetBottom - EDGE_MARGIN * 2),
+        ),
+      };
+      if (nextSize.width !== panelSize.width || nextSize.height !== panelSize.height) {
+        panelSizeRef.current = nextSize;
+        setPanelSize(nextSize);
+      }
+
+      const nextPosition = {
+        x: clamp(
+          posRef.current.x,
+          minX,
+          Math.max(minX, width - nextSize.width - EDGE_MARGIN - insetRight),
+        ),
+        y: clamp(
+          posRef.current.y,
+          minY,
+          Math.max(minY, height - nextSize.height - EDGE_MARGIN - insetBottom),
+        ),
+      };
+      posRef.current = nextPosition;
+      pan.setValue(nextPosition);
+      updateCaptionOverlayRect(nextPosition, nextSize);
       return;
     }
-    updateCaptionOverlayRect(listeningPillPosRef.current, {
+
+    const nextPillPosition = {
+      x: clamp(
+        listeningPillPosRef.current.x,
+        minX,
+        Math.max(minX, width - LISTENING_PILL_WIDTH - EDGE_MARGIN - insetRight),
+      ),
+      y: clamp(
+        listeningPillPosRef.current.y,
+        minY,
+        Math.max(minY, height - LISTENING_PILL_HEIGHT - EDGE_MARGIN - insetBottom),
+      ),
+    };
+    listeningPillPosRef.current = nextPillPosition;
+    listeningPillPan.setValue(nextPillPosition);
+    updateCaptionOverlayRect(nextPillPosition, {
       width: LISTENING_PILL_WIDTH,
       height: LISTENING_PILL_HEIGHT,
     });
-  }, [panelSize, panelVisible, updateCaptionOverlayRect]);
+  }, [
+    height,
+    insetBottom,
+    insetLeft,
+    insetRight,
+    insetTop,
+    listeningPillPan,
+    pan,
+    panelSize,
+    panelVisible,
+    updateCaptionOverlayRect,
+    width,
+  ]);
 
   const notebookAvoidRects = useMemo(
     () => [
@@ -407,15 +480,20 @@ export default function MiniCaptionScreen() {
       return;
     }
     if (!autoFollowFeed) return;
-    const id = requestAnimationFrame(() => feedScrollRef.current?.scrollToEnd({ animated: true }));
-    return () => cancelAnimationFrame(id);
+    feedAutoScrollPendingRef.current = true;
+    const id = requestAnimationFrame(() => {
+      feedScrollRef.current?.scrollToEnd({ animated: true });
+      feedAutoScrollPendingRef.current = false;
+    });
+    return () => {
+      cancelAnimationFrame(id);
+      feedAutoScrollPendingRef.current = false;
+    };
   }, [
     autoFollowFeed,
     showCaptionFeed,
-    captionLines,
+    captionLines.length,
     partialCaption,
-    partialTranslationZh,
-    latestFinalLine?.translationZh,
   ]);
 
   const updateAutoFollowFromScroll = (scrollY: number) => {
@@ -576,15 +654,28 @@ export default function MiniCaptionScreen() {
                 { gap: Math.max(8, Math.round(10 * panelScale)) },
               ]}
               showsVerticalScrollIndicator={false}
+              maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
               scrollEnabled
               scrollEventThrottle={16}
               onLayout={(event) => {
                 feedMetricsRef.current.layoutHeight = event.nativeEvent.layout.height;
               }}
-              onScroll={(event) => updateAutoFollowFromScroll(event.nativeEvent.contentOffset.y)}
+              onScroll={(event) => {
+                if (feedUserScrollingRef.current) updateAutoFollowFromScroll(event.nativeEvent.contentOffset.y);
+              }}
+              onScrollBeginDrag={() => { feedUserScrollingRef.current = true; }}
+              onScrollEndDrag={(event) => {
+                updateAutoFollowFromScroll(event.nativeEvent.contentOffset.y);
+                feedUserScrollingRef.current = false;
+              }}
+              onMomentumScrollBegin={() => { feedUserScrollingRef.current = true; }}
+              onMomentumScrollEnd={(event) => {
+                updateAutoFollowFromScroll(event.nativeEvent.contentOffset.y);
+                feedUserScrollingRef.current = false;
+              }}
               onContentSizeChange={(_width, contentHeight) => {
                 feedMetricsRef.current.contentHeight = contentHeight;
-                if (autoFollowFeed) feedScrollRef.current?.scrollToEnd({ animated: true });
+                if (feedAutoScrollPendingRef.current) feedScrollRef.current?.scrollToEnd({ animated: false });
               }}
             >
               {feedLines.length > 0 ? (
@@ -737,15 +828,14 @@ export default function MiniCaptionScreen() {
 
         <View style={styles.panelFooter}>
           <View style={[styles.controls, { gap: scaled.controlGap }]}> 
-            <Pressable
+            <PressableScale
               accessibilityRole="button"
               accessibilityLabel={t('mini.markImportant')}
               onPress={markImportant}
-              style={({ pressed }) => [
+              style={[
                 styles.controlBtn,
                 { height: scaled.controlHeight, borderRadius: Math.round(8 * panelScale), gap: scaled.controlGap },
                 markFlash && styles.controlBtnActive,
-                pressed && styles.pressed,
               ]}
             >
               <Ionicons
@@ -758,8 +848,8 @@ export default function MiniCaptionScreen() {
                   {markFlash ? t('mini.marked') : t('mini.mark')}
                 </Text>
               ) : null}
-            </Pressable>
-            <Pressable
+            </PressableScale>
+            <PressableScale
               accessibilityRole="button"
               accessibilityLabel={t('mini.expandPanel')}
               onPress={() =>
@@ -772,25 +862,23 @@ export default function MiniCaptionScreen() {
                     : { width: Math.round(maxWidth * 0.72), height: Math.round(maxHeight * 0.72) };
                 })
               }
-              style={({ pressed }) => [
+              style={[
                 styles.controlBtn,
                 { height: scaled.controlHeight, borderRadius: Math.round(8 * panelScale), gap: scaled.controlGap },
-                pressed && styles.pressed,
               ]}
             >
               <Ionicons name="scan-outline" size={scaled.controlIcon} color={colors.textOnNavy} />
               {!panelCompact ? <Text style={[styles.controlLabel, { fontSize: scaled.controlLabel }]}>{t('mini.expand')}</Text> : null}
-            </Pressable>
-            <Pressable
+            </PressableScale>
+            <PressableScale
               accessibilityRole="button"
               accessibilityLabel={panelPaused ? t('mini.resume') : t('mini.pause')}
               onPress={() => {
                 void toggleLectureSessionPause();
               }}
-              style={({ pressed }) => [
+              style={[
                 styles.controlBtn,
                 { height: scaled.controlHeight, borderRadius: Math.round(8 * panelScale), gap: scaled.controlGap },
-                pressed && styles.pressed,
               ]}
             >
               <Ionicons name={panelPaused ? 'play' : 'pause'} size={scaled.controlIcon} color={colors.textOnNavy} />
@@ -799,7 +887,7 @@ export default function MiniCaptionScreen() {
                   {panelPaused ? t('mini.resume') : t('mini.pause')}
                 </Text>
               ) : null}
-            </Pressable>
+            </PressableScale>
           </View>
           <View style={styles.resizeLane}>
             <View style={styles.resizeHandle} {...resizeResponder.panHandlers}>

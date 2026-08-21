@@ -13,13 +13,17 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { ContentReveal } from '@/components/ContentReveal';
 import { GlassCard } from '@/components/GlassCard';
 import { LogoMark } from '@/components/BrandHeader';
+import { PageShellTransition } from '@/components/PageShellTransition';
+import { PressableScale } from '@/components/PressableScale';
 import { PrimaryButton } from '@/components/PrimaryButton';
 import { SecondaryButton } from '@/components/SecondaryButton';
 import { IconTile, PageHeading, Pill, ProgressBar, SectionLabel } from '@/components/WorkspaceUI';
+import { isPad } from '@/constants/deviceClass';
+import { useIsCompactWidth } from '@/constants/responsive';
 import { colors, layout } from '@/constants/theme';
-import { user } from '@/data/mockData';
 import { useAuth } from '@/lib/auth';
 import { formatDuration, formatShortDate } from '@/lib/format';
 import { useGuestRecordingUsage } from '@/lib/guest';
@@ -31,6 +35,11 @@ import { useData } from '@/lib/store';
 type IconName = ComponentProps<typeof Ionicons>['name'];
 
 export default function RecordHomeScreen() {
+  const isCompact = useIsCompactWidth();
+  // Portrait iPad intentionally remains in the compact navigation branch, but
+  // its canvas should not inherit phone-sized margins and top-packed empty
+  // states. This is composition only; the responsive shell stays width-based.
+  const isTabletCompact = isPad && isCompact;
   const { t, language } = useI18n();
   const hour = new Date().getHours();
   const greeting = t(hour < 12 ? 'home.greetingMorning' : hour < 18 ? 'home.greetingAfternoon' : 'home.greetingEvening');
@@ -44,11 +53,18 @@ export default function RecordHomeScreen() {
     getCourse,
     createCourse,
   } = useData();
-  const { session, isGuest, exitGuest } = useAuth();
+  const { session, isGuest, exitGuest, username } = useAuth();
+  // The signed-in greeting must use the real account, not a fixture. Mirrors the
+  // sidebar's name derivation (username, else the email local-part).
+  const displayName = username ?? session?.user?.email?.split('@')[0] ?? '';
   const { remaining: guestRemaining } = useGuestRecordingUsage();
   const [lectureTitle, setLectureTitle] = useState('');
   const [planStatus, setPlanStatus] = useState<PlanStatus | null>(null);
   const [planLoading, setPlanLoading] = useState(true);
+  // Bumped once per tab focus, never by course/lecture/plan data — the page
+  // heading's entrance below keys on this alone, so a recording finishing,
+  // a course mutation, or a plan refresh can never restart it.
+  const [focusKey, setFocusKey] = useState(0);
 
   const loadPlan = useCallback(async () => {
     const token = session?.access_token;
@@ -67,7 +83,10 @@ export default function RecordHomeScreen() {
     }
   }, [session?.access_token]);
 
-  useFocusEffect(useCallback(() => { void loadPlan(); }, [loadPlan]));
+  useFocusEffect(useCallback(() => {
+    setFocusKey((key) => key + 1);
+    void loadPlan();
+  }, [loadPlan]));
 
   const selectedCourse = getCourse(selectedCourseId) ?? courses[0];
   const recentLectures = [...lectures].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 3);
@@ -111,15 +130,22 @@ export default function RecordHomeScreen() {
 
   return (
     <SafeAreaView style={styles.root} edges={['top', 'left', 'right']}>
-      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
-        <View style={styles.content}>
+      <ScrollView contentContainerStyle={[styles.scroll, isCompact && styles.scrollCompact, isTabletCompact && styles.scrollTabletCompact]} showsVerticalScrollIndicator={false}>
+        {/* Whole shell — heading AND the dynamic body below it (recent
+            lectures included) — settles together as one translate-only
+            movement keyed to tab focus. See PageShellTransition: it never
+            touches opacity, so the recent-lectures list can live inside it
+            without any risk of the Courses-grid class of white-screen bug. */}
+        <PageShellTransition style={[styles.content, isTabletCompact && styles.contentTabletCompact]} revealKey={focusKey}>
           {!loaded ? (
             <View style={styles.loading}><ActivityIndicator color={colors.accent} /></View>
       ) : courses.length === 0 ? (
             <>
-              <PageHeading eyebrow={t('home.welcome')} title={t('home.title')} preserveEyebrowCase />
-              <View style={styles.emptyGrid}>
-                <GlassCard elevated style={styles.emptyHero}>
+              <ContentReveal revealKey={focusKey}>
+                <PageHeading eyebrow={t('home.welcome')} title={t('home.title')} preserveEyebrowCase />
+              </ContentReveal>
+              <View style={[styles.emptyGrid, isCompact && styles.emptyGridCompact, isTabletCompact && styles.emptyGridTabletCompact]}>
+                <GlassCard elevated style={[styles.emptyHero, isCompact && styles.emptyHeroCompact]}>
                   <View style={styles.emptyHeroContent}>
                     <LogoMark size={36} />
                     <Text style={styles.emptyTitle}>{t('home.createFirstCourse')}</Text>
@@ -130,7 +156,7 @@ export default function RecordHomeScreen() {
                     </View>
                   </View>
                 </GlassCard>
-                <GlassCard style={styles.stepsCard}>
+                <GlassCard style={[styles.stepsCard, isCompact && styles.stepsCardCompact]}>
                   {[
                     ['home.onboarding.recordTitle', 'home.onboarding.recordBody'],
                     ['home.onboarding.reviewTitle', 'home.onboarding.reviewBody'],
@@ -149,15 +175,22 @@ export default function RecordHomeScreen() {
             </>
           ) : (
             <>
-              <PageHeading
-                eyebrow={`${greeting}, ${user.firstName}`}
-                title={t('home.nextLecture')}
-              />
-              <View style={styles.homeGrid}>
-                <GlassCard elevated style={styles.recordCard}>
+              <ContentReveal revealKey={focusKey}>
+                <PageHeading
+                  eyebrow={displayName ? `${greeting}, ${displayName}` : greeting}
+                  title={t('home.nextLecture')}
+                />
+              </ContentReveal>
+              <View style={[styles.homeGrid, isCompact && styles.homeGridCompact, isTabletCompact && styles.homeGridTabletCompact]}>
+                <GlassCard elevated style={[styles.recordCard, isCompact && styles.recordCardCompact]}>
                   <SectionLabel>{t('home.recordLecture')}</SectionLabel>
                   <View style={styles.selectorRow}>
-                    <Pressable onPress={cycleCourse} style={({ pressed }) => [styles.courseSelector, pressed && styles.pressed]}>
+                    <PressableScale
+                      accessibilityRole="button"
+                      accessibilityLabel={t('home.course')}
+                      onPress={cycleCourse}
+                      style={styles.courseSelector}
+                    >
                       <IconTile
                         icon={(selectedCourse?.icon ?? 'people-outline') as IconName}
                         color={colors.textSecondary}
@@ -168,10 +201,15 @@ export default function RecordHomeScreen() {
                         <Text style={styles.selectorValue} numberOfLines={1}>{localizeSystemDefaultTitle(t, selectedCourse?.name)}</Text>
                       </View>
                       <Ionicons name="chevron-forward" size={17} color={colors.textTertiary} />
-                    </Pressable>
-                    <Pressable onPress={openCreateCourse} style={({ pressed }) => [styles.addCourse, pressed && styles.pressed]}>
+                    </PressableScale>
+                    <PressableScale
+                      accessibilityRole="button"
+                      accessibilityLabel={t('home.createCourse')}
+                      onPress={openCreateCourse}
+                      style={styles.addCourse}
+                    >
                       <Ionicons name="add" size={22} color={colors.textTertiary} />
-                    </Pressable>
+                    </PressableScale>
                   </View>
                   <TextInput
                     value={lectureTitle}
@@ -189,7 +227,7 @@ export default function RecordHomeScreen() {
                   </View>
                 </GlassCard>
 
-                <View style={styles.sideStack}>
+                <View style={[styles.sideStack, isCompact && styles.sideStackCompact]}>
                   <GlassCard padding={20}>
                     <SectionLabel>{t('home.today')}</SectionLabel>
                     {isGuest ? (
@@ -227,14 +265,18 @@ export default function RecordHomeScreen() {
                       const course = getCourse(lecture.courseId);
                       const inProgress = lecture.status === 'in_progress';
                       return (
-                        <Pressable
+                        <PressableScale
                           key={lecture.id}
+                          accessibilityRole="button"
+                          accessibilityLabel={localizeSystemDefaultTitle(t, lecture.title)}
                           onPress={() =>
                             inProgress
                               ? router.push({ pathname: '/recording', params: { lectureId: lecture.id } })
                               : router.push({ pathname: '/lecture/[id]', params: { id: lecture.id } })
                           }
-                          style={({ pressed }) => [styles.lectureRow, index < recentLectures.length - 1 && styles.lectureDivider, pressed && styles.pressed]}
+                          scaleTo={0.995}
+                          pressedStyle={styles.lectureRowPressed}
+                          style={[styles.lectureRow, index < recentLectures.length - 1 && styles.lectureDivider]}
                         >
                           <IconTile icon={inProgress ? 'mic-outline' : 'document-text-outline'} size={32} />
                           <View style={styles.lectureText}>
@@ -249,7 +291,7 @@ export default function RecordHomeScreen() {
                             <Text numberOfLines={1} style={styles.lectureMeta}>{course?.name ? localizeSystemDefaultTitle(t, course.name) : t('lecture.defaultCourse')} · {formatShortDate(lecture.date, language)}</Text>
                           </View>
                           <Text style={styles.duration}>{formatDuration(lecture.durationMillis)}</Text>
-                        </Pressable>
+                        </PressableScale>
                       );
                     }) : (
                       <Text style={styles.emptyRecent}>{t('home.emptyRecent')}</Text>
@@ -259,7 +301,7 @@ export default function RecordHomeScreen() {
               </View>
             </>
           )}
-        </View>
+        </PageShellTransition>
       </ScrollView>
     </SafeAreaView>
   );
@@ -268,11 +310,24 @@ export default function RecordHomeScreen() {
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: 'transparent' },
   scroll: { paddingHorizontal: layout.workspacePadding, paddingTop: 28, paddingBottom: 40 },
+  // Extra bottom clearance for the collapsed bottom tab bar on phone.
+  scrollCompact: { paddingHorizontal: 18, paddingBottom: 100 },
+  // Wider tablet margins keep the compact branch calm without changing the
+  // accepted phone layout or moving iPad portrait into the sidebar branch.
+  scrollTabletCompact: { paddingHorizontal: 32 },
   content: { width: '100%', maxWidth: 1120, alignSelf: 'center', gap: 22 },
+  contentTabletCompact: { maxWidth: 780 },
   loading: { minHeight: 420, alignItems: 'center', justifyContent: 'center' },
   homeGrid: { flexDirection: 'row', gap: 16, alignItems: 'stretch' },
+  // Phone: stack instead of a fixed 1.55/1 split — that split assumes iPad
+  // width; on a phone it leaves both columns too narrow to read comfortably
+  // (this is what clipped "View all" and wrapped "Guest recordings left").
+  homeGridCompact: { flexDirection: 'column' },
+  homeGridTabletCompact: { gap: 20 },
   recordCard: { flex: 1.55 },
+  recordCardCompact: { flex: 0 },
   sideStack: { flex: 1, gap: 14 },
+  sideStackCompact: { flex: 0 },
   selectorRow: { flexDirection: 'row', gap: 10, marginTop: 15 },
   courseSelector: {
     flex: 1, minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 11,
@@ -300,6 +355,10 @@ const styles = StyleSheet.create({
   recentHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   viewAll: { color: colors.accent, fontSize: 11.5, fontWeight: '700' },
   lectureRow: { minHeight: 55, flexDirection: 'row', alignItems: 'center', gap: 11, paddingVertical: 10 },
+  // A full-width row scales only slightly (0.995) and adds a background tint on
+  // press — the same native affordance LectureListItem uses in Courses, so a
+  // recent-lecture tap here feels identical to opening a lecture there.
+  lectureRowPressed: { backgroundColor: colors.surfaceMuted },
   lectureDivider: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   lectureText: { flex: 1 },
   lectureTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
@@ -320,17 +379,23 @@ const styles = StyleSheet.create({
   duration: { color: colors.textSecondary, fontSize: 11.5, fontWeight: '700', fontVariant: ['tabular-nums'] },
   emptyRecent: { color: colors.textTertiary, fontSize: 12.5, marginTop: 18 },
   emptyGrid: { flexDirection: 'row', gap: 16, minHeight: 410, alignItems: 'stretch' },
+  emptyGridCompact: { flexDirection: 'column', minHeight: 0 },
+  // Empty-state cards stay intrinsically sized; this only distributes the
+  // existing product information across a portrait iPad viewport so the lower
+  // half is intentional negative space rather than an accidental blank.
+  emptyGridTabletCompact: { minHeight: 650, justifyContent: 'space-between', gap: 24, paddingBottom: 12 },
   emptyHero: { flex: 1, justifyContent: 'center', overflow: 'hidden' },
+  emptyHeroCompact: { flex: 0 },
   emptyHeroContent: { width: '100%', maxWidth: 430, alignSelf: 'center' },
   emptyTitle: { marginTop: 14, color: colors.ink, fontSize: 22, fontWeight: '800' },
   emptyBody: { marginTop: 8, maxWidth: 340, color: colors.textSecondary, fontSize: 13.5, lineHeight: 21 },
   emptyActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 22 },
   stepsCard: { flex: 1, justifyContent: 'center', gap: 22 },
+  stepsCardCompact: { flex: 0 },
   step: { flexDirection: 'row', gap: 14 },
   stepNumber: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceMuted },
   stepNumberText: { color: colors.accent, fontSize: 12, fontWeight: '800' },
   stepText: { flex: 1 },
   stepTitle: { color: colors.ink, fontSize: 14, fontWeight: '700' },
   stepBody: { color: colors.textSecondary, fontSize: 12.5, lineHeight: 18, marginTop: 3 },
-  pressed: { opacity: 0.76, transform: [{ scale: 0.99 }] },
 });

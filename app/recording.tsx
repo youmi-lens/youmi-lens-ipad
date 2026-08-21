@@ -19,6 +19,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlassCard } from '@/components/GlassCard';
 import { CaptionHistoryFeed } from '@/components/CaptionHistoryFeed';
 import { PrimaryButton } from '@/components/PrimaryButton';
+import { PressableScale } from '@/components/PressableScale';
 import { SecondaryButton } from '@/components/SecondaryButton';
 import { StatusPill } from '@/components/StatusPill';
 import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
@@ -44,12 +45,19 @@ import {
   hasMeaningfulRecordingContent,
 } from '@/lib/recordingPersistence.mjs';
 import { persistLectureLocalAudio } from '@/lib/lectureLocalAudio';
+import { isPad } from '@/constants/deviceClass';
+import { useIsCompactWidth } from '@/constants/responsive';
 
 export default function RecordingScreen() {
   const router = useRouter();
   const t = useT();
+  const isCompact = useIsCompactWidth();
+  const visualFixture = __DEV__ && process.env.EXPO_PUBLIC_VISUAL_FIXTURE === '1';
   const params = useLocalSearchParams<{ courseId?: string; lectureTitle?: string; lectureId?: string }>();
   const { isGuest, exitGuest, user, loading: authLoading } = useAuth();
+  // Fixture rendering may show the signed-in recording composition (captions,
+  // Mini, Notebook) while retaining the real guest safety policy underneath.
+  const visualGuest = isGuest && !visualFixture;
   // Inactive by default: with the activation gate off this issues no request
   // and stays null, so the policy resolves to legacy exactly as before.
   const rollout = useRolloutEligibility({ userId: user?.id ?? null, authLoading });
@@ -124,7 +132,7 @@ export default function RecordingScreen() {
     acknowledgeFinalizedOutput,
     discardRecoverableRecording,
     dismissRecovery,
-  } = useLectureRecorder({ lectureId: pendingLectureId, forceLegacy: isGuest, rollout });
+  } = useLectureRecorder({ lectureId: pendingLectureId, forceLegacy: isGuest, rollout, visualFixture });
 
   const {
     status: liveCaptionStatus,
@@ -492,7 +500,7 @@ export default function RecordingScreen() {
   // granted. The local recorder starts first so it owns the audio session;
   // the live caption mic stream then attaches on top without being clobbered.
   useEffect(() => {
-    if (autoStarted.current || !granted || !contentPreferencesLoaded || !recoveryChecked || recoverableSession) return;
+    if (visualFixture || autoStarted.current || !granted || !contentPreferencesLoaded || !recoveryChecked || recoverableSession) return;
     // Resumed lecture: wait for the existing central Pause/Continue control
     // before the recorder/mic/captions start, so opening it is a safe review.
     if (isResume && !continueRequested) return;
@@ -506,7 +514,7 @@ export default function RecordingScreen() {
     });
   // The recorder and caption starters intentionally run once after permission resolves.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [granted, isGuest, isResume, continueRequested, contentPreferencesLoaded, recoveryChecked, recoverableSession]);
+  }, [visualFixture, granted, isGuest, isResume, continueRequested, contentPreferencesLoaded, recoveryChecked, recoverableSession]);
 
   // Keep this fresh for the mount-once AppState listener below.
   isRecordingRef.current = isRecording;
@@ -823,16 +831,25 @@ export default function RecordingScreen() {
   // Guest recordings are capped at 2 minutes. When the cap is reached we finish
   // the recording cleanly (same path as tapping Finish), exactly once.
   useEffect(() => {
-    if (!isGuest || finishing || guestAutoStopped.current) return;
+    if (visualFixture || !isGuest || finishing || guestAutoStopped.current) return;
     if (seconds >= GUEST_MAX_RECORDING_SECONDS && (isRecording || isPaused)) {
       guestAutoStopped.current = true;
       void finish();
     }
   // `finish` closes over the current recording state; adding it would retrigger this cap watcher.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isGuest, seconds, isRecording, isPaused, finishing]);
+  }, [visualFixture, isGuest, seconds, isRecording, isPaused, finishing]);
 
   const openMiniCaption = () => {
+    // Mini's whole screen is a NotebookCanvas page (a floating caption/control
+    // panel sits on top of it, but the destination's reason to exist is the
+    // notebook underneath) — Notebook is iPad-only. On iPhone this shows the
+    // same notice as the Lecture Detail gate and never navigates, so the
+    // recorder/session/pendingLectureId/timer are completely untouched.
+    if (!isPad) {
+      Alert.alert(t('lecture.notebookIpadOnly'));
+      return;
+    }
     router.push({ pathname: '/mini-caption', params: { elapsed: String(seconds) } });
   };
 
@@ -864,16 +881,16 @@ export default function RecordingScreen() {
   return (
     <SafeAreaView style={styles.root} edges={['top', 'bottom', 'left', 'right']}>
       {/* Header */}
-      <View style={styles.header}>
-        <Pressable
+      <View style={[styles.header, isCompact && styles.headerCompact]}>
+        <PressableScale
           accessibilityRole="button"
           accessibilityLabel={t('recording.back')}
           onPress={() => void handleBack()}
           hitSlop={10}
-          style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
+          style={styles.iconBtn}
         >
           <Ionicons name="chevron-back" size={24} color={colors.textPrimary} />
-        </Pressable>
+        </PressableScale>
 
         {granted ? (
           <StatusPill
@@ -881,40 +898,49 @@ export default function RecordingScreen() {
             variant={isReviewingResume || isPaused ? 'paused' : 'recording'}
           />
         ) : null}
-        <View style={styles.courseChip}>
+        <View style={[styles.courseChip, isCompact && styles.courseChipCompact]}>
           <Ionicons name={(course?.icon ?? 'book-outline') as keyof typeof Ionicons.glyphMap} size={13} color={colors.accent} />
           <Text style={styles.courseChipText} numberOfLines={1}>{courseName}</Text>
         </View>
-        {granted ? <Text style={styles.headerTimer}>{formatClock(seconds)}</Text> : <View style={styles.headerGrow} />}
+        {granted ? (
+          <Text
+            style={[styles.headerTimer, isCompact && styles.headerTimerCompact]}
+            numberOfLines={1}
+          >
+            {formatClock(seconds)}
+          </Text>
+        ) : <View style={styles.headerGrow} />}
         {granted && course ? (
-          <Pressable
+          <PressableScale
             accessibilityRole="button"
+            accessibilityLabel={t('recording.materialTop')}
             onPress={() => setMaterialPickerVisible(true)}
             disabled={(!recordingSessionActive && !isReviewingResume) || finishing}
-            style={({ pressed }) => [styles.materialTopButton, pressed && styles.pressed]}
+            hitSlop={isCompact ? 8 : undefined}
+            style={isCompact ? styles.materialGhostButton : styles.materialTopButton}
           >
-            <Ionicons name="document-text-outline" size={14} color={colors.textSecondary} />
-            <Text style={styles.materialTopText}>{t('recording.materialTop')}</Text>
-          </Pressable>
+            <Ionicons name="document-text-outline" size={isCompact ? 17 : 14} color={colors.textTertiary} />
+            {isCompact ? null : <Text style={styles.materialTopText}>{t('recording.materialTop')}</Text>}
+          </PressableScale>
         ) : null}
-        {granted && !isGuest ? (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={t('recording.miniCaption')}
-            onPress={openMiniCaption}
-            hitSlop={10}
-            style={({ pressed }) => [
-              styles.iconBtn,
-              styles.iconBtnLabelled,
-              pressed && styles.pressed,
-            ]}
-          >
-            <Ionicons name="contract-outline" size={19} color={colors.textPrimary} />
-            <Text style={styles.iconBtnLabel}>{t('recording.miniLabel')}</Text>
-          </Pressable>
-        ) : (
-          <View style={styles.headerSpacer} />
-        )}
+        {/* Mini lives in the bottom control bar on phone — the top bar stays
+            context/state only there (see BOTTOM CONTROLS below). */}
+        {!isCompact ? (
+          granted && !visualGuest ? (
+            <PressableScale
+              accessibilityRole="button"
+              accessibilityLabel={t('recording.miniCaption')}
+              onPress={openMiniCaption}
+              hitSlop={10}
+              style={[styles.iconBtn, styles.iconBtnLabelled]}
+            >
+              <Ionicons name="contract-outline" size={19} color={colors.textPrimary} />
+              <Text style={styles.iconBtnLabel}>{t('recording.miniLabel')}</Text>
+            </PressableScale>
+          ) : (
+            <View style={styles.headerSpacer} />
+          )
+        ) : null}
       </View>
 
       {/* While the permission state is still being read */}
@@ -962,7 +988,7 @@ export default function RecordingScreen() {
             </Text>
           </Animated.View>
 
-          {!isGuest && (captionAreaState === 'captions_visible' || isReviewingResume) ? (
+          {!visualGuest && (captionAreaState === 'captions_visible' || isReviewingResume) ? (
             // Live transcript: a scrollable history of paired Chinese/English
             // caption blocks (not just the newest sentence). Kept OUTSIDE the
             // page ScrollView so the feed owns its own vertical scroll.
@@ -976,7 +1002,7 @@ export default function RecordingScreen() {
                 )}
               />
               {showWordLookupHint || marks.length > 0 || (error && audioActive) ? (
-                <View style={styles.feedInfoBar}>
+                <View style={[styles.feedInfoBar, isCompact && styles.feedInfoBarCompact]}>
                   {showWordLookupHint ? (
                     <Text style={styles.markHint}>{t('recording.wordLookupHint')}</Text>
                   ) : null}
@@ -991,11 +1017,11 @@ export default function RecordingScreen() {
             </View>
           ) : (
           <ScrollView
-            contentContainerStyle={styles.scroll}
+            contentContainerStyle={[styles.scroll, isCompact && styles.scrollCompact]}
             showsVerticalScrollIndicator={false}
           >
             <View style={styles.content}>
-              {isGuest ? (
+              {visualGuest ? (
                 <GlassCard padding={spacing.xl} style={styles.guestCard}>
                   <View style={styles.stateHeader}>
                     <View style={[styles.stateIcon, isPaused && styles.stateIconPaused]}>
@@ -1065,40 +1091,68 @@ export default function RecordingScreen() {
           </ScrollView>
           )}
 
-          {/* Actions — Mark Important · Pause/Resume · Finish */}
-          <View style={styles.actions}>
-            <SecondaryButton
-              label={t('recording.markImportant')}
-              icon="star"
-              onPress={markImportant}
-              disabled={!controlsEnabled}
-              style={styles.sideAction}
-            />
+          {/* Actions. iPad: Mark Important · Pause/Resume · Finish, three even
+              weights. Phone: a small utility cluster (Mark Important, Mini)
+              next to the primary Pause control, with Finish as the wide,
+              unmistakably primary action — this is the one persistent action
+              hub on phone, since the top bar there carries no controls. */}
+          <View style={[styles.actions, isCompact && styles.actionsCompact]}>
+            {isCompact ? (
+              <PressableScale
+                accessibilityRole="button"
+                accessibilityLabel={t('recording.markImportant')}
+                accessibilityState={{ disabled: !controlsEnabled }}
+                disabled={!controlsEnabled}
+                onPress={markImportant}
+                style={[styles.utilityBtn, !controlsEnabled && styles.disabled]}
+              >
+                <Ionicons name="star-outline" size={20} color={colors.textPrimary} />
+              </PressableScale>
+            ) : (
+              <SecondaryButton
+                label={t('recording.markImportant')}
+                icon="star"
+                onPress={markImportant}
+                disabled={!controlsEnabled}
+                style={styles.sideAction}
+              />
+            )}
 
-            <Pressable
+            {isCompact && granted && !visualGuest ? (
+              <PressableScale
+                accessibilityRole="button"
+                accessibilityLabel={t('recording.miniCaption')}
+                onPress={openMiniCaption}
+                style={styles.utilityBtn}
+              >
+                <Ionicons name="contract-outline" size={20} color={colors.textPrimary} />
+              </PressableScale>
+            ) : null}
+
+            <PressableScale
               accessibilityRole="button"
               accessibilityLabel={isReviewingResume || isPaused ? t('recording.resume') : t('recording.pause')}
               accessibilityState={{ disabled: !centralControlEnabled }}
               disabled={!centralControlEnabled}
               onPress={() => { void togglePause(); }}
-              style={({ pressed }) => [styles.roundBtn, !centralControlEnabled && styles.disabled, pressed && styles.pressed]}
+              style={[styles.roundBtn, !centralControlEnabled && styles.disabled]}
             >
               <Ionicons
                 name={isReviewingResume || isPaused ? 'play' : 'pause'}
                 size={32}
                 color={colors.pearlWhite}
               />
-            </Pressable>
+            </PressableScale>
 
-            <Pressable
+            <PressableScale
               accessibilityRole="button"
               disabled={finishing}
               onPress={() => { void finish(); }}
-              style={({ pressed }) => [styles.finishButton, finishing && styles.disabled, pressed && styles.pressed]}
+              style={[styles.finishButton, finishing && styles.disabled]}
             >
               <Ionicons name="checkmark-done" size={18} color={colors.pearlWhite} />
               <Text style={styles.finishText}>{finishing ? t('recording.finishing') : t('recording.finish')}</Text>
-            </Pressable>
+            </PressableScale>
           </View>
 
           <Modal
@@ -1232,6 +1286,12 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.border,
   },
+  headerCompact: {
+    gap: 8,
+    paddingHorizontal: 14,
+    flexWrap: 'wrap',
+    rowGap: 8,
+  },
   iconBtn: {
     height: 44,
     minWidth: 44,
@@ -1263,10 +1323,15 @@ const styles = StyleSheet.create({
     transform: [{ scale: 0.96 }],
   },
   courseChip: { maxWidth: 220, minHeight: 30, flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, borderRadius: radius.pill, backgroundColor: colors.glassElevated, borderWidth: 1, borderColor: colors.border },
+  courseChipCompact: { maxWidth: 130, minWidth: 0, flexShrink: 1 },
   courseChipText: { color: colors.textSecondary, fontSize: 11.5, fontWeight: '700' },
   headerTimer: { flex: 1, textAlign: 'right', color: colors.ink, fontSize: 24, fontWeight: '800', fontVariant: ['tabular-nums'], letterSpacing: 0.3 },
+  headerTimerCompact: { minWidth: 88, flexShrink: 0, fontSize: 22 },
   materialTopButton: { minHeight: 34, flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 12, borderRadius: radius.pill, backgroundColor: colors.glassElevated, borderWidth: 1, borderColor: colors.border },
   materialTopText: { color: colors.textSecondary, fontSize: 11.5, fontWeight: '700' },
+  // De-emphasized on phone: a plain icon, no chip/background, so it reads as
+  // secondary next to the state pill and timer rather than competing with them.
+  materialGhostButton: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center' },
 
   // ---- Loading / permission ----
   centered: {
@@ -1355,6 +1420,9 @@ const styles = StyleSheet.create({
     paddingBottom: 20,
     justifyContent: 'flex-end',
   },
+  scrollCompact: {
+    paddingHorizontal: 20,
+  },
   content: {
     width: '100%',
     maxWidth: 960,
@@ -1425,6 +1493,7 @@ const styles = StyleSheet.create({
   captionStage: { minHeight: 360, justifyContent: 'flex-end', paddingBottom: 6 },
   feedRegion: { flex: 1, minHeight: 0 },
   feedInfoBar: { paddingHorizontal: 72, paddingBottom: 8, gap: 4 },
+  feedInfoBarCompact: { paddingHorizontal: 20 },
   captionHistory: { gap: 8, marginBottom: 18, maxWidth: 880 },
   historyLine: { color: 'rgba(71,85,105,0.40)', fontSize: 17, lineHeight: 26 },
   captionSection: {
@@ -1482,8 +1551,24 @@ const styles = StyleSheet.create({
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: colors.border,
   },
+  actionsCompact: {
+    gap: spacing.sm,
+    paddingHorizontal: 14,
+  },
   sideAction: {
     flex: 1,
+  },
+  // Phone-only utility buttons (Mark Important, Mini) flanking the primary
+  // round control — small and quiet so Pause/Finish stay visually primary.
+  utilityBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   roundBtn: {
     width: 62,

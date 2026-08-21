@@ -79,7 +79,7 @@ assert.match(screen, /ensureNativeProgressIdentity/, 'native start persists lect
 assert.match(screen, /if \(options\?\.recoverable\) autoStarted\.current = true/, 'recovery finish cannot race automatic recording');
 assert.match(screen, /autoStarted\.current = true;\s+void discardRecoverableRecording\(\)/, 'recovery discard cannot race automatic recording');
 assert.match(screen, /startCaptionPipeline/, 'caption path remains shared by both engines');
-assert.doesNotMatch(appConfig, /UIBackgroundModes/, 'no background audio capability is introduced');
-assert.match(appConfig, /"iosBackgroundMode": false/);
+assert.match(appConfig, /"UIBackgroundModes"\s*:\s*\[\s*"audio"\s*\]/, 'the canonical Expo config declares the iOS audio background capability');
+assert.match(appConfig, /"iosBackgroundMode": true/, 'iOS audio background capability is enabled for the next native build');
 
 console.log('Recording adapter, feature-gate, and recovery policy tests passed.');

@@ -10,12 +10,16 @@ import {
   Modal,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { RESPONSIVE_MODAL_ORIENTATIONS } from '@/constants/modal';
 import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
 import { useT } from '@/lib/i18n';
 
@@ -41,6 +45,8 @@ export function RenameModal({
   onSave,
 }: RenameModalProps) {
   const t = useT();
+  const { width, height } = useWindowDimensions();
+  const isLandscape = width > height;
   const [value, setValue] = useState(initialValue);
   const inputRef = useRef<TextInput>(null);
 
@@ -64,13 +70,23 @@ export function RenameModal({
       animationType="fade"
       onRequestClose={onCancel}
       statusBarTranslucent
+      presentationStyle="overFullScreen"
+      supportedOrientations={RESPONSIVE_MODAL_ORIENTATIONS}
     >
-      <KeyboardAvoidingView
-        style={styles.overlay}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      >
-        <Pressable style={styles.backdrop} onPress={onCancel} />
-        <View style={styles.card}>
+      <SafeAreaView style={styles.safe} edges={['top', 'right', 'bottom', 'left']}>
+        <KeyboardAvoidingView
+          style={styles.overlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          <Pressable style={styles.backdrop} onPress={onCancel} />
+          <ScrollView
+            style={styles.scroll}
+            contentContainerStyle={[styles.scrollContent, isLandscape && styles.scrollContentLandscape]}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+            bounces={false}
+          >
+          <View style={[styles.card, isLandscape && styles.cardLandscape]}>
           {/* Title */}
           <Text style={styles.title}>{title}</Text>
 
@@ -118,24 +134,35 @@ export function RenameModal({
               <Text style={[styles.saveLabel, !canSave && styles.saveLabelDisabled]}>{t('common.save')}</Text>
             </Pressable>
           </View>
-        </View>
-      </KeyboardAvoidingView>
+          </View>
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
+  safe: { flex: 1 },
   overlay: {
     flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   backdrop: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(6, 27, 52, 0.38)',
   },
+  scroll: { flex: 1 },
+  scrollContent: {
+    flexGrow: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.lg,
+  },
+  scrollContentLandscape: { paddingVertical: spacing.sm },
   card: {
-    width: 360,
+    width: '100%',
+    maxWidth: 420,
     backgroundColor: colors.surface,
     borderRadius: radius.xl,
     padding: spacing.xl,
@@ -143,6 +170,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
     ...shadows.card,
+  },
+  cardLandscape: {
+    maxWidth: 500,
+    padding: spacing.lg,
+    gap: spacing.sm,
   },
   title: {
     fontSize: fontSize.xl,

@@ -42,6 +42,7 @@ import {
   Animated,
   Easing,
   Image as RNImage,
+  LayoutAnimation,
   LayoutChangeEvent,
   PanResponder,
   Pressable,
@@ -72,6 +73,8 @@ import Svg, {
 import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
 import type { NoteImage, NotePoint, NoteStroke } from '@/lib/models';
 import { useT } from '@/lib/i18n';
+import { PressableScale } from '@/components/PressableScale';
+import { shouldStartToolbarTransition } from '@/lib/notebookToolbarTransition.mjs';
 import {
   appendStrokePoint,
   NOTEBOOK_MIN_POINT_DISTANCE,
@@ -1236,7 +1239,7 @@ type NotebookCanvasProps = {
  * The in-progress stroke and in-progress erase are kept local so a drag never
  * touches the parent until it ends.
  */
-export function NotebookCanvas({
+export const NotebookCanvas = memo(function NotebookCanvas({
   strokes,
   text,
   onStrokesChange,
@@ -1262,6 +1265,7 @@ export function NotebookCanvas({
   const [toolbarCollapsed, setToolbarCollapsed] = useState(
     DEFAULT_TOOLBAR_PREFERENCES.collapsed,
   );
+  const toolbarCollapsedRef = useRef(DEFAULT_TOOLBAR_PREFERENCES.collapsed);
   const [toolbarDock, setToolbarDock] = useState<NotebookToolbarDock>(
     DEFAULT_TOOLBAR_PREFERENCES.dock,
   );
@@ -1420,6 +1424,15 @@ export function NotebookCanvas({
   const toolbarTransition = useRef(
     new Animated.Value(DEFAULT_TOOLBAR_PREFERENCES.collapsed ? 0 : 1),
   ).current;
+  const transitionToolbarCollapsed = useCallback((nextCollapsed: boolean) => {
+    if (!shouldStartToolbarTransition(toolbarCollapsedRef.current, nextCollapsed)) return;
+    toolbarCollapsedRef.current = nextCollapsed;
+    LayoutAnimation.configureNext({
+      duration: TOOLBAR_ANIMATION_MS,
+      update: { type: LayoutAnimation.Types.easeInEaseOut },
+    });
+    setToolbarCollapsed(nextCollapsed);
+  }, []);
   const toolbarPositionRef = useRef({ x: TOOLBAR_EDGE_MARGIN, y: TOOLBAR_EDGE_MARGIN });
   const toolbarDragStartRef = useRef(toolbarPositionRef.current);
   const toolbarTouchStartRef = useRef<{ pageX: number; pageY: number } | null>(null);
@@ -1634,11 +1647,12 @@ export function NotebookCanvas({
   }, [getToolbarFootprintForDock, toolbarDock]);
 
   useEffect(() => {
+    toolbarTransition.stopAnimation();
     Animated.timing(toolbarTransition, {
       toValue: effectiveToolbarCollapsed ? 0 : 1,
       duration: TOOLBAR_ANIMATION_MS,
       easing: TOOLBAR_EASING,
-      useNativeDriver: false,
+      useNativeDriver: true,
     }).start();
   }, [effectiveToolbarCollapsed, toolbarTransition]);
 
@@ -1802,7 +1816,10 @@ export function NotebookCanvas({
       .then((raw) => {
         if (!active || !raw) return;
         const stored = JSON.parse(raw) as Partial<ToolbarPreferences>;
-        if (typeof stored.collapsed === 'boolean') setToolbarCollapsed(stored.collapsed);
+        if (typeof stored.collapsed === 'boolean') {
+          toolbarCollapsedRef.current = stored.collapsed;
+          setToolbarCollapsed(stored.collapsed);
+        }
         if (TOOLBAR_DOCKS.includes(stored.dock as NotebookToolbarDock)) {
           setToolbarDock(stored.dock as NotebookToolbarDock);
         }
@@ -2751,13 +2768,20 @@ export function NotebookCanvas({
   }, [mode, abortStroke]);
 
   // Context row swaps fade rather than cut, per the toolbar motion spec.
+  // MUST use the native driver: contextFade is combined with `toolbarTransition`
+  // (native-driven, line ~1651) via Animated.multiply for the context panel's
+  // opacity, so the shared opacity node lives on the native side. Animating
+  // contextFade with the JS driver threw "Attempting to run JS driven animation
+  // on animated node that has been moved to native earlier", which crashed
+  // NotebookCanvas (visible as the garbled Mini screen). Opacity is
+  // native-driver-safe, so both animations now agree.
   useEffect(() => {
     contextFade.setValue(0);
     Animated.timing(contextFade, {
       toValue: 1,
       duration: TOOLBAR_ANIMATION_MS,
       easing: TOOLBAR_EASING,
-      useNativeDriver: false,
+      useNativeDriver: true,
     }).start();
   }, [mode, contextFade]);
 
@@ -3166,21 +3190,21 @@ export function NotebookCanvas({
       <View style={styles.vMiniCur}>
         <ModeIcon mode={mode} active color={colors.pearlWhite} size={24} />
       </View>
-      <Pressable
+      <PressableScale
         accessibilityRole="button"
         accessibilityLabel={t('tools.expandNotebook')}
-        onPress={() => runToolbarPress(() => setToolbarCollapsed(false))}
+        onPress={() => runToolbarPress(() => transitionToolbarCollapsed(false))}
         hitSlop={TOOLBAR_ICON_HIT_SLOP}
         {...toolbarDragResponder.panHandlers}
         {...toolbarDragTouchHandlers}
-        style={({ pressed }) => [styles.vMiniExpand, pressed && styles.toolbarPressed]}
+        style={styles.vMiniExpand}
       >
         <ToolbarGlyph
           name={toolbarOnRight ? 'chevronLeft' : 'chevronRight'}
           color="rgba(255,255,255,0.6)"
           size={18}
         />
-      </Pressable>
+      </PressableScale>
     </View>
   ) : (
     <View style={[styles.vEdgeColumn, toolbarOnRight ? styles.vEdgeColumnRight : null]}>
@@ -3221,7 +3245,7 @@ export function NotebookCanvas({
             );
           })}
           <View style={styles.vRailDivider} />
-          <Pressable
+          <PressableScale
             accessibilityRole="button"
             accessibilityLabel={t('tools.hand')}
             accessibilityState={{ selected: mode === 'scroll' }}
@@ -3229,23 +3253,23 @@ export function NotebookCanvas({
             hitSlop={TOOLBAR_ICON_HIT_SLOP}
             {...toolbarDragResponder.panHandlers}
             {...toolbarDragTouchHandlers}
-            style={({ pressed }) => [styles.vRailIconButton, pressed && styles.toolbarPressed]}
+            style={styles.vRailIconButton}
           >
             {mode === 'scroll' ? <View style={styles.vActiveChip} /> : null}
             <ToolbarGlyph name="hand" color={mode === 'scroll' ? TOOLBAR_SELECTED : TOOLBAR_ICON_IDLE} />
             {mode === 'scroll' ? <View style={verticalActiveIndicatorStyle} /> : null}
-          </Pressable>
-          <Pressable
+          </PressableScale>
+          <PressableScale
             accessibilityRole="button"
             accessibilityLabel={t('tools.minimizeNotebook')}
-            onPress={() => runToolbarPress(() => setToolbarCollapsed(true))}
+            onPress={() => runToolbarPress(() => transitionToolbarCollapsed(true))}
             hitSlop={TOOLBAR_ICON_HIT_SLOP}
             {...toolbarDragResponder.panHandlers}
             {...toolbarDragTouchHandlers}
-            style={({ pressed }) => [styles.vRailIconButton, pressed && styles.toolbarPressed]}
+            style={styles.vRailIconButton}
           >
             <ToolbarGlyph name={toolbarOnRight ? 'chevronRight' : 'chevronLeft'} color={TOOLBAR_ICON_IDLE} />
-          </Pressable>
+          </PressableScale>
         </View>
 
         {/* Context column — only the active tool's controls, facing inward toward the Canvas */}
@@ -3615,14 +3639,8 @@ export function NotebookCanvas({
                 styles.toolbarShell,
                 { borderRadius: effectiveToolbarCollapsed ? TOOLBAR_MINIMIZED_RADIUS : TOOLBAR_SHELL_RADIUS },
                 {
-                  width: toolbarTransition.interpolate({
-                    inputRange: [0, 1],
-                    outputRange: [collapsedToolbarSize.width, toolbarVisualSize.width],
-                  }),
-                  height: toolbarTransition.interpolate({
-                    inputRange: [0, 1],
-                    outputRange: [collapsedToolbarSize.height, toolbarVisualSize.height],
-                  }),
+                  width: toolbarVisualSize.width,
+                  height: toolbarVisualSize.height,
                   transform: [{ scale: toolbarScale }],
                 },
               ]}
@@ -3649,16 +3667,15 @@ export function NotebookCanvas({
                 <View style={styles.collapsedCur}>
                   <ModeIcon mode={mode} active color={colors.pearlWhite} size={24} />
                 </View>
-                <Pressable
+                <PressableScale
                   accessibilityRole="button"
                   accessibilityLabel={t('tools.expandNotebook')}
-                  onPress={() => runToolbarPress(() => setToolbarCollapsed(false))}
+                  onPress={() => runToolbarPress(() => transitionToolbarCollapsed(false))}
                   hitSlop={TOOLBAR_ICON_HIT_SLOP}
                   {...toolbarDragResponder.panHandlers}
                   {...toolbarDragTouchHandlers}
-                  style={({ pressed }) => [
+                  style={[
                     styles.collapsedExpand,
-                    pressed && styles.toolbarPressed,
                   ]}
                 >
                   <ToolbarGlyph
@@ -3666,7 +3683,7 @@ export function NotebookCanvas({
                     color="rgba(255,255,255,0.6)"
                     size={18}
                   />
-                </Pressable>
+                </PressableScale>
               </Animated.View>
 
             <Animated.View
@@ -3724,7 +3741,7 @@ export function NotebookCanvas({
 
                 <View style={[styles.vDivider, toolbarVertical && styles.hDivider]} />
 
-                <Pressable
+                <PressableScale
                   accessibilityRole="button"
                   accessibilityLabel={t('tools.hand')}
                   accessibilityState={{ selected: mode === 'scroll' }}
@@ -3732,7 +3749,7 @@ export function NotebookCanvas({
                   hitSlop={TOOLBAR_ICON_HIT_SLOP}
                   {...toolbarDragResponder.panHandlers}
                   {...toolbarDragTouchHandlers}
-                  style={({ pressed }) => [styles.iconToolButton, pressed && styles.toolbarPressed]}
+                  style={styles.iconToolButton}
                 >
                   <ToolbarGlyph
                     name="hand"
@@ -3747,23 +3764,22 @@ export function NotebookCanvas({
                       ]}
                     />
                   ) : null}
-                </Pressable>
+                </PressableScale>
 
-                <Pressable
+                <PressableScale
                   accessibilityRole="button"
                   accessibilityLabel={t('tools.minimizeNotebook')}
-                  onPress={() => runToolbarPress(() => setToolbarCollapsed(true))}
+                  onPress={() => runToolbarPress(() => transitionToolbarCollapsed(true))}
                   hitSlop={TOOLBAR_ICON_HIT_SLOP}
                   {...toolbarDragResponder.panHandlers}
                   {...toolbarDragTouchHandlers}
-                  style={({ pressed }) => [
+                  style={[
                     styles.collapseButton,
                     toolbarVertical && styles.collapseButtonVertical,
-                    pressed && styles.toolbarPressed,
                   ]}
                 >
                   <ToolbarGlyph name={toolbarVertical ? 'chevronDown' : 'chevronRight'} color={TOOLBAR_ICON_IDLE} />
-                </Pressable>
+                </PressableScale>
               </View>
 
               {toolbarHasContext ? (
@@ -4036,7 +4052,7 @@ export function NotebookCanvas({
       ) : null}
     </View>
   );
-}
+});
 
 type HandwritingPreviewProps = {
   strokes: NoteStroke[];

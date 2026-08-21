@@ -37,12 +37,12 @@ assert.match(lecture, /setAudioModeAsync\(\s*\{\s*playsInSilentMode:\s*true,\s*a
 assert.match(lecture, /togglePlayback/);
 assert.match(lecture, /player\.play\(\)/);
 assert.match(lecture, /resolveLectureAudioPlaybackState/);
-assert.match(lecture, /shouldShowLocalAudioPlayer/);
+assert.match(lecture, /shouldShowAudioPlayer/);
 
 const legacy = read('lib/recording/useLegacyLectureRecorder.ts');
 assert.match(
   legacy,
-  /setAudioModeAsync\(\s*\{\s*playsInSilentMode:\s*true,\s*allowsRecording:\s*false\s*\}\s*\)/,
+  /setAudioModeAsync\(\s*\{\s*playsInSilentMode:\s*true,\s*allowsRecording:\s*false,\s*shouldPlayInBackground:\s*false,\s*allowsBackgroundRecording:\s*false,?\s*\}\s*\)/,
 );
 
 const gate = read('lib/recording/featureGate.ts');

@@ -1,5 +1,5 @@
 import { ReactNode } from 'react';
-import { StyleSheet, View, ViewStyle } from 'react-native';
+import { StyleProp, StyleSheet, View, ViewStyle } from 'react-native';
 
 import { colors, radius, shadows, spacing } from '@/constants/theme';
 import { PressableScale } from '@/components/PressableScale';
@@ -14,7 +14,7 @@ type GlassCardProps = {
   elevated?: boolean;
   /** Makes the whole card a touch target. */
   onPress?: () => void;
-  style?: ViewStyle;
+  style?: StyleProp<ViewStyle>;
 };
 
 /**

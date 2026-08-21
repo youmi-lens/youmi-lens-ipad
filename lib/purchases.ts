@@ -846,17 +846,15 @@ export function shouldShowPurchaseEntry(status: PlanStatus | null | undefined): 
 }
 
 export const STUDENT_PASS_REQUIRED_COPY = [
-  '30 days of Student Basic access.',
-  'One-time payment. Does not renew automatically.',
+  'Student Basic includes the same entitlements on every plan.',
+  'Auto-renewing subscription. Cancel anytime in your Apple Account settings.',
 ];
 
 export const STUDENT_PASS_FORBIDDEN_COPY = [
   'lifetime',
   'forever',
   'unlimited',
-  'auto-renew',
-  'monthly subscription',
-  'cancel anytime',
+  'one-time payment',
 ];
 
 export const purchaseService: PurchaseService = USE_REAL_IAP

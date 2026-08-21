@@ -44,7 +44,72 @@
     "_storefront" : "USA"
   },
   "subscriptionGroups" : [
+    {
+      "id" : "22109238",
+      "localizations" : [
+        { "description" : "Student access subscriptions.", "displayName" : "Youmi Lens Student Access", "locale" : "en_US" },
+        { "description" : "学生访问订阅。", "displayName" : "Youmi Lens 学生访问", "locale" : "zh_Hans" },
+        { "description" : "学生向けアクセスのサブスクリプションです。", "displayName" : "Youmi Lens 学生アクセス", "locale" : "ja" },
+        { "description" : "Abonnements d’accès étudiant.", "displayName" : "Accès étudiant Youmi Lens", "locale" : "fr" },
+        { "description" : "Suscripciones de acceso para estudiantes.", "displayName" : "Acceso para estudiantes Youmi Lens", "locale" : "es" },
+        { "description" : "학생 이용권 구독입니다.", "displayName" : "Youmi Lens 학생 이용권", "locale" : "ko" }
+      ],
+      "name" : "Youmi Lens Student Access",
+      "subscriptions" : [
+        {
+          "adHocOffers" : [
 
+          ],
+          "codeOffers" : [
+
+          ],
+          "displayPrice" : "4.99",
+          "familyShareable" : false,
+          "groupNumber" : 3,
+          "internalID" : "A7B1C0D2-0008-4000-A000-000000000008",
+          "introductoryOffer" : null,
+          "localizations" : [
+            { "description" : "Full Student Access, billed monthly and automatically renewed unless cancelled.", "displayName" : "Student Access Monthly", "locale" : "en_US" },
+            { "description" : "完整学生访问权限，按月计费；除非取消，否则自动续订。", "displayName" : "学生访问（月度）", "locale" : "zh_Hans" },
+            { "description" : "学生向けの全機能を月額で利用できます。解約しない限り自動更新されます。", "displayName" : "学生アクセス（月額）", "locale" : "ja" },
+            { "description" : "Accès étudiant complet, facturé chaque mois et renouvelé automatiquement sauf résiliation.", "displayName" : "Accès étudiant mensuel", "locale" : "fr" },
+            { "description" : "Acceso completo para estudiantes, con facturación mensual y renovación automática salvo cancelación.", "displayName" : "Acceso mensual para estudiantes", "locale" : "es" },
+            { "description" : "전체 학생 이용권이 매월 결제되며 취소하지 않으면 자동 갱신됩니다.", "displayName" : "학생 이용권 월간", "locale" : "ko" }
+          ],
+          "productID" : "com.aydenz.youmilensipad.student.monthly",
+          "recurringSubscriptionPeriod" : "P1M",
+          "referenceName" : "Student Access Monthly",
+          "subscriptionGroupID" : "22109238",
+          "type" : "RecurringSubscription"
+        },
+        {
+          "adHocOffers" : [
+
+          ],
+          "codeOffers" : [
+
+          ],
+          "displayPrice" : "49.99",
+          "familyShareable" : false,
+          "groupNumber" : 3,
+          "internalID" : "A7B1C0D2-0009-4000-A000-000000000009",
+          "introductoryOffer" : null,
+          "localizations" : [
+            { "description" : "Full Student Access, billed annually and automatically renewed unless cancelled.", "displayName" : "Student Access Annual", "locale" : "en_US" },
+            { "description" : "完整学生访问权限，按年计费；除非取消，否则自动续订。", "displayName" : "学生访问（年度）", "locale" : "zh_Hans" },
+            { "description" : "学生向けの全機能を年額で利用できます。解約しない限り自動更新されます。", "displayName" : "学生アクセス（年額）", "locale" : "ja" },
+            { "description" : "Accès étudiant complet, facturé chaque année et renouvelé automatiquement sauf résiliation.", "displayName" : "Accès étudiant annuel", "locale" : "fr" },
+            { "description" : "Acceso completo para estudiantes, con facturación anual y renovación automática salvo cancelación.", "displayName" : "Acceso anual para estudiantes", "locale" : "es" },
+            { "description" : "전체 학생 이용권이 매년 결제되며 취소하지 않으면 자동 갱신됩니다.", "displayName" : "학생 이용권 연간", "locale" : "ko" }
+          ],
+          "productID" : "com.aydenz.youmilensipad.student.annual",
+          "recurringSubscriptionPeriod" : "P1Y",
+          "referenceName" : "Student Access Annual",
+          "subscriptionGroupID" : "22109238",
+          "type" : "RecurringSubscription"
+        }
+      ]
+    }
   ],
   "version" : {
     "major" : 3,

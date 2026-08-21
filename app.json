@@ -16,7 +16,10 @@
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Allow Youmi Lens to access your microphone so it can record lectures, provide live captions, and generate study notes.",
         "NSPhotoLibraryUsageDescription": "Allow Youmi Lens to access your photos so you can insert screenshots and images into your notebook.",
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "UIBackgroundModes": [
+          "audio"
+        ]
       },
       "bundleIdentifier": "com.aydenz.youmilensipad",
       "buildNumber": "41",
@@ -60,7 +63,7 @@
       [
         "react-native-audio-api",
         {
-          "iosBackgroundMode": false,
+          "iosBackgroundMode": true,
           "iosMicrophonePermission": "Allow Youmi Lens to access your microphone so it can record lectures, provide live captions, and generate study notes.",
           "androidPermissions": [
             "android.permission.RECORD_AUDIO"

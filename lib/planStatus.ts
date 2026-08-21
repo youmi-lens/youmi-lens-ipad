@@ -31,6 +31,13 @@ export type PlanStatus = {
     planType?: string | null;
     startsAt?: string | null;
     expiresAt: string | null;
+    autoRenewStatus?: boolean | null;
+    originalTransactionId?: string | null;
+    latestTransactionId?: string | null;
+    subscriptionGroupId?: string | null;
+    revocationAt?: string | null;
+    lastVerifiedAt?: string | null;
+    source?: string | null;
     revoked?: boolean;
     currentEntitlement?: {
       productId: string;

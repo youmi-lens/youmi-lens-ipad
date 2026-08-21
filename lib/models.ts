@@ -89,6 +89,13 @@ export type Course = {
   createdAt: string;
   /** Soft-delete timestamp (ISO). Absent or null = active; set = in Recently Deleted. */
   deletedAt?: string | null;
+  /**
+   * Cloud Library Stage 4: freshness clock for the deletion STATE (a delete OR a
+   * restore stamps it). Lets a stale ACTIVE snapshot never resurrect a newer
+   * tombstone across devices. Mirrors Lecture.deletionUpdatedAt. See
+   * lib/deletionSync.mjs.
+   */
+  deletionUpdatedAt?: string;
   /** Why the course was soft-deleted (e.g. 'manual'). */
   deletedReason?: string | null;
 };
@@ -193,6 +200,15 @@ export type Lecture = {
   deletedAt?: string | null;
   /** Why the lecture was soft-deleted (e.g. 'manual'). */
   deletedReason?: string | null;
+
+  // ---- Cloud Library Stage 2 field-freshness clocks (account-level sync) ----
+  /** When the deletion state (delete OR restore) last changed. Drives account-level
+   *  deletion merge so a stale snapshot never resurrects a newer decision. */
+  deletionUpdatedAt?: string;
+  /** When the notes were last edited (account-level notes freshness). */
+  notesUpdatedAt?: string;
+  /** When the marks were last changed (account-level marks freshness). */
+  marksUpdatedAt?: string;
 };
 
 /**

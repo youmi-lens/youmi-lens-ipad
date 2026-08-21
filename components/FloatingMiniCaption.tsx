@@ -86,6 +86,8 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
   const isResizingRef = useRef(false);
   const feedScrollRef = useRef<ScrollView | null>(null);
   const feedMetricsRef = useRef({ contentHeight: 0, layoutHeight: 0 });
+  const feedUserScrollingRef = useRef(false);
+  const feedAutoScrollPendingRef = useRef(false);
 
   const initialListeningPill = useRef({
     x: Math.max(EDGE_MARGIN, width - LISTENING_PILL_WIDTH - 16),
@@ -302,9 +304,16 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
       return;
     }
     if (!autoFollowFeed) return;
-    const id = requestAnimationFrame(() => feedScrollRef.current?.scrollToEnd({ animated: true }));
-    return () => cancelAnimationFrame(id);
-  }, [autoFollowFeed, showCaptionFeed, captionLines, partialCaption, partialTranslationZh, latestFinalLine?.translationZh]);
+    feedAutoScrollPendingRef.current = true;
+    const id = requestAnimationFrame(() => {
+      feedScrollRef.current?.scrollToEnd({ animated: true });
+      feedAutoScrollPendingRef.current = false;
+    });
+    return () => {
+      cancelAnimationFrame(id);
+      feedAutoScrollPendingRef.current = false;
+    };
+  }, [autoFollowFeed, showCaptionFeed, captionLines.length, partialCaption]);
 
   const updateAutoFollowFromScroll = (scrollY: number) => {
     const { contentHeight, layoutHeight } = feedMetricsRef.current;
@@ -418,15 +427,28 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
             style={styles.feedScroll}
             contentContainerStyle={[styles.feedContent, { gap: Math.max(8, Math.round(10 * panelScale)) }]}
             showsVerticalScrollIndicator={false}
+            maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
             scrollEnabled
             scrollEventThrottle={16}
             onLayout={(event) => {
               feedMetricsRef.current.layoutHeight = event.nativeEvent.layout.height;
             }}
-            onScroll={(event) => updateAutoFollowFromScroll(event.nativeEvent.contentOffset.y)}
+            onScroll={(event) => {
+              if (feedUserScrollingRef.current) updateAutoFollowFromScroll(event.nativeEvent.contentOffset.y);
+            }}
+            onScrollBeginDrag={() => { feedUserScrollingRef.current = true; }}
+            onScrollEndDrag={(event) => {
+              updateAutoFollowFromScroll(event.nativeEvent.contentOffset.y);
+              feedUserScrollingRef.current = false;
+            }}
+            onMomentumScrollBegin={() => { feedUserScrollingRef.current = true; }}
+            onMomentumScrollEnd={(event) => {
+              updateAutoFollowFromScroll(event.nativeEvent.contentOffset.y);
+              feedUserScrollingRef.current = false;
+            }}
             onContentSizeChange={(_width, contentHeight) => {
               feedMetricsRef.current.contentHeight = contentHeight;
-              if (autoFollowFeed) feedScrollRef.current?.scrollToEnd({ animated: true });
+              if (feedAutoScrollPendingRef.current) feedScrollRef.current?.scrollToEnd({ animated: false });
             }}
           >
             {feedLines.length > 0 ? (

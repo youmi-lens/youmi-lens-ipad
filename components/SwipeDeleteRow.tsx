@@ -5,6 +5,7 @@ import {
   Dimensions,
   PanResponder,
   Pressable,
+  StyleProp,
   StyleSheet,
   Text,
   View,
@@ -56,7 +57,7 @@ type SwipeDeleteRowProps = {
   onOpen?: () => void;
   onClose?: () => void;
   onDelete: () => void;
-  style?: ViewStyle;
+  style?: StyleProp<ViewStyle>;
   rowStyle?: ViewStyle;
 };
 

@@ -1,4 +1,5 @@
 import { API_BASE_URL } from './config';
+import { normalizeEmail } from './authSignup';
 
 /**
  * Checks whether an email already has a Youmi Lens account via the backend
@@ -35,7 +36,7 @@ async function requestEmailCheck(email: string): Promise<CheckEmailResult> {
   const response = await fetch(`${API_BASE_URL}/api/auth/check-email`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email }),
+    body: JSON.stringify({ email: normalizeEmail(email) }),
   });
   const payload = (await response.json().catch(() => null)) as {
     exists?: boolean;

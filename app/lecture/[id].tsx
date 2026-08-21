@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useAudioPlayer, useAudioPlayerStatus, setAudioModeAsync } from 'expo-audio';
 import { Href, useLocalSearchParams, useRouter } from 'expo-router';
-import { ComponentProps, type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
+import { ComponentProps, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -18,11 +18,16 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlassCard } from '@/components/GlassCard';
 import { AppBackground } from '@/components/AppBackground';
 import { HandwritingPreview, NotebookCanvas } from '@/components/NotebookCanvas';
-import { NativeLookupText } from '@/components/NativeLookupText';
+import { LectureSectionHeader } from '@/components/LectureSectionHeader';
+import { MoveLectureToCourseModal } from '@/components/MoveLectureToCourseModal';
 import { RenameModal } from '@/components/RenameModal';
+import { PressableScale } from '@/components/PressableScale';
 import { StatusPill, StatusVariant } from '@/components/StatusPill';
+import { TranscriptReadList, TranscriptReadPrewarmer } from '@/components/TranscriptReadList';
 import { WorkspaceSidebar } from '@/components/WorkspaceSidebar';
-import { colors, fontSize, radius, spacing } from '@/constants/theme';
+import { isPad } from '@/constants/deviceClass';
+import { useIsCompactWidth } from '@/constants/responsive';
+import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
 import { exportLectureNotesPdf, hasExportableLectureNotes } from '@/lib/exportLectureNotesPdf';
 import { formatClock, formatDate, formatDuration } from '@/lib/format';
 import { useI18n, localizeSystemDefaultTitle } from '@/lib/i18n';
@@ -48,42 +53,36 @@ import {
 import { useData } from '@/lib/store';
 import {
   resolveLectureAudioPlaybackState,
-  shouldShowLocalAudioPlayer,
+  shouldShowAudioPlayer,
 } from '@/lib/lectureLocalAudio';
 import { useRecordingNotes } from '@/lib/recordingNotes';
+import { requestCloudLectureAudio } from '@/lib/cloudLectureAudio.mjs';
+import { API_BASE_URL } from '@/lib/config';
+import { useAuth } from '@/lib/auth';
 
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
 
 const TABS = ['Summary', 'Transcript', 'Marked', 'Notes'] as const;
 type Tab = (typeof TABS)[number];
 
-/** A study-note style block header: icon tile + label. */
-function BlockHeader({
-  icon,
-  label,
-  trailing,
-}: {
-  icon: IoniconName;
-  label: string;
-  trailing?: ReactNode;
-}) {
-  return (
-    <View style={styles.blockHeader}>
-      <View style={styles.blockIcon}>
-        <Ionicons name={icon} size={15} color={colors.textPrimary} />
-      </View>
-      <Text style={styles.blockLabel}>{label}</Text>
-      {trailing ? <View style={styles.blockTrailing}>{trailing}</View> : null}
-    </View>
-  );
-}
+// expo-audio's underlying AVPlayer never surfaces a load *failure* to JS (an
+// AVPlayerItem going `.failed` — e.g. an expired signed URL — is silent:
+// `isLoaded` just never becomes true, no error, no event). This bounded wait
+// is the only way to notice a stuck cloud source and either recover or tell
+// the user, instead of leaving a queued tap hanging forever.
+const LOAD_TIMEOUT_MS = 8000;
+// A finished track is left parked at `duration` by the native layer (it does
+// not auto-rewind). Treat "at or past duration" as ended so replay always
+// seeks to 0 first, regardless of which ended-signal actually fired.
+const REPLAY_EPSILON_SEC = 0.25;
 
 export default function LectureDetailScreen() {
   const { t, language } = useI18n();
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string }>();
-  const { getLecture, getCourse, updateLecture, renameLecture } = useData();
+  const { courses, getLecture, getCourse, updateLecture, renameLecture, moveLectureToCourse } = useData();
   const { isLectureSessionActive } = useRecordingNotes();
+  const { session } = useAuth();
 
   const lecture = getLecture(params.id);
   const course = getCourse(lecture?.courseId);
@@ -94,9 +93,26 @@ export default function LectureDetailScreen() {
   const [imagesDraft, setImagesDraft] = useState(lecture?.noteImages ?? []);
   const [notesOpen, setNotesOpen] = useState(false);
   const [renameVisible, setRenameVisible] = useState(false);
+  const [moveVisible, setMoveVisible] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
+  const [cloudRetry, setCloudRetry] = useState(0);
+  const [cloudAudio, setCloudAudio] = useState<{ url: string | null; loading: boolean; failed: boolean }>({
+    url: null,
+    loading: false,
+    failed: false,
+  });
+  const retriedExpiredCloudUrl = useRef(false);
+  const pendingPlayIntentRef = useRef(false);
+  const loadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Forces useAudioPlayer to construct a genuinely NEW native player instance
+  // (not an in-place item swap) for ended-replay. Verified on-device: both
+  // seekTo(0)+play() and player.replace()+play() leave AVPlayer silently
+  // paused after end-of-item; only a from-scratch AudioPlayer construction —
+  // the exact path a fresh screen mount already takes reliably — resumes.
+  const [suspendPlayerSource, setSuspendPlayerSource] = useState(false);
   const { width } = useWindowDimensions();
   const compactLayout = width < 1180;
+  const isPhoneWidth = useIsCompactWidth();
   const audioPlayback = useMemo(
     () =>
       resolveLectureAudioPlaybackState({
@@ -106,11 +122,51 @@ export default function LectureDetailScreen() {
       }),
     [lecture?.localAudioUri, lecture?.storagePath, lecture?.id],
   );
-  const audioAvailable = shouldShowLocalAudioPlayer(audioPlayback);
-  const player = useAudioPlayer(audioAvailable ? { uri: audioPlayback.uri ?? '' } : null, { updateInterval: 250 });
+  const cloudRecordingId = lecture?.remoteRecordingId ?? lecture?.id ?? null;
+  const cloudRequired = audioPlayback.kind === 'cloud';
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!cloudRequired || !cloudRecordingId) {
+      setCloudAudio({ url: null, loading: false, failed: false });
+      return () => { cancelled = true; };
+    }
+
+    setCloudAudio({ url: null, loading: true, failed: false });
+    void requestCloudLectureAudio({
+      apiBaseUrl: API_BASE_URL,
+      recordingId: cloudRecordingId,
+      accessToken: session?.access_token,
+    })
+      .then(({ signedUrl }) => {
+        if (!cancelled) setCloudAudio({ url: signedUrl, loading: false, failed: false });
+      })
+      .catch((error) => {
+        if (__DEV__) console.warn('[lecture] cloud audio resolution failed', error);
+        if (!cancelled) setCloudAudio({ url: null, loading: false, failed: true });
+      });
+    return () => { cancelled = true; };
+  }, [cloudRequired, cloudRecordingId, session?.access_token, cloudRetry]);
+
+  const audioUri = audioPlayback.kind === 'local' ? audioPlayback.uri : cloudAudio.url;
+  const audioAvailable = audioPlayback.kind === 'local'
+    ? shouldShowAudioPlayer(audioPlayback)
+    : Boolean(cloudAudio.url && shouldShowAudioPlayer(audioPlayback));
+  const player = useAudioPlayer(
+    audioAvailable && !suspendPlayerSource ? { uri: audioUri ?? '' } : null,
+    { updateInterval: 250 },
+  );
   const audioStatus = useAudioPlayerStatus(player);
   const playbackDuration = audioStatus.duration || (lecture?.durationMillis ?? 0) / 1000;
   const playbackProgress = playbackDuration > 0 ? Math.min(audioStatus.currentTime / playbackDuration, 1) : 0;
+
+  // One-tick null→real flip: releases the (ended) native player, then
+  // reconstructs it fresh on the very next render.
+  useEffect(() => {
+    if (suspendPlayerSource) {
+      setSuspendPlayerSource(false);
+    }
+  }, [suspendPlayerSource]);
 
   // Heal stale sandbox URIs once a playable path is resolved.
   useEffect(() => {
@@ -134,26 +190,159 @@ export default function LectureDetailScreen() {
     };
   }, [player]);
 
+  const clearLoadTimeout = () => {
+    if (loadTimeoutRef.current) {
+      clearTimeout(loadTimeoutRef.current);
+      loadTimeoutRef.current = null;
+    }
+  };
+
+  const armLoadTimeout = () => {
+    clearLoadTimeout();
+    loadTimeoutRef.current = setTimeout(() => {
+      loadTimeoutRef.current = null;
+      if (!pendingPlayIntentRef.current) return;
+      if (cloudRequired && !retriedExpiredCloudUrl.current) {
+        if (__DEV__) console.info('[lecture] play: load timeout — re-resolving cloud URL once');
+        retriedExpiredCloudUrl.current = true;
+        setCloudRetry((value) => value + 1);
+        armLoadTimeout();
+        return;
+      }
+      if (__DEV__) console.info('[lecture] play: load timeout — giving up');
+      pendingPlayIntentRef.current = false;
+      Alert.alert(t('lecture.audioUnavailable'), t('lecture.tryAgain'));
+    }, LOAD_TIMEOUT_MS);
+  };
+
+  // A tap queued while the player was still loading (cloud network fetch, a
+  // just-swapped source after a signed-URL refresh, or a freshly-reconstructed
+  // instance after ended-replay) starts automatically the moment the player
+  // reports ready — the tap's intent is never dropped.
+  //
+  // Reads player.isLoaded/player.playing directly (synchronous native
+  // getters), NOT audioStatus.isLoaded/.playing: useAudioPlayerStatus's
+  // useEvent() seeds its React state with `initialValue` only on that hook's
+  // very first mount (React ignores a changed lazy-init argument on later
+  // renders) — proven on-device: right after a player-identity swap,
+  // audioStatus briefly still reports the PREVIOUS player's last-known
+  // values (e.g. currentTime at the old duration) for one render, before a
+  // genuinely fresh event arrives from the new player. The synchronous
+  // properties on the player object itself never have that lag. The effect
+  // still re-runs on `audioStatus` changes (needed as the re-check trigger —
+  // a replace-style reload can report the same isLoaded/playing primitive
+  // values it already held, which the dependency array's Object.is check
+  // would otherwise treat as "unchanged"), but the CONDITION is evaluated
+  // against the live player, not the lagging React-state mirror of it.
+  useEffect(() => {
+    if (pendingPlayIntentRef.current && player.isLoaded && !player.playing) {
+      pendingPlayIntentRef.current = false;
+      clearLoadTimeout();
+      if (__DEV__) console.info('[lecture] play: queued intent resolved — starting playback');
+      player.play();
+    }
+  }, [audioStatus, player]);
+
+  // If the source disappears (cloud resolution failed, local file went
+  // missing) a stale queued tap must not fire a delayed alert later.
+  useEffect(() => {
+    if (!audioAvailable) {
+      pendingPlayIntentRef.current = false;
+      clearLoadTimeout();
+    }
+  }, [audioAvailable]);
+
+  // True-unmount-only: a queued intent must survive a mid-flight player swap
+  // (the signed-URL retry above swaps `player`), so it is not cleared by the
+  // effect above, which is keyed to `[player]` and fires on every swap.
+  useEffect(() => {
+    return () => {
+      clearLoadTimeout();
+      pendingPlayIntentRef.current = false;
+    };
+  }, []);
+
   const togglePlayback = useCallback(async () => {
     if (!audioAvailable) return;
     if (isLectureSessionActive) {
       Alert.alert(t('lecture.audioUnavailable'), t('lecture.playbackBlockedRecording'));
       return;
     }
+    if (__DEV__) {
+      console.info('[lecture] play tap', {
+        playing: audioStatus.playing,
+        isLoaded: audioStatus.isLoaded,
+        cloudRequired,
+      });
+    }
     try {
       if (audioStatus.playing) {
+        pendingPlayIntentRef.current = false;
+        clearLoadTimeout();
         player.pause();
         return;
       }
       // Recording leave/stop leaves the session in ambient/record mode;
       // switch to audible playback before starting the player.
       await setAudioModeAsync({ playsInSilentMode: true, allowsRecording: false });
+      const hasEnded =
+        playbackDuration > 0 && audioStatus.currentTime >= playbackDuration - REPLAY_EPSILON_SEC;
+      if (hasEnded) {
+        // Neither seekTo(0)+play() nor player.replace()+play() reliably
+        // resumed AVPlayer once it had already fired end-of-item when tested
+        // on-device — a from-scratch AudioPlayer construction (the exact
+        // path a fresh screen mount already takes reliably every time) is
+        // what actually resumes it. Queue the tap exactly like a
+        // still-loading cloud source so it starts the moment the
+        // freshly-reconstructed player reports ready.
+        if (__DEV__) console.info('[lecture] play: ended — forcing a fresh player instance');
+        pendingPlayIntentRef.current = true;
+        armLoadTimeout();
+        setSuspendPlayerSource(true);
+        return;
+      }
+      if (!audioStatus.isLoaded) {
+        // Cloud source still resolving/buffering — queue the tap instead of
+        // dropping it; the effect above fires play() once isLoaded flips true.
+        if (__DEV__) console.info('[lecture] play: not loaded yet — queuing intent');
+        pendingPlayIntentRef.current = true;
+        armLoadTimeout();
+        return;
+      }
+      pendingPlayIntentRef.current = false;
+      clearLoadTimeout();
+      if (__DEV__) console.info('[lecture] play: loaded — calling player.play()');
       player.play();
     } catch (err) {
       console.warn('[lecture] playback failed', err);
+      // A signed URL can expire between resolution and play. Reacquire exactly
+      // once, and honor the tap that already expressed intent — the queued-
+      // intent effect above starts playback once the fresh source is ready.
+      if (cloudRequired && !retriedExpiredCloudUrl.current) {
+        retriedExpiredCloudUrl.current = true;
+        pendingPlayIntentRef.current = true;
+        setCloudRetry((value) => value + 1);
+        return;
+      }
+      pendingPlayIntentRef.current = false;
       Alert.alert(t('lecture.audioUnavailable'), t('lecture.tryAgain'));
     }
-  }, [audioAvailable, audioStatus.playing, isLectureSessionActive, player, t]);
+  }, [
+    audioAvailable,
+    audioStatus.currentTime,
+    audioStatus.isLoaded,
+    audioStatus.playing,
+    cloudRequired,
+    isLectureSessionActive,
+    playbackDuration,
+    player,
+    t,
+  ]);
+
+  const openTranscriptEditor = useCallback((side: 'source' | 'translated') => {
+    if (!lecture) return;
+    router.push(`/lecture/${lecture.id}/transcript-edit?side=${side}` as Href);
+  }, [lecture, router]);
 
   if (!lecture) {
     return (
@@ -190,14 +379,33 @@ export default function LectureDetailScreen() {
     || hasUserEditedTranscript(lecture)
     || Boolean(sourceTranscript.trim())
     || Boolean(translatedTranscript.trim());
+  const transcriptDocumentVersion =
+    lecture.transcriptUpdatedAt
+    ?? lecture.remoteAiStatus
+    ?? lecture.processingStatus
+    ?? 'unmodified';
+  const transcriptCacheKey = [
+    lecture.id,
+    transcriptDocumentVersion,
+    sourceLanguage,
+    translationLanguage,
+    canEditTranscripts ? 'ready' : 'pending',
+    sourceTranscript.length,
+    translatedTranscript.length,
+  ].join(':');
+  const transcriptReadProps = {
+    cacheKey: transcriptCacheKey,
+    sourceLanguage,
+    sourceLabel: getTranscriptSectionLabel(sourceLanguage),
+    sourceText: canEditTranscripts ? sourceTranscript : '',
+    translatedLanguage: hasTranslation ? translationLanguage : undefined,
+    translatedLabel: hasTranslation ? getTranscriptSectionLabel(translationLanguage) : undefined,
+    translatedText: hasTranslation && canEditTranscripts ? translatedTranscript : undefined,
+  };
 
   const openSummaryEditor = (side: 'source' | 'translated') => {
     if (!canEditSummaries) return;
     router.push(`/lecture/${lecture.id}/summary-edit?side=${side}` as Href);
-  };
-  const openTranscriptEditor = (side: 'source' | 'translated') => {
-    if (!canEditTranscripts) return;
-    router.push(`/lecture/${lecture.id}/transcript-edit?side=${side}` as Href);
   };
   const cjk = (lang: string) => lang === 'zh-Hans' || lang === 'ja' || lang === 'ko';
   const typedNotes = lecture.notes.trim();
@@ -213,6 +421,14 @@ export default function LectureDetailScreen() {
           : { label: t('status.recorded'), variant: 'idle' as StatusVariant };
 
   const openNotesEditor = () => {
+    // Notebook (the handwritten + typed Pencil editor) is an iPad-only
+    // experience. iPhone never mounts NotebookCanvas or navigates into the
+    // editor — it sees a concise notice instead. No draft state is touched,
+    // so nothing here is at risk of divergent Notes data.
+    if (!isPad) {
+      Alert.alert(t('lecture.notebookIpadOnly'));
+      return;
+    }
     setNotesDraft(lecture.notes);
     setStrokesDraft(lecture.noteStrokes ?? []);
     setImagesDraft(lecture.noteImages ?? []);
@@ -265,17 +481,17 @@ export default function LectureDetailScreen() {
       <WorkspaceSidebar active="record" />
       <SafeAreaView style={styles.detail} edges={['top', 'right', 'bottom']}>
       {/* Header */}
-      <View style={styles.header}>
-        <Pressable
+      <View style={[styles.header, isPhoneWidth && styles.headerCompact]}>
+        <PressableScale
           accessibilityRole="button"
           accessibilityLabel={t('common.back')}
           onPress={() => router.back()}
           hitSlop={10}
-          style={({ pressed }) => [styles.backBtn, pressed && styles.pressed]}
+          style={styles.backBtn}
         >
           <Ionicons name="chevron-back" size={24} color={colors.textPrimary} />
-        </Pressable>
-        {course ? (
+        </PressableScale>
+        {course && !isPhoneWidth ? (
           <View style={styles.courseTile}>
             <Ionicons
               name={course.icon as IoniconName}
@@ -294,53 +510,95 @@ export default function LectureDetailScreen() {
           </Text>
         </View>
         <StatusPill label={status.label} variant={status.variant} />
-        <Pressable
+        <PressableScale
           accessibilityRole="button"
           accessibilityLabel={t('course.renameLecture')}
           onPress={() => setRenameVisible(true)}
           hitSlop={8}
-          style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
+          style={styles.iconBtn}
         >
           <Ionicons name="pencil-outline" size={20} color={colors.textPrimary} />
-        </Pressable>
+        </PressableScale>
+        {!lecture.deletedAt ? (
+          <PressableScale
+            accessibilityRole="button"
+            accessibilityLabel={t('lecture.moveToCourse')}
+            onPress={() => setMoveVisible(true)}
+            hitSlop={8}
+            style={styles.iconBtn}
+          >
+            <Ionicons name="swap-horizontal-outline" size={20} color={colors.textPrimary} />
+          </PressableScale>
+        ) : null}
       </View>
 
-      <View style={styles.playerWrap}>
+      <View style={[styles.playerWrap, isPhoneWidth && styles.playerWrapCompact]}>
         <GlassCard padding={16}>
           {audioAvailable ? (
-            <View style={[styles.compactPlayer, compactLayout && styles.compactPlayerNarrow]}>
-              <Pressable accessibilityRole="button" onPress={() => void togglePlayback()} style={styles.playPauseButton}>
-                <Ionicons name={audioStatus.playing ? 'pause' : 'play'} size={20} color={colors.textOnNavy} />
-              </Pressable>
-              <Pressable accessibilityRole="button" accessibilityLabel={t('lecture.skipBack')} onPress={() => void skipBy(-10)} style={styles.skipButton}><Text style={styles.skipText}>↺ 10s</Text></Pressable>
-              <Text style={styles.playerTimeText}>{formatClock(Math.floor(audioStatus.currentTime))}</Text>
-              <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${playbackProgress * 100}%` }]} /></View>
-              <Text style={styles.playerTimeText}>{formatClock(Math.floor(playbackDuration))}</Text>
-              <Pressable accessibilityRole="button" accessibilityLabel={t('lecture.skipForward')} onPress={() => void skipBy(10)} style={styles.skipButton}><Text style={styles.skipText}>10s ↻</Text></Pressable>
+            isPhoneWidth ? (
+              // Phone: the familiar mobile player shape — seek bar with time
+              // labels spans the full width, transport controls sit centered
+              // below with Play/Pause as the obviously largest control.
+              <View style={styles.playerStack}>
+                <View style={styles.playerSeekRow}>
+                  <Text style={styles.playerTimeText}>{formatClock(Math.floor(audioStatus.currentTime))}</Text>
+                  <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${playbackProgress * 100}%` }]} /></View>
+                  <Text style={styles.playerTimeText}>{formatClock(Math.floor(playbackDuration))}</Text>
+                </View>
+                <View style={styles.playerTransportRow}>
+                  <PressableScale accessibilityRole="button" accessibilityLabel={t('lecture.skipBack')} onPress={() => void skipBy(-10)} style={styles.skipButtonCompact}><Text style={styles.skipText}>↺ 10s</Text></PressableScale>
+                  <PressableScale accessibilityRole="button" onPress={() => void togglePlayback()} style={styles.playPauseButtonLarge}>
+                    <Ionicons name={audioStatus.playing ? 'pause' : 'play'} size={26} color={colors.textOnNavy} />
+                  </PressableScale>
+                  <PressableScale accessibilityRole="button" accessibilityLabel={t('lecture.skipForward')} onPress={() => void skipBy(10)} style={styles.skipButtonCompact}><Text style={styles.skipText}>10s ↻</Text></PressableScale>
+                </View>
+              </View>
+            ) : (
+              <View style={[styles.compactPlayer, compactLayout && styles.compactPlayerNarrow]}>
+                <PressableScale accessibilityRole="button" onPress={() => void togglePlayback()} style={styles.playPauseButton}>
+                  <Ionicons name={audioStatus.playing ? 'pause' : 'play'} size={20} color={colors.textOnNavy} />
+                </PressableScale>
+                <PressableScale accessibilityRole="button" accessibilityLabel={t('lecture.skipBack')} onPress={() => void skipBy(-10)} style={styles.skipButton}><Text style={styles.skipText}>↺ 10s</Text></PressableScale>
+                <Text style={styles.playerTimeText}>{formatClock(Math.floor(audioStatus.currentTime))}</Text>
+                <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${playbackProgress * 100}%` }]} /></View>
+                <Text style={styles.playerTimeText}>{formatClock(Math.floor(playbackDuration))}</Text>
+                <PressableScale accessibilityRole="button" accessibilityLabel={t('lecture.skipForward')} onPress={() => void skipBy(10)} style={styles.skipButton}><Text style={styles.skipText}>10s ↻</Text></PressableScale>
+              </View>
+            )
+          ) : cloudRequired && cloudAudio.loading ? (
+            <View style={[styles.audioStateRow, isPhoneWidth && styles.audioStateRowCompact]}>
+              <ActivityIndicator size="small" color={colors.accentBright} />
+              <Text style={styles.emptyInline}>{t('lecture.audioCloudLoading')}</Text>
+            </View>
+          ) : cloudRequired && cloudAudio.failed ? (
+            <View style={[styles.audioStateRow, isPhoneWidth && styles.audioStateRowCompact]}>
+              <Text style={styles.emptyInline}>{t('lecture.audioCloudFailed')}</Text>
+              <PressableScale accessibilityRole="button" onPress={() => setCloudRetry((value) => value + 1)} style={styles.audioRetryButton}>
+                <Text style={styles.audioRetryText}>{t('lecture.audioRetry')}</Text>
+              </PressableScale>
             </View>
           ) : (
             <Text style={styles.emptyInline}>
               {audioPlayback.kind === 'local-missing'
                 ? t('lecture.audioLocalMissing')
-                : audioPlayback.kind === 'cloud-soon'
-                  ? t('lecture.audioCloudSoon')
-                  : t('lecture.audioUnavailable')}
+                : t('lecture.audioUnavailable')}
             </Text>
           )}
         </GlassCard>
       </View>
 
       {/* Tab bar */}
-      <View style={styles.tabBar}>
+      <TranscriptReadPrewarmer {...transcriptReadProps} />
+      <View style={[styles.tabBar, isPhoneWidth && styles.tabBarCompact]}>
         {TABS.map((tabName) => {
           const active = tabName === tab;
           return (
-            <Pressable
+            <PressableScale
               key={tabName}
               accessibilityRole="tab"
               accessibilityState={{ selected: active }}
               onPress={() => setTab(tabName)}
-              style={[styles.tab, active && styles.tabActive]}
+              style={[styles.tab, isPhoneWidth && styles.tabCompact, active && styles.tabActive]}
             >
               <Text
                 style={[styles.tabLabel, active && styles.tabLabelActive]}
@@ -348,72 +606,36 @@ export default function LectureDetailScreen() {
               >
                 {t(`lecture.tab.${tabName.toLowerCase()}`)}
               </Text>
-            </Pressable>
+            </PressableScale>
           );
         })}
       </View>
 
+      {/* NO opacity animation on the tab body — deliberately.
+          A `swap` reveal used to fade this container on every tab change. On
+          first open the timing animation could be interrupted before it
+          reached 1, freezing Summary's text at partial opacity: it rendered
+          gray until the user switched tabs and came back, which remounted the
+          reveal and completed it. Static readable content must never depend on
+          an animation finishing to be legible, and a segmented control's body
+          does not need a fade — the selected state already changed on press. */}
+      <View style={styles.tabBody}>
+      {tab === 'Transcript' ? (
+        <TranscriptReadList
+          {...transcriptReadProps}
+          canEdit={canEditTranscripts}
+          pendingText={t('lecture.transcriptPending')}
+          emptyText={t('lecture.transcriptEmpty')}
+          onEdit={openTranscriptEditor}
+        />
+      ) : (
       <ScrollView
         style={styles.pageScroll}
-        contentContainerStyle={styles.scroll}
+        contentContainerStyle={[styles.scroll, isPhoneWidth && styles.scrollCompact]}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
         <View style={styles.content}>
-          {/* ---- Transcript — source language, then translation when source != target ---- */}
-          {tab === 'Transcript' && (
-            <>
-              <GlassCard
-                onPress={canEditTranscripts ? () => openTranscriptEditor('source') : undefined}
-              >
-                <BlockHeader
-                  icon="document-text-outline"
-                  label={getTranscriptSectionLabel(sourceLanguage)}
-                  trailing={
-                    canEditTranscripts ? (
-                      <Ionicons name="create-outline" size={16} color={colors.textTertiary} />
-                    ) : null
-                  }
-                />
-                {canEditTranscripts ? (
-                  sourceTranscript.trim() ? (
-                    <NativeLookupText style={styles.bodyText}>{sourceTranscript}</NativeLookupText>
-                  ) : (
-                    <Text style={styles.emptyInline}>{t('lecture.transcriptEmpty')}</Text>
-                  )
-                ) : (
-                  <Text style={styles.emptyInline}>{t('lecture.transcriptPending')}</Text>
-                )}
-              </GlassCard>
-              {hasTranslation ? (
-                <GlassCard
-                  onPress={canEditTranscripts ? () => openTranscriptEditor('translated') : undefined}
-                >
-                  <BlockHeader
-                    icon="language-outline"
-                    label={getTranscriptSectionLabel(translationLanguage)}
-                    trailing={
-                      canEditTranscripts ? (
-                        <Ionicons name="create-outline" size={16} color={colors.textTertiary} />
-                      ) : null
-                    }
-                  />
-                  {canEditTranscripts ? (
-                    translatedTranscript.trim() ? (
-                      <Text style={[styles.bodyText, cjk(translationLanguage) && styles.bodyZh]}>
-                        {translatedTranscript}
-                      </Text>
-                    ) : (
-                      <Text style={styles.emptyInline}>{t('lecture.transcriptEmpty')}</Text>
-                    )
-                  ) : (
-                    <Text style={styles.emptyInline}>{t('lecture.transcriptPending')}</Text>
-                  )}
-                </GlassCard>
-              ) : null}
-            </>
-          )}
-
           {/* ---- Summary — source language, then translation when source != target ---- */}
           {tab === 'Summary' && (
             <View style={styles.summaryStack}>
@@ -421,7 +643,7 @@ export default function LectureDetailScreen() {
                 style={styles.summaryCard}
                 onPress={canEditSummaries ? () => openSummaryEditor('source') : undefined}
               >
-                <BlockHeader
+                <LectureSectionHeader
                   icon="language-outline"
                   label={getSummarySectionLabel(sourceLanguage)}
                   trailing={
@@ -445,7 +667,7 @@ export default function LectureDetailScreen() {
                   style={styles.summaryCard}
                   onPress={canEditSummaries ? () => openSummaryEditor('translated') : undefined}
                 >
-                  <BlockHeader
+                  <LectureSectionHeader
                     icon="chatbubbles-outline"
                     label={getSummarySectionLabel(translationLanguage)}
                     trailing={
@@ -471,21 +693,24 @@ export default function LectureDetailScreen() {
           {/* ---- Marked ---- */}
           {tab === 'Marked' && (
             <GlassCard>
-              <BlockHeader icon="star-outline" label={t('lecture.marked')} />
+              <LectureSectionHeader icon="star-outline" label={t('lecture.marked')} />
               {lecture.markedTimestamps.length > 0 ? (
                 <View style={styles.momentList}>
                   {lecture.markedTimestamps.map((ms, i) => (
-                    <Pressable
+                    <PressableScale
                       key={i}
                       accessibilityRole="button"
+                      accessibilityLabel={`${t('lecture.importantMoment')} ${formatClock(Math.floor(ms / 1000))}`}
                       disabled={!audioAvailable}
                       onPress={() => void seekToSeconds(ms / 1000)}
-                      style={({ pressed }) => [styles.momentRow, !audioAvailable && styles.momentRowDisabled, pressed && audioAvailable && styles.pressed]}
+                      scaleTo={0.995}
+                      pressedStyle={audioAvailable ? styles.rowPressed : undefined}
+                      style={[styles.momentRow, !audioAvailable && styles.momentRowDisabled]}
                     >
                       <View style={styles.momentTime}><Text style={styles.momentTimeText}>{formatClock(Math.floor(ms / 1000))}</Text></View>
                       <Text style={styles.momentLabel}>{t('lecture.importantMoment')}</Text>
                       <Ionicons name="star" size={15} color={colors.textPrimary} />
-                    </Pressable>
+                    </PressableScale>
                   ))}
                 </View>
               ) : (
@@ -499,22 +724,19 @@ export default function LectureDetailScreen() {
           {tab === 'Notes' && (
             <View style={styles.noteSheet}>
               <View style={styles.foldedCorner} />
-              <View style={styles.noteHeaderRow}>
-                <View style={styles.noteBlockHeader}>
-                  <View style={styles.blockIcon}>
-                    <Ionicons name="create-outline" size={15} color={colors.textPrimary} />
-                  </View>
-                  <Text style={styles.blockLabel}>{t('lecture.notes')}</Text>
-                </View>
-                <Pressable
+              <LectureSectionHeader
+                icon="create-outline"
+                label={t('lecture.notes')}
+                trailing={<PressableScale
                   accessibilityRole="button"
                   accessibilityLabel={t('lecture.exportNotesA11y')}
+                  accessibilityState={{ busy: exportingPdf, disabled: exportingPdf }}
+                  hitSlop={7}
                   onPress={() => void handleExportPdf()}
                   disabled={exportingPdf}
-                  style={({ pressed }) => [
+                  style={[
                     styles.noteExportBtn,
                     exportingPdf && styles.noteExportBtnDisabled,
-                    pressed && !exportingPdf && styles.pressed,
                   ]}
                 >
                   {exportingPdf ? (
@@ -523,13 +745,13 @@ export default function LectureDetailScreen() {
                     <Ionicons name="share-outline" size={16} color={colors.textPrimary} />
                   )}
                   <Text style={styles.noteExportText}>{exportingPdf ? t('lecture.exporting') : t('lecture.exportPdf')}</Text>
-                </Pressable>
-              </View>
-              <Pressable
+                </PressableScale>}
+              />
+              <PressableScale
                 accessibilityRole="button"
                 accessibilityLabel={t('lecture.openNotes')}
                 onPress={openNotesEditor}
-                style={({ pressed }) => [styles.notePreviewPressable, pressed && styles.pressed]}
+                style={styles.notePreviewPressable}
               >
                 {notesHasContent ? (
                   <View style={styles.notePreview}>
@@ -552,11 +774,13 @@ export default function LectureDetailScreen() {
                 ) : (
                   <Text style={styles.notePreviewEmpty}>{t('lecture.addNotes')}</Text>
                 )}
-              </Pressable>
+              </PressableScale>
             </View>
           )}
         </View>
       </ScrollView>
+      )}
+      </View>
 
       <RenameModal
         visible={renameVisible}
@@ -571,6 +795,16 @@ export default function LectureDetailScreen() {
         }}
       />
 
+      <MoveLectureToCourseModal
+        visible={moveVisible}
+        lecture={lecture}
+        courses={courses}
+        onClose={() => setMoveVisible(false)}
+        onSelect={(targetCourseId) => {
+          if (moveLectureToCourse(lecture.id, targetCourseId)) setMoveVisible(false);
+        }}
+      />
+
       <Modal
         visible={notesOpen}
         animationType="slide"
@@ -579,13 +813,13 @@ export default function LectureDetailScreen() {
       >
         <SafeAreaView style={styles.modalRoot} edges={['top', 'bottom', 'left', 'right']}>
           <View style={styles.modalHeader}>
-            <Pressable accessibilityRole="button" onPress={() => setNotesOpen(false)} style={styles.modalAction}>
+            <PressableScale accessibilityRole="button" onPress={() => setNotesOpen(false)} style={styles.modalAction}>
               <Text style={styles.modalActionText}>{t('common.cancel')}</Text>
-            </Pressable>
+            </PressableScale>
             <Text style={styles.modalTitle}>{t('lecture.notesTitle')}</Text>
-            <Pressable accessibilityRole="button" onPress={saveNotes} style={styles.modalAction}>
+            <PressableScale accessibilityRole="button" onPress={saveNotes} style={styles.modalAction}>
               <Text style={styles.modalActionText}>{t('common.done')}</Text>
-            </Pressable>
+            </PressableScale>
           </View>
           <NotebookCanvas
             style={styles.modalCanvas}
@@ -612,6 +846,10 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
   },
   detail: { flex: 1 },
+  audioStateRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  audioStateRowCompact: { flexWrap: 'wrap' },
+  audioRetryButton: { paddingHorizontal: spacing.sm, paddingVertical: 6, borderRadius: radius.pill, backgroundColor: colors.deepNavy },
+  audioRetryText: { color: colors.textOnNavy, fontSize: fontSize.sm, fontWeight: '700' },
 
   // ---- Not found ----
   notFound: {
@@ -647,6 +885,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 38,
     paddingTop: 24,
     paddingBottom: 12,
+  },
+  headerCompact: {
+    gap: spacing.sm,
+    paddingHorizontal: 18,
   },
   backBtn: {
     width: 44,
@@ -705,6 +947,9 @@ const styles = StyleSheet.create({
     width: '100%',
     alignSelf: 'center',
   },
+  playerWrapCompact: {
+    paddingHorizontal: 18,
+  },
   compactPlayer: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   compactPlayerNarrow: { flexWrap: 'wrap' },
   playerTimeText: { color: colors.textSecondary, fontSize: fontSize.sm, fontWeight: '600' },
@@ -713,6 +958,12 @@ const styles = StyleSheet.create({
   playPauseButton: { width: 42, height: 42, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.navy },
   skipButton: { minHeight: 32, paddingHorizontal: 10, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border },
   skipText: { color: colors.textSecondary, fontSize: 11.5, fontWeight: '700' },
+  // ---- Phone player: seek row on top, transport controls centered below ----
+  playerStack: { gap: 14 },
+  playerSeekRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  playerTransportRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 22 },
+  playPauseButtonLarge: { width: 56, height: 56, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.navy, ...shadows.button },
+  skipButtonCompact: { minHeight: 40, minWidth: 56, paddingHorizontal: 12, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border },
 
   // ---- Tabs ----
   tabBar: {
@@ -727,12 +978,18 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     width: '100%',
   },
+  tabBarCompact: {
+    marginHorizontal: 18,
+  },
   tab: {
     flex: 1,
     paddingVertical: spacing.md,
     borderRadius: radius.sm,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  tabCompact: {
+    paddingVertical: spacing.lg,
   },
   tabActive: {
     backgroundColor: colors.navy,
@@ -752,11 +1009,18 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
 
+  // The reveal wrapper takes the flex slot the tab body used to occupy
+  // directly, so Transcript's FlatList and the other tabs' ScrollView still
+  // get the full remaining height (and stay virtualized / scrollable).
+  tabBody: { flex: 1 },
   pageScroll: SUMMARY_PAGE_SCROLL_STYLE,
   scroll: {
     paddingHorizontal: 38,
     paddingTop: spacing.sm,
     paddingBottom: spacing.xxxl,
+  },
+  scrollCompact: {
+    paddingHorizontal: 18,
   },
   content: {
     width: '100%',
@@ -878,29 +1142,6 @@ const styles = StyleSheet.create({
   },
 
   // ---- Study-note blocks ----
-  blockHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    marginBottom: spacing.lg,
-  },
-  blockTrailing: {
-    marginLeft: 'auto',
-  },
-  blockIcon: {
-    width: 30,
-    height: 30,
-    borderRadius: radius.sm,
-    backgroundColor: colors.surfaceMuted,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  blockLabel: {
-    fontSize: fontSize.xs,
-    fontWeight: '700',
-    letterSpacing: 1.2,
-    color: colors.textSecondary,
-  },
   bodyText: {
     fontSize: fontSize.md,
     lineHeight: fontSize.md * 1.6,
@@ -947,6 +1188,9 @@ const styles = StyleSheet.create({
   },
   markedHint: { marginTop: spacing.md, color: colors.textSecondary, fontSize: fontSize.sm },
   momentRowDisabled: { opacity: 0.55 },
+  // The moment row already sits on `surfaceMuted`, so its press tint has to be
+  // a step stronger to register at all.
+  rowPressed: { backgroundColor: colors.border },
   momentRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -975,6 +1219,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   emptyInline: {
+    flexShrink: 1,
     fontSize: fontSize.md,
     color: colors.textTertiary,
     fontWeight: '500',
@@ -999,21 +1244,8 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surfaceMuted,
     borderBottomLeftRadius: radius.md,
   },
-  noteHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: spacing.md,
-    marginBottom: spacing.lg,
-  },
-  noteBlockHeader: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-  },
   noteExportBtn: {
-    minHeight: 38,
+    minHeight: 30,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',

@@ -20,6 +20,11 @@ import {
 } from 'react';
 import { Platform } from 'react-native';
 
+import {
+  classifyPasswordSignupResult,
+  normalizeEmail,
+  type PasswordSignupClassification,
+} from './authSignup';
 import { GUEST_MODE_KEY } from './guest';
 import { supabase, supabaseConfigError } from './supabase';
 
@@ -42,6 +47,8 @@ type AuthResult = {
 
 type VerifySignupResult = AuthResult & {
   session: Session | null;
+  /** Present for password signUp classification (never treat obfuscated as “code sent”). */
+  signupStatus?: PasswordSignupClassification;
 };
 
 type AuthContextValue = {
@@ -303,11 +310,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // and returns no session — the code is verified in step 2.
   const createProfileWithPassword = useCallback(
     async (email: string, password: string): Promise<VerifySignupResult> => {
-      if (supabaseConfigError) return { error: supabaseConfigError, session: null };
+      if (supabaseConfigError) {
+        return { error: supabaseConfigError, session: null, signupStatus: 'failed' };
+      }
 
+      const normalized = normalizeEmail(email);
+      // Client-side only: request the app's own deep link as the confirmation
+      // redirect. This never touches the project's Redirect URL allowlist or any
+      // Auth/email-template setting — if this URL is not already allowlisted,
+      // Supabase silently falls back to the project's default Site URL (current
+      // behavior, unchanged). If it IS allowlisted, a confirmation LINK (should
+      // the email template include one) opens back into the app instead of a
+      // dead default redirect. The primary flow (typed verification code via
+      // verifyOtp below) is unaffected either way.
       const { data, error } = await supabase.auth.signUp({
-        email,
+        email: normalized,
         password,
+        options: { emailRedirectTo: AUTH_CALLBACK_URL },
+      });
+
+      const signupStatus = classifyPasswordSignupResult({
+        error,
+        user: data?.user,
+        session: data?.session,
       });
 
       if (error) {
@@ -315,19 +340,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return {
             error: 'This email already has a Youmi Lens account. Please sign in or use an email verification code.',
             session: null,
+            signupStatus: 'failed',
           };
         }
-        return { error: error.message, session: null };
+        return { error: error.message, session: null, signupStatus: 'failed' };
       }
-      if (!data.user) {
-        return { error: 'We could not create your account. Please try again.', session: null };
+
+      if (signupStatus === 'failed') {
+        return {
+          error: 'We could not create your account. Please try again.',
+          session: null,
+          signupStatus: 'failed',
+        };
+      }
+
+      if (signupStatus === 'existingOrObfuscated') {
+        // Enumeration-protection fake success: do not claim a confirmation email was sent.
+        console.warn('[auth] signup_result=existing_or_obfuscated');
+        return { error: null, session: null, signupStatus: 'existingOrObfuscated' };
       }
 
       // If email confirmation is disabled, signUp returns a session immediately.
       if (data.session) {
         await applySessionState(data.session);
       }
-      return { error: null, session: data.session };
+      return { error: null, session: data.session, signupStatus };
     },
     [applySessionState],
   );
@@ -338,7 +375,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (supabaseConfigError) return { error: supabaseConfigError, session: null };
 
       const { data, error } = await supabase.auth.verifyOtp({
-        email,
+        email: normalizeEmail(email),
         token: code,
         type: 'signup',
       });
@@ -462,7 +499,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   /** Re-send the Supabase signup confirmation email (carries a fresh code). */
   const resendSignupCode = useCallback(async (email: string): Promise<AuthResult> => {
     if (supabaseConfigError) return { error: supabaseConfigError };
-    const { error } = await supabase.auth.resend({ type: 'signup', email });
+    const normalized = normalizeEmail(email);
+    const { error } = await supabase.auth.resend({
+      type: 'signup',
+      email: normalized,
+      options: { emailRedirectTo: AUTH_CALLBACK_URL },
+    });
+    if (error) {
+      console.warn('[auth] signup_resend_failed');
+    }
     return { error: error?.message ?? null };
   }, []);
 
@@ -470,7 +515,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (supabaseConfigError) return { error: supabaseConfigError };
 
     const { error } = await supabase.auth.signInWithOtp({
-      email,
+      email: normalizeEmail(email),
       options: {
         shouldCreateUser: false,
       },
@@ -494,7 +539,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (supabaseConfigError) return { error: supabaseConfigError, session: null };
 
     const { data, error } = await supabase.auth.verifyOtp({
-      email,
+      email: normalizeEmail(email),
       token: code,
       type: 'email',
     });
@@ -521,7 +566,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signInWithPassword = useCallback(async (email: string, password: string): Promise<AuthResult> => {
     if (supabaseConfigError) return { error: supabaseConfigError };
 
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: normalizeEmail(email),
+      password,
+    });
     if (!error) {
       if (!data.session) {
         return { error: 'Sign-in completed without a valid session. Please try again.' };
@@ -552,7 +600,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    */
   const sendPasswordResetCode = useCallback(async (email: string): Promise<AuthResult> => {
     if (supabaseConfigError) return { error: supabaseConfigError };
-    const { error } = await supabase.auth.resetPasswordForEmail(email.trim().toLowerCase());
+    const { error } = await supabase.auth.resetPasswordForEmail(normalizeEmail(email));
     return { error: error?.message ?? null };
   }, []);
 
@@ -565,7 +613,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async (email: string, code: string): Promise<VerifySignupResult> => {
       if (supabaseConfigError) return { error: supabaseConfigError, session: null };
       const { data, error } = await supabase.auth.verifyOtp({
-        email: email.trim().toLowerCase(),
+        email: normalizeEmail(email),
         token: code.trim(),
         type: 'recovery',
       });

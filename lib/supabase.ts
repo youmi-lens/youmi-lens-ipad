@@ -2,8 +2,14 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient } from '@supabase/supabase-js';
 import { Platform } from 'react-native';
 
+import { assertDevNotProduction } from './envGuard.mjs';
+
 const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
 const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+
+// Fail loudly (dev only) if this build resolves to production Supabase. Release
+// and TestFlight builds pass `isDev: false` and are never affected.
+assertDevNotProduction({ url: supabaseUrl, key: supabaseAnonKey, isDev: __DEV__ });
 
 /** True when both Supabase env vars are present and the client can authenticate. */
 export const isSupabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey);

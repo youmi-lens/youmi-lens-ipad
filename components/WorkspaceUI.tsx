@@ -2,6 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { ComponentProps, ReactNode } from 'react';
 import { StyleSheet, Text, View, ViewStyle } from 'react-native';
 
+import { useIsCompactWidth } from '@/constants/responsive';
 import { colors, fontSize, radius, spacing } from '@/constants/theme';
 import { PressableScale } from '@/components/PressableScale';
 
@@ -20,14 +21,18 @@ export function PageHeading({
   action?: ReactNode;
   preserveEyebrowCase?: boolean;
 }) {
+  const isCompact = useIsCompactWidth();
   return (
-    <View style={styles.heading}>
+    <View style={[styles.heading, isCompact && styles.headingCompact]}>
       <View style={styles.headingText}>
         <Text style={[styles.eyebrow, preserveEyebrowCase && styles.eyebrowCaseSensitive]}>{eyebrow}</Text>
         <Text style={styles.pageTitle}>{title}</Text>
         {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
       </View>
-      {action}
+      {/* On a narrow phone a wide action button squeezed beside a multi-line
+          title looks lopsided (button pinned to the top, title cramped and
+          wrapping below it). Full-width, on its own row, reads as intentional. */}
+      {action && isCompact ? <View style={styles.headingActionCompact}>{action}</View> : action}
     </View>
   );
 }
@@ -119,8 +124,16 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: spacing.xl,
   },
+  headingCompact: {
+    flexDirection: 'column',
+    alignItems: 'stretch',
+    gap: spacing.md,
+  },
   headingText: {
     flex: 1,
+  },
+  headingActionCompact: {
+    alignSelf: 'stretch',
   },
   eyebrow: {
     color: colors.accent,

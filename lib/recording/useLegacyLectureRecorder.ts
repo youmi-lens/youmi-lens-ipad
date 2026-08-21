@@ -66,7 +66,12 @@ export function useLegacyLectureRecorder(enabled: boolean): LectureRecorder {
       if (__DEV__) console.info('[recorder] engine selected', { engine: 'legacy', granted });
       if (!granted) return false;
       if (activeRef.current) { await recorder.stop().catch(() => {}); activeRef.current = false; }
-      await setAudioModeAsync({ playsInSilentMode: true, allowsRecording: true });
+      await setAudioModeAsync({
+        playsInSilentMode: true,
+        allowsRecording: true,
+        shouldPlayInBackground: true,
+        allowsBackgroundRecording: true,
+      });
       await recorder.prepareToRecordAsync();
       recorder.record();
       activeRef.current = true; setIsPaused(false); setRecordingUri(null);
@@ -79,7 +84,12 @@ export function useLegacyLectureRecorder(enabled: boolean): LectureRecorder {
       setError(`${base}${devHint}`); setErrorDetail(detail.trim() || null);
       activeRef.current = false;
       await recorder.stop().catch(() => {});
-      await setAudioModeAsync({ playsInSilentMode: true, allowsRecording: false }).catch(() => {});
+      await setAudioModeAsync({
+        playsInSilentMode: true,
+        allowsRecording: false,
+        shouldPlayInBackground: false,
+        allowsBackgroundRecording: false,
+      }).catch(() => {});
       return false;
     }
   }, [enabled, recorder]);
@@ -96,7 +106,12 @@ export function useLegacyLectureRecorder(enabled: boolean): LectureRecorder {
     try {
       await recorder.stop(); activeRef.current = false; setIsPaused(false);
       const uri = recorder.uri ?? null; setRecordingUri(uri);
-      await setAudioModeAsync({ playsInSilentMode: true, allowsRecording: false }).catch(() => {});
+      await setAudioModeAsync({
+        playsInSilentMode: true,
+        allowsRecording: false,
+        shouldPlayInBackground: false,
+        allowsBackgroundRecording: false,
+      }).catch(() => {});
       return uri;
     } catch (stopError) {
       if (__DEV__) console.warn('[recorder] local recording stop failed', { message: stopError instanceof Error ? stopError.message : 'unknown' });

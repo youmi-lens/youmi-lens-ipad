@@ -1,8 +1,5 @@
 import AVFoundation
 import Foundation
-#if canImport(UIKit)
-import UIKit
-#endif
 
 private let durableRecorderAudioSettings: [String: Any] = [
   AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
@@ -751,17 +748,6 @@ final class DurableForegroundRecorder {
     ) { [weak self] notification in
       self?.queue.async { self?.handleRouteChange(notification) }
     })
-    #if canImport(UIKit)
-    observers.append(center.addObserver(
-      forName: UIApplication.didEnterBackgroundNotification,
-      object: nil,
-      queue: nil
-    ) { [weak self] _ in
-      self?.queue.async {
-        self?.handleForcedPause(reason: "application_backgrounded", runtimeAfter: .paused)
-      }
-    })
-    #endif
     #endif
   }
 

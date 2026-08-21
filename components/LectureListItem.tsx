@@ -1,7 +1,9 @@
 import { Ionicons } from '@expo/vector-icons';
 import { ComponentProps } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
+import { PressableScale } from '@/components/PressableScale';
+import { motion } from '@/constants/motion';
 import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
 import { formatDuration, formatShortDate } from '@/lib/format';
 import { useI18n, localizeSystemDefaultTitle } from '@/lib/i18n';
@@ -41,14 +43,23 @@ export function LectureListItem({
   const icon = (course?.icon ?? 'document-text-outline') as IoniconName;
 
   return (
-    <Pressable
+    // The lecture row is the app's main doorway into Lecture detail, so its
+    // press must read the same as every other navigation surface. A flat row
+    // inside a list scales a little less than a standalone card — enough to
+    // acknowledge the touch without the whole list appearing to flex.
+    <PressableScale
       accessibilityRole="button"
+      accessibilityLabel={localizeSystemDefaultTitle(t, lecture.title)}
       onPress={onPress}
-      style={({ pressed }) => [
+      scaleTo={isRow ? 0.995 : motion.pressScale}
+      // Cards need no pressed style — PressableScale's scale + opacity dip is
+      // exactly what the old `cardPressed` did by hand. Only the flat row adds
+      // the background tint a scale cannot convey.
+      pressedStyle={isRow ? styles.rowPressed : undefined}
+      style={[
         styles.row,
         isRow ? styles.rowFlat : styles.rowCard,
         isRow && !last && styles.divider,
-        pressed && (isRow ? styles.rowPressed : styles.cardPressed),
       ]}
     >
       <View style={[styles.iconBox, { backgroundColor: tint }]}>
@@ -73,7 +84,7 @@ export function LectureListItem({
       </View>
 
       <Ionicons name="chevron-forward" size={18} color={colors.textTertiary} />
-    </Pressable>
+    </PressableScale>
   );
 }
 
@@ -100,10 +111,6 @@ const styles = StyleSheet.create({
   divider: {
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
-  },
-  cardPressed: {
-    opacity: 0.9,
-    transform: [{ scale: 0.99 }],
   },
   rowPressed: {
     backgroundColor: colors.surfaceMuted,

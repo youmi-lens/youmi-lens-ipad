@@ -9,16 +9,22 @@
 import {
   classifyLectureAudioPlayback,
   shouldShowCloudAudioSoon,
+  shouldShowAudioPlayer,
   shouldShowLocalAudioPlayer,
 } from './lectureLocalAudio.mjs';
 
 export {
   classifyLectureAudioPlayback,
   shouldShowCloudAudioSoon,
+  shouldShowAudioPlayer,
   shouldShowLocalAudioPlayer,
 };
 
-export type LectureAudioPlaybackKind = 'local' | 'local-missing' | 'cloud-soon' | 'unavailable';
+/**
+ * Valid local audio always wins. A canonical storagePath is the cloud fallback
+ * when no readable local file remains on this device.
+ */
+export type LectureAudioPlaybackKind = 'local' | 'cloud' | 'local-missing' | 'unavailable';
 
 export type LectureAudioPlaybackState = {
   kind: LectureAudioPlaybackKind;

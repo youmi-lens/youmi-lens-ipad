@@ -1,14 +1,39 @@
 import { Ionicons } from '@expo/vector-icons';
 import { BottomTabBarProps } from '@react-navigation/bottom-tabs';
 import { Href, useRouter } from 'expo-router';
-import { ComponentProps } from 'react';
-import { Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { ComponentProps, useEffect, useRef } from 'react';
+import { Animated, Easing, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { LogoMark } from '@/components/BrandHeader';
+import { PressableScale } from '@/components/PressableScale';
+import { motion } from '@/constants/motion';
+import { useIsCompactWidth } from '@/constants/responsive';
 import { colors, fontSize, layout, radius, shadows, spacing } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
 import { useT } from '@/lib/i18n';
+
+/**
+ * Fades the selected-tab indicator (background tint / active bar / pill) in
+ * or out over `motion.tabIndicatorDuration`. Deliberately separate from the
+ * icon/label color, which stays an instant snap — the state change itself
+ * (what's selected) must always be immediate; only the decorative indicator
+ * eases. Starting a new `Animated.timing` on a value already mid-flight
+ * interrupts it in place (standard RN Animated behavior), so rapid tab
+ * switching can't stack animations — each tap just redirects the current one.
+ */
+function useSelectedIndicator(selected: boolean): Animated.Value {
+  const progress = useRef(new Animated.Value(selected ? 1 : 0)).current;
+  useEffect(() => {
+    Animated.timing(progress, {
+      toValue: selected ? 1 : 0,
+      duration: motion.tabIndicatorDuration,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [progress, selected]);
+  return progress;
+}
 
 type IconName = ComponentProps<typeof Ionicons>['name'];
 
@@ -25,6 +50,28 @@ type SidebarItem = {
   selected: boolean;
   onPress: () => void;
 };
+
+function SidebarNavRow({ item }: { item: SidebarItem }) {
+  const indicator = useSelectedIndicator(item.selected);
+  return (
+    <PressableScale
+      accessibilityRole="tab"
+      accessibilityState={{ selected: item.selected }}
+      accessibilityLabel={item.label}
+      onPress={item.onPress}
+      style={styles.navRow}
+    >
+      <Animated.View pointerEvents="none" style={[styles.navRowActiveOverlay, { opacity: indicator }]} />
+      <Animated.View pointerEvents="none" style={[styles.activeBar, { opacity: indicator }]} />
+      <Ionicons
+        name={item.icon}
+        size={18}
+        color={item.selected ? colors.accent : colors.textSecondary}
+      />
+      <Text style={[styles.navLabel, item.selected && styles.navLabelActive]}>{item.label}</Text>
+    </PressableScale>
+  );
+}
 
 function SidebarFrame({ items }: { items: SidebarItem[] }) {
   const insets = useSafeAreaInsets();
@@ -52,36 +99,16 @@ function SidebarFrame({ items }: { items: SidebarItem[] }) {
       </View>
 
       <View style={styles.navigation}>
-        {items.map((item) => (
-            <Pressable
-              key={item.key}
-              accessibilityRole="tab"
-              accessibilityState={item.selected ? { selected: true } : {}}
-              onPress={item.onPress}
-              style={({ pressed }) => [
-                styles.navRow,
-                item.selected && styles.navRowActive,
-                pressed && styles.pressed,
-              ]}
-            >
-              {item.selected ? <View style={styles.activeBar} /> : null}
-              <Ionicons
-                name={item.icon}
-                size={18}
-                color={item.selected ? colors.accent : colors.textSecondary}
-              />
-              <Text style={[styles.navLabel, item.selected && styles.navLabelActive]}>{item.label}</Text>
-            </Pressable>
-        ))}
+        {items.map((item) => <SidebarNavRow key={item.key} item={item} />)}
       </View>
 
       <View style={styles.spacer} />
 
-      <Pressable
+      <PressableScale
         accessibilityRole="button"
         accessibilityLabel={t('sidebar.openAccountSettings')}
         onPress={() => router.push('/settings')}
-        style={({ pressed }) => [styles.account, pressed && styles.pressed]}
+        style={styles.account}
       >
         <View style={styles.avatar}>
           <Text style={styles.avatarText}>{initials || 'U'}</Text>
@@ -90,13 +117,51 @@ function SidebarFrame({ items }: { items: SidebarItem[] }) {
           <Text numberOfLines={1} style={styles.accountName}>{accountName}</Text>
           <Text numberOfLines={1} style={styles.accountSubtitle}>{accountSubtitle}</Text>
         </View>
-      </Pressable>
+      </PressableScale>
+    </View>
+  );
+}
+
+function BottomTabItem({ item }: { item: SidebarItem }) {
+  const indicator = useSelectedIndicator(item.selected);
+  return (
+    <PressableScale
+      accessibilityRole="tab"
+      accessibilityState={{ selected: item.selected }}
+      accessibilityLabel={item.label}
+      onPress={item.onPress}
+      style={styles.bottomTab}
+    >
+      <Animated.View pointerEvents="none" style={[styles.bottomTabActiveOverlay, { opacity: indicator }]} />
+      <Ionicons
+        name={item.icon}
+        size={22}
+        color={item.selected ? colors.accent : colors.textSecondary}
+      />
+      <Text
+        numberOfLines={1}
+        style={[styles.bottomTabLabel, item.selected && styles.navLabelActive]}
+      >
+        {item.label}
+      </Text>
+    </PressableScale>
+  );
+}
+
+function BottomTabFrame({ items }: { items: SidebarItem[] }) {
+  const insets = useSafeAreaInsets();
+
+  return (
+    <View style={[styles.bottomBar, { paddingBottom: Math.max(insets.bottom, 10) }]}>
+      <View pointerEvents="none" style={styles.tint} />
+      {items.map((item) => <BottomTabItem key={item.key} item={item} />)}
     </View>
   );
 }
 
 export function YLSidebar({ state, descriptors, navigation }: BottomTabBarProps) {
   const t = useT();
+  const isCompact = useIsCompactWidth();
   const items = state.routes.map((route, index) => {
     const selected = state.index === index;
     const options = descriptors[route.key].options;
@@ -120,7 +185,7 @@ export function YLSidebar({ state, descriptors, navigation }: BottomTabBarProps)
       },
     };
   });
-  return <SidebarFrame items={items} />;
+  return isCompact ? <BottomTabFrame items={items} /> : <SidebarFrame items={items} />;
 }
 
 export function WorkspaceSidebar({
@@ -129,9 +194,9 @@ export function WorkspaceSidebar({
   active?: 'record' | 'courses' | 'settings';
 }) {
   const router = useRouter();
-  const { width } = useWindowDimensions();
+  const isCompact = useIsCompactWidth();
   const t = useT();
-  if (width < 900) return null;
+  if (isCompact) return null;
 
   const routes: {
     key: 'record' | 'courses' | 'settings';
@@ -163,6 +228,33 @@ const styles = StyleSheet.create({
     borderRightColor: colors.glassEdge,
     overflow: 'hidden',
   },
+  bottomBar: {
+    flexDirection: 'row',
+    width: '100%',
+    paddingTop: 8,
+    paddingHorizontal: 8,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.glassEdge,
+    backgroundColor: colors.pearlWhite,
+  },
+  bottomTab: {
+    flex: 1,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+    borderRadius: 11,
+  },
+  bottomTabActiveOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: 11,
+  },
+  bottomTabLabel: {
+    color: colors.textSecondary,
+    fontSize: 11,
+    fontWeight: '600',
+  },
   tint: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(255, 255, 255, 0.58)',
@@ -187,15 +279,22 @@ const styles = StyleSheet.create({
     gap: 2,
   },
   navRow: {
-    minHeight: 42,
+    // 44pt is the iOS minimum comfortable touch target; the sidebar's primary
+    // navigation should not be the tightest hit area in the app.
+    minHeight: 44,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
     paddingHorizontal: 11,
     borderRadius: 11,
   },
-  navRowActive: {
+  // An absolutely-positioned sibling (not the row's own backgroundColor) so
+  // its opacity can fade independently — the row itself never re-renders
+  // just to change tint.
+  navRowActiveOverlay: {
+    ...StyleSheet.absoluteFillObject,
     backgroundColor: colors.surfaceMuted,
+    borderRadius: 11,
   },
   activeBar: {
     position: 'absolute',
@@ -254,9 +353,6 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontSize: 10.5,
     marginTop: 1,
-  },
-  pressed: {
-    opacity: 0.78,
   },
 });
 

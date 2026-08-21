@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+const provider = read('lib/devVisualFixture.tsx');
+const store = read('lib/store.tsx');
+const recorder = read('lib/useLectureRecorder.ts');
+const route = read('app/dev-visual-fixture.tsx');
+assert.match(store, /__DEV__ && process\.env\.EXPO_PUBLIC_VISUAL_FIXTURE === '1'/);
+assert.match(provider, /currentUserId: null/);
+const providerCode = provider.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+assert.doesNotMatch(providerCode, /from ['"][^'"]*(supabase|async-storage|uploadRecording)[^'"]*['"]/i);
+assert.match(recorder, /!options\.visualFixture && engine === 'legacy'/);
+assert.match(recorder, /options\.visualFixture \? fixture : active/);
+assert.match(route, /!__DEV__ \|\| process\.env\.EXPO_PUBLIC_VISUAL_FIXTURE !== '1'/);
+console.log('dev visual fixture isolation guards passed');

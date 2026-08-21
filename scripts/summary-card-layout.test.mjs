@@ -36,7 +36,7 @@ assert.deepEqual(
 );
 assert.match(
   source,
-  /<ScrollView\s+style=\{styles\.pageScroll\}\s+contentContainerStyle=\{styles\.scroll\}/,
+  /<ScrollView\s+style=\{styles\.pageScroll\}\s+contentContainerStyle=\{\[styles\.scroll/,
   'summary content must remain inside the bounded page-level ScrollView',
 );
 assert.deepEqual(SUMMARY_CARD_STYLE, { width: '100%', minHeight: 112 });

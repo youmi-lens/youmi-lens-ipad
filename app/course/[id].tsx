@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useLocalSearchParams, useRouter } from 'expo-router';
-import { ComponentProps, useState } from 'react';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import { ComponentProps, useCallback, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -46,6 +46,7 @@ export default function CourseDetailScreen() {
     lecturesForCourse,
     setSelectedCourseId,
     deleteLecture,
+    deleteLectures,
     renameCourse,
     renameLecture,
     currentUserId,
@@ -74,6 +75,23 @@ export default function CourseDetailScreen() {
   const [importing, setImporting] = useState(false);
   const [openMaterialId, setOpenMaterialId] = useState<string | null>(null);
   const [renameMaterialTarget, setRenameMaterialTarget] = useState<CourseMaterial | null>(null);
+
+  // ── Multi-select lecture delete (selection mode) ──
+  const [selecting, setSelecting] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  const exitSelectionMode = useCallback(() => {
+    setSelecting(false);
+    setSelectedIds(new Set());
+  }, []);
+
+  // Navigate-away safety: selection is local to this screen. Leaving it (back
+  // gesture / push a stack route) must always clear the mode and the set.
+  useFocusEffect(
+    useCallback(() => {
+      return () => exitSelectionMode();
+    }, [exitSelectionMode]),
+  );
 
   const handleImportMaterial = async () => {
     if (!course || importing) return;
@@ -174,6 +192,39 @@ export default function CourseDetailScreen() {
     );
   };
 
+  const toggleSelection = (lectureId: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(lectureId)) next.delete(lectureId);
+      else next.add(lectureId);
+      return next;
+    });
+  };
+
+  // One batch confirmation, then a single local-first soft delete of the
+  // snapshotted UUIDs. Selected cards disappear because the store's
+  // `deleteLectures` stamps `deletedAt` (active views hide them), never because
+  // the UI filters them away — that distinction is what keeps the soft-delete
+  // contract (and Recently Deleted restore) intact.
+  const confirmBatchDelete = () => {
+    if (selectedIds.size === 0) return;
+    Alert.alert(
+      t('course.deleteLecturesTitle'), t('course.deleteLecturesBody'),
+      [
+        { text: t('common.cancel'), style: 'cancel' },
+        {
+          text: t('common.delete'),
+          style: 'destructive',
+          onPress: () => {
+            const ids = Array.from(selectedIds);
+            deleteLectures(ids);
+            exitSelectionMode();
+          },
+        },
+      ],
+    );
+  };
+
   return (
     <SafeAreaView style={styles.root} edges={['top', 'left', 'right', 'bottom']}>
       <View style={styles.header}>
@@ -186,16 +237,44 @@ export default function CourseDetailScreen() {
         >
           <Ionicons name="chevron-back" size={24} color={colors.deepNavy} />
         </Pressable>
-        <Text style={styles.headerTitle}>{t('course.detail')}</Text>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={t('course.rename')}
-          onPress={() => setCourseRenameVisible(true)}
-          hitSlop={10}
-          style={({ pressed }) => [styles.menuButton, pressed && styles.pressed]}
-        >
-          <Ionicons name="pencil-outline" size={20} color={colors.deepNavy} />
-        </Pressable>
+        <Text style={styles.headerTitle} numberOfLines={1}>{t('course.detail')}</Text>
+        {selecting ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={t('common.cancel')}
+            onPress={exitSelectionMode}
+            hitSlop={10}
+            style={({ pressed }) => [styles.selectButton, pressed && styles.pressed]}
+          >
+            <Text style={styles.selectButtonLabel}>{t('common.cancel')}</Text>
+          </Pressable>
+        ) : (
+          <View style={styles.headerActions}>
+            {lectures.length > 0 ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={t('course.select')}
+                onPress={() => {
+                  setOpenLectureId(null);
+                  setSelecting(true);
+                }}
+                hitSlop={10}
+                style={({ pressed }) => [styles.selectButton, pressed && styles.pressed]}
+              >
+                <Text style={styles.selectButtonLabel}>{t('course.select')}</Text>
+              </Pressable>
+            ) : null}
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={t('course.rename')}
+              onPress={() => setCourseRenameVisible(true)}
+              hitSlop={10}
+              style={({ pressed }) => [styles.menuButton, pressed && styles.pressed]}
+            >
+              <Ionicons name="pencil-outline" size={20} color={colors.deepNavy} />
+            </Pressable>
+          </View>
+        )}
       </View>
 
       <ScrollView
@@ -270,7 +349,7 @@ export default function CourseDetailScreen() {
                       </View>
                       <View style={styles.materialBody}>
                         <Text style={styles.materialTitle} numberOfLines={1}>{localizeSystemDefaultTitle(t, material.title)}</Text>
-                        <View style={styles.lectureMetaRow}>
+                        <View style={styles.materialMetaRow}>
                           <Text style={styles.lectureMeta}>PDF</Text>
                           {material.pageCount ? (
                             <>
@@ -360,10 +439,12 @@ export default function CourseDetailScreen() {
             <View style={styles.lectureList}>
               {lectures.map((lecture, index) => {
                       const status = lectureStatus(lecture, t);
+                      const isSelected = selectedIds.has(lecture.id);
                 return (
                   <SwipeDeleteRow
                     key={lecture.id}
-                    open={openLectureId === lecture.id}
+                    enabled={!selecting}
+                    open={!selecting && openLectureId === lecture.id}
                     onOpen={() => setOpenLectureId(lecture.id)}
                     onClose={() => setOpenLectureId(null)}
                     onDelete={() => confirmDeleteLecture(lecture.id)}
@@ -371,12 +452,27 @@ export default function CourseDetailScreen() {
                   >
                     <Pressable
                       accessibilityRole="button"
-                      onPress={() => openLecture(lecture.id)}
-                      style={({ pressed }) => [styles.lectureRow, pressed && styles.lecturePressed]}
+                      accessibilityLabel={
+                        selecting
+                          ? t('course.selectLecture', { title: localizeSystemDefaultTitle(t, lecture.title) })
+                          : localizeSystemDefaultTitle(t, lecture.title)
+                      }
+                      onPress={() => (selecting ? toggleSelection(lecture.id) : openLecture(lecture.id))}
+                      style={({ pressed }) => [
+                        styles.lectureRow,
+                        isSelected && styles.lectureRowSelected,
+                        pressed && styles.lecturePressed,
+                      ]}
                     >
-                      <View style={[styles.lectureIcon, { backgroundColor: course.tint }]}>
-                        <Ionicons name="document-text-outline" size={20} color={course.accent} />
-                      </View>
+                      {selecting ? (
+                        <View style={[styles.selectCircle, isSelected && styles.selectCircleOn]}>
+                          {isSelected ? <Ionicons name="checkmark" size={16} color={colors.pearlWhite} /> : null}
+                        </View>
+                      ) : (
+                        <View style={[styles.lectureIcon, { backgroundColor: course.tint }]}>
+                          <Ionicons name="document-text-outline" size={20} color={course.accent} />
+                        </View>
+                      )}
                       <View style={styles.lectureBody}>
                         <Text style={styles.lectureTitle} numberOfLines={1}>{localizeSystemDefaultTitle(t, lecture.title)}</Text>
                         <View style={styles.lectureMetaRow}>
@@ -385,21 +481,25 @@ export default function CourseDetailScreen() {
                           <Text style={styles.lectureMeta}>{formatDuration(lecture.durationMillis)}</Text>
                         </View>
                       </View>
-                      <StatusPill label={status.label} variant={status.variant} />
-                      <Pressable
-                        accessibilityRole="button"
-                        accessibilityLabel={t('course.renameLecture')}
-                        hitSlop={8}
-                        onPress={(e) => {
-                          e.stopPropagation();
-                          setOpenLectureId(null);
-                          setRenameLectureTarget(lecture);
-                        }}
-                        style={({ pressed }) => [styles.rowMenuButton, pressed && styles.pressed]}
-                      >
-                        <Ionicons name="pencil-outline" size={17} color={colors.textTertiary} />
-                      </Pressable>
-                      <Ionicons name="chevron-forward" size={18} color={colors.textTertiary} />
+                      {selecting ? null : (
+                        <>
+                          <StatusPill label={status.label} variant={status.variant} />
+                          <Pressable
+                            accessibilityRole="button"
+                            accessibilityLabel={t('course.renameLecture')}
+                            hitSlop={8}
+                            onPress={(e) => {
+                              e.stopPropagation();
+                              setOpenLectureId(null);
+                              setRenameLectureTarget(lecture);
+                            }}
+                            style={({ pressed }) => [styles.rowMenuButton, pressed && styles.pressed]}
+                          >
+                            <Ionicons name="pencil-outline" size={17} color={colors.textTertiary} />
+                          </Pressable>
+                          <Ionicons name="chevron-forward" size={18} color={colors.textTertiary} />
+                        </>
+                      )}
                     </Pressable>
                   </SwipeDeleteRow>
                 );
@@ -408,6 +508,19 @@ export default function CourseDetailScreen() {
           )}
         </View>
       </ScrollView>
+
+      {selecting ? (
+        <View style={styles.selectionBar}>
+          <PrimaryButton
+            label={t('course.deleteSelected', { count: selectedIds.size })}
+            icon="trash-outline"
+            disabled={selectedIds.size === 0}
+            onPress={confirmBatchDelete}
+            style={styles.deleteSelectedButton}
+          />
+        </View>
+      ) : null}
+
       {/* Rename course modal */}
       <RenameModal
         visible={courseRenameVisible}
@@ -472,7 +585,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  headerTitle: { fontSize: fontSize.lg, fontWeight: '700', color: colors.textPrimary },
+  headerTitle: { fontSize: fontSize.lg, fontWeight: '700', color: colors.textPrimary, flexShrink: 1, marginHorizontal: spacing.sm },
   headerSpacer: { width: 44, height: 44 },
   menuButton: {
     width: 44,
@@ -484,6 +597,18 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  selectButton: {
+    minHeight: 40,
+    paddingHorizontal: spacing.lg,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  selectButtonLabel: { fontSize: fontSize.sm, color: colors.deepNavy, fontWeight: '700' },
   scroll: { paddingHorizontal: spacing.xl, paddingBottom: spacing.xxxl },
   content: { width: '100%', maxWidth: layout.content, alignSelf: 'center', gap: spacing.xl },
   heroHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.lg },
@@ -520,6 +645,33 @@ const styles = StyleSheet.create({
   },
   lectureDivider: { borderBottomWidth: 1, borderBottomColor: colors.border },
   lecturePressed: { backgroundColor: colors.surfaceMuted },
+  lectureRowSelected: { backgroundColor: colors.surfaceMuted },
+  selectCircle: {
+    width: 28,
+    height: 28,
+    borderRadius: radius.pill,
+    borderWidth: 2,
+    borderColor: colors.borderStrong,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  selectCircleOn: {
+    backgroundColor: colors.deepNavy,
+    borderColor: colors.deepNavy,
+  },
+  selectionBar: {
+    paddingHorizontal: spacing.xl,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.lg,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    backgroundColor: colors.background,
+  },
+  deleteSelectedButton: {
+    width: '100%',
+    backgroundColor: colors.recordingRed,
+    shadowColor: colors.recordingRed,
+  },
   lectureIcon: {
     width: 46,
     height: 46,
@@ -585,7 +737,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  materialBody: { flex: 1, gap: 2 },
+  materialBody: { flex: 1, minWidth: 0, gap: 2 },
+  materialMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    columnGap: spacing.sm,
+    rowGap: 2,
+  },
   materialTitle: { fontSize: fontSize.md, fontWeight: '700', color: colors.textPrimary },
   materialsImportButton: { alignSelf: 'flex-start' },
   materialsImportingHint: {

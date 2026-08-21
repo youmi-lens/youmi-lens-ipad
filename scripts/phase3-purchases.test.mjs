@@ -7,8 +7,11 @@ const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), 'u
 
 const purchases = read('lib/purchases.ts');
 const plans = read('app/plans.tsx');
-const settings = read('app/(tabs)/settings.tsx');
 const planStatus = read('lib/planStatus.ts');
+const subscriptionPreview = read('lib/subscriptionPreview.ts');
+const subscriptions = read('lib/subscriptions.ts');
+const subscriptionProducts = read('lib/subscriptionProducts.ts');
+const subscriptionCore = read('lib/subscriptionCore.ts');
 const storekit = JSON.parse(read('storekit/YoumiLens.storekit'));
 const appConfig = JSON.parse(read('app.json'));
 
@@ -19,14 +22,13 @@ const oldProductIds = [
   'com.aydenz.youmilensipad.plus.monthly',
   'com.aydenz.youmilensipad.pro.monthly',
 ];
+// False-claim copy that must never reach the paywall. The subscription model
+// (Monthly / Annual auto-renewable) is the intended language now, so those terms
+// are no longer prohibited; only unsupported or misleading claims are.
 const forbiddenPaywallCopy = [
   'lifetime',
   'forever',
   'unlimited',
-  'subscription',
-  'auto-renew',
-  'monthly subscription',
-  'cancel anytime',
 ];
 
 // 1. Approved Consumable SKU remains the only purchase target.
@@ -36,12 +38,30 @@ assert.match(purchases, /const PRODUCT_QUERY_TYPE = 'in-app'/);
 assert.equal(storekit.products[0].productID, productId);
 assert.equal(storekit.products[0].type, 'Consumable');
 
-// 2. StoreKit's localized display price wins; the screen does not hard-code USD.
-// The simplified upgrade screen shows a single price line driven by the
-// StoreKit-localized value, never a literal price string.
+// 2. The service still reads StoreKit's localized display price. The upgrade
+// screen presents two auto-renewable plans (Monthly / Annual) with a savings
+// badge. Preview prices are TEMPORARY placeholders isolated in one clearly named
+// config (lib/subscriptionPreview.ts) and rendered from there — never hard-coded
+// as literal price strings inside the screen. When live, prices must come from
+// StoreKit's product.displayPrice (documented in the preview config).
 assert.match(purchases, /displayPrice: product\.displayPrice/);
-assert.match(plans, /product\?\.displayPrice \?\? t\('plans\.appStoreUnavailable'\)/);
-assert.doesNotMatch(plans, /\$4\.99|US\$4\.99/);
+assert.match(plans, /PREVIEW_PRICES\.monthly/);
+assert.match(plans, /PREVIEW_PRICES\.annual/);
+assert.match(plans, /plans\.save/);
+assert.match(plans, /plans\.subscribe/);
+assert.doesNotMatch(plans, /\$4\.99|US\$4\.99|\$49\.99|US\$49\.99/);
+// Preview prices are centralized, documented as temporary, and point future
+// engineers to StoreKit as the live source of truth.
+assert.match(subscriptionPreview, /export const PREVIEW_PRICES/);
+assert.match(subscriptionPreview, /US\$4\.99/);
+assert.match(subscriptionPreview, /US\$49\.99/);
+assert.match(subscriptionPreview, /displayPrice/);
+assert.match(subscriptionPreview, /process\.env\.EXPO_PUBLIC_SUBSCRIPTIONS_LIVE === 'true'/);
+assert.match(plans, /SUBSCRIPTIONS_LIVE/);
+assert.match(subscriptions, /type: 'subs'/);
+assert.match(subscriptionCore, /displayPrice: product\.displayPrice/);
+assert.match(subscriptionProducts, /student\.monthly/);
+assert.match(subscriptionProducts, /student\.annual/);
 
 // 3. Closed sales require an explicit backend true and do not hide active access.
 assert.match(purchases, /status\?\.studentPass\?\.isPurchasable === true/);
@@ -68,26 +88,27 @@ assert.match(plans, /'plans\.benefit3'/);
 assert.match(plans, /purchaseLockRef\.current \|\| busy !== null/);
 assert.match(plans, /purchaseLockRef\.current = true/);
 assert.match(plans, /purchaseLockRef\.current = false/);
-assert.match(purchases, /private purchaseInFlight = false/);
-assert.match(purchases, /if \(this\.purchaseInFlight\)/);
-assert.match(purchases, /code: 'purchase_in_progress'/);
+assert.match(subscriptions, /private purchaseInFlight = false/);
+assert.match(subscriptions, /if \(this\.purchaseInFlight\)/);
+assert.match(subscriptions, /return result\('purchase_in_progress'\)/);
 
 // 7. Apple cancellation clears loading through finally and exits before any failure alert.
 const cancelBranch = plans.indexOf("if (result.code === 'cancelled') return;");
 const failureAlert = plans.indexOf("Alert.alert(t('plans.purchaseIncomplete')");
 assert.ok(cancelBranch > 0 && cancelBranch < failureAlert);
-assert.match(purchases, /name === ErrorCode\.UserCancelled/);
+assert.match(subscriptions, /name === ErrorCode\.UserCancelled/);
 assert.match(plans, /finally \{\s*purchaseLockRef\.current = false;\s*setBusy\(null\);/);
 
 // 8-10. StoreKit success is verified first; only a verified grant refreshes and confirms active quotas.
-const requestIndex = purchases.indexOf('await this.requestPurchaseWithTimeout()');
-const verifyIndex = purchases.indexOf('return await this.verifyPurchaseWithBackend(purchase, accessToken!)');
-const backendGrantIndex = purchases.indexOf('status >= 200 && status < 300 && payload?.ok && payload.granted');
-const serviceSuccessIndex = purchases.indexOf("code: 'success'", backendGrantIndex);
+const requestIndex = subscriptions.indexOf('await this.requestWithTimeout(plan, accountId)');
+const verifyIndex = subscriptions.indexOf('return await this.verify(purchase, accessToken)');
+const backendGrantIndex = subscriptions.indexOf('payload.ok && payload.granted');
+const serviceSuccessIndex = subscriptions.indexOf("result('success')", backendGrantIndex);
 assert.ok(requestIndex > 0 && requestIndex < verifyIndex);
 assert.ok(verifyIndex < backendGrantIndex && backendGrantIndex < serviceSuccessIndex);
 // The timeout-wrapped request still invokes the StoreKit purchase for the SKU.
-assert.match(purchases, /requestPurchase\(\{\s*type: PRODUCT_QUERY_TYPE,\s*request: \{ apple: \{ sku: STUDENT_PASS_PRODUCT_ID \} \}/);
+assert.match(subscriptions, /requestPurchase\(\{[\s\S]*type: 'subs'/);
+assert.match(subscriptions, /appAccountToken/);
 assert.match(plans, /if \(!result\.ok\) \{[\s\S]*plans\.purchaseIncomplete[\s\S]*return;/);
 assert.match(plans, /const refreshedStatus = await loadStatus\(\);/);
 assert.match(plans, /refreshedStatus && confirmsStudentBasicGrant\(refreshedStatus\)/);
@@ -95,11 +116,10 @@ assert.match(plans, /t\('plans\.refreshNeededBody'\)/);
 assert.doesNotMatch(plans, /Student Basic active'[^]*result\.ok/);
 
 // 11. Refresh Access is backend-first and refreshes quota/status before reporting success.
-const entitlementLookup = purchases.indexOf('initial = await this.getBackendEntitlement(accessToken)');
-assert.ok(entitlementLookup > 0);
-assert.match(purchases, /\/api\/iap\/entitlement/);
-assert.doesNotMatch(purchases, /\/api\/iap\/restore/);
-assert.match(plans, /const result = await purchaseService\.restoreStudentPass\(accessToken\);[\s\S]*const refreshedStatus = await loadStatus\(\);/);
+assert.match(subscriptions, /\/api\/iap\/entitlement/);
+assert.match(subscriptions, /\/api\/iap\/restore/);
+assert.match(subscriptions, /await syncIOS\(\)/);
+assert.match(plans, /const result = await subscriptionService\.restore\(accessToken\);[\s\S]*const refreshedStatus = await loadStatus\(\);/);
 assert.match(plans, /plans\.refreshAccess/);
 
 // 12. Status is keyed to Supabase user.id and stale requests are discarded.
@@ -109,13 +129,11 @@ assert.match(plans, /activeAccountRef\.current !== requestedAccountId/);
 assert.match(plans, /setPlanStatus\(null\);[\s\S]*setPlanStatusAccountId\(null\);/);
 assert.doesNotMatch(purchases, /AsyncStorage/);
 
-// 13. Consumable access refresh never promises an Apple restore.
-assert.doesNotMatch(`${plans}\n${settings}`, /Restore Purchases/i);
-// The restore/refresh path stays backend-entitlement based (no subscription or
-// custom StoreKit-history discovery). getAvailablePurchases is allowed because
-// purchase-time recovery uses it to finish a stuck transaction (see section 15).
+// 13. The legacy consumable path remains backend based while the new subscription
+// restore path synchronizes StoreKit and sends signed transactions to the backend.
 assert.doesNotMatch(purchases, /getActiveSubscriptions|discoverStudentPassTransactions/);
 assert.match(purchases, /Consumable purchases are not restored from App Store history\./);
+assert.match(subscriptions, /getAvailablePurchases\(\{ onlyIncludeActiveItemsIOS: false \}\)/);
 
 // 15. Stuck-before-Apple-sheet hardening: bounded StoreKit wait, queue recovery,
 //     and a guaranteed loading/guard reset so the UI can never spin forever.
@@ -145,6 +163,7 @@ assert.ok(restoreBody.includes('usedStoreKitRecovery: true'));
 // Recovery re-verifies through the same idempotent backend verify endpoint.
 assert.match(purchases, /getUnfinishedStudentPassPurchases\(\)/);
 assert.match(purchases, /verifyPurchaseWithBackend\(purchase, accessToken\)/);
+assert.match(subscriptions, /finishTransaction\(\{ purchase, isConsumable: false \}\)/);
 
 // 14. Required product language is present and prohibited paywall language is absent.
 assert.match(plans, /plans\.subtitle/);
@@ -160,6 +179,8 @@ assert.match(purchases, /case 'offline'/);
 assert.match(purchases, /case 'session_expired'/);
 assert.match(purchases, /case 'transaction_already_processed'/);
 assert.match(purchases, /case 'backend_verification_failed'/);
+assert.match(subscriptions, /ErrorCode\.Pending/);
+assert.match(subscriptions, /deepLinkToSubscriptionsIOS/);
 assert.match(plans, /AppState\.addEventListener\('change'/);
 assert.match(plans, /useFocusEffect/);
 assert.match(planStatus, /Network unavailable\. Check your connection and try again\./);
@@ -174,7 +195,26 @@ for (const oldProductId of oldProductIds) {
   assert.doesNotMatch(plans, new RegExp(oldProductId));
 }
 assert.equal(storekit.nonRenewingSubscriptions.length, 0);
-assert.equal(storekit.subscriptionGroups.length, 0);
+// V2: exactly one subscription group holds the Monthly + Annual auto-renewables,
+// consistent with lib/subscriptionProducts.ts (never identified by price text).
+assert.equal(storekit.subscriptionGroups.length, 1);
+const group = storekit.subscriptionGroups[0];
+assert.equal(group.id, '22109238');
+const subs = group.subscriptions;
+assert.equal(subs.length, 2);
+const monthlySub = subs.find((s) => s.productID === 'com.aydenz.youmilensipad.student.monthly');
+const annualSub = subs.find((s) => s.productID === 'com.aydenz.youmilensipad.student.annual');
+assert.ok(monthlySub && annualSub, 'both subscription products present in the group');
+assert.equal(monthlySub.type, 'RecurringSubscription');
+assert.equal(annualSub.type, 'RecurringSubscription');
+assert.equal(monthlySub.recurringSubscriptionPeriod, 'P1M');
+assert.equal(annualSub.recurringSubscriptionPeriod, 'P1Y');
+assert.equal(monthlySub.displayPrice, '4.99');
+assert.equal(annualSub.displayPrice, '49.99');
+// Both plans share the group => same-tier crossgrade behaviour, one entitlement.
+assert.equal(monthlySub.subscriptionGroupID, group.id);
+assert.equal(annualSub.subscriptionGroupID, group.id);
+// The legacy consumable + non-consumable compatibility products remain untouched.
 assert.equal(storekit.products.length, 2);
 assert.equal(storekit.products[0].displayPrice, '4.99');
 assert.equal(storekit.products[1].productID, legacyProductId);

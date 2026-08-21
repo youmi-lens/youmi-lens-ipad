@@ -56,11 +56,6 @@ const LiveCaptionsContext = createContext<LiveCaptionsContextValue | null>(null)
 const EXPO_GO_LIMITATION = 'Live captions require the Youmi Lens development build. Recording still works.';
 /** The single calm, user-facing message for any real Live Caption failure. */
 const CAPTIONS_UNAVAILABLE_MESSAGE = 'Live captions unavailable. Recording is still active.';
-// History window kept in memory for the scrollable transcript feed. Bounded so a
-// long lecture can't grow an unbounded list; the main screen renders these in a
-// virtualized FlatList and the compact caption popups scroll the same window.
-const RECENT_FINAL_CAPTION_LIMIT = 200;
-
 // ── WebSocket recovery tuning ──────────────────────────────────────────────────
 /** Consecutive failed reconnects before giving up. Reset to 0 once stream_ready arrives. */
 const MAX_REALTIME_RECONNECT_ATTEMPTS = 2;
@@ -120,6 +115,18 @@ function classifyStreamError(
   if (c.includes('limit') || c.includes('quota') || c.includes('suspended') || m.includes('limit reached')) {
     return { reason: 'backend_stream_error', fatal: true };
   }
+  // A missing / unconfigured server-side provider key (e.g. DASHSCOPE_KEY_MISSING
+  // on a dev backend with no AI credentials) can NEVER be resolved by
+  // reconnecting. Treating it as transient made the pipeline reconnect forever,
+  // leaving the UI stuck on "Connecting live captions…" while recording ran
+  // underneath. It is fatal for this session — stop retrying and surface the
+  // recoverable "captions unavailable" state; recording is unaffected.
+  if (
+    c.includes('key_missing') || m.includes('key_missing') ||
+    m.includes('missing key') || m.includes('not configured') || m.includes('no api key')
+  ) {
+    return { reason: 'backend_stream_error', fatal: true };
+  }
   if (m.includes('deepgram') || m.includes('upstream')) {
     return { reason: 'deepgram_upstream_drop', fatal: false };
   }
@@ -132,6 +139,7 @@ export function LiveCaptionsProvider({ children }: { children: ReactNode }) {
   const sampleRateRef = useRef(48_000);
   const sourceLanguageRef = useRef<ContentLanguage>('en');
   const translationLanguageRef = useRef<ContentLanguage>('zh-Hans');
+  const captionSequenceRef = useRef(0);
 
   // WebSocket recovery state.
   const reconnectAttemptsRef = useRef(0);
@@ -386,12 +394,12 @@ export function LiveCaptionsProvider({ children }: { children: ReactNode }) {
           setPartialTranslationZh('');
           setPartialTranslatedText('');
           setLatestCaption(rawCaptionText);
-          const id = message.id ?? `final_${Date.now()}`;
+          const id = message.id ?? `final_${Date.now()}_${captionSequenceRef.current++}`;
           setCaptionLines((current) =>
             [
               ...current,
               { id, text: rawCaptionText, isFinal: true, createdAt: new Date().toISOString() },
-            ].slice(-RECENT_FINAL_CAPTION_LIMIT),
+            ],
           );
         } else if (message.type === 'stream_translation' && message.id) {
           // The lecture snapshot is authoritative. Ignore stale/legacy backend

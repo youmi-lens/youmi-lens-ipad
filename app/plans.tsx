@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, AppState, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppBackground } from '@/components/AppBackground';
@@ -15,14 +15,22 @@ import { formatDate as formatAppDate } from '@/lib/format';
 import { useI18n } from '@/lib/i18n';
 import { fetchPlanStatus, PlanStatus } from '@/lib/planStatus';
 import {
-  purchaseService,
-  restoreMessageForCode,
   shouldShowPurchaseEntry,
-  type StudentPassProduct,
 } from '@/lib/purchases';
+import type { LoadedSubscriptionProduct, SubscriptionCatalog } from '@/lib/subscriptionCore';
+import { PREVIEW_PRICES, SUBSCRIPTIONS_LIVE } from '@/lib/subscriptionPreview';
+import type { SubscriptionPlan } from '@/lib/subscriptionProducts';
+import {
+  isSubscriptionProductId,
+  planForSubscriptionProductId,
+  SUBSCRIPTION_PRIVACY_URL,
+  SUBSCRIPTION_TERMS_URL,
+} from '@/lib/subscriptionProducts';
+import { subscriptionService } from '@/lib/subscriptions';
 
 type BusyAction = 'purchase' | 'refresh' | null;
 type StudentBasicStatus = 'Active' | 'Not active' | 'Expired' | 'Checking';
+type PlanChoice = SubscriptionPlan;
 
 // Three plain-language benefits — no quota table, no jargon. Each maps to a
 // protected paid limit (600 monthly minutes · 6 recordings/day · 10 jobs/day).
@@ -31,6 +39,10 @@ const BENEFITS = [
   'plans.benefit2',
   'plans.benefit3',
 ] as const;
+
+// Commercialization V2 stays inert until ASC metadata, the deployed verifier,
+// and true-device Sandbox validation all pass. Preview prices are display-only;
+// every live purchase and price comes from the StoreKit product identifier.
 
 export default function PlansScreen() {
   const { t, language } = useI18n();
@@ -41,11 +53,13 @@ export default function PlansScreen() {
   const accountId = user?.id ?? null;
   const [planStatus, setPlanStatus] = useState<PlanStatus | null>(null);
   const [planStatusAccountId, setPlanStatusAccountId] = useState<string | null>(null);
-  const [product, setProduct] = useState<StudentPassProduct | null>(null);
-  const [productLoading, setProductLoading] = useState(true);
+  const [products, setProducts] = useState<SubscriptionCatalog>({ monthly: null, annual: null });
+  const [productLoading, setProductLoading] = useState(SUBSCRIPTIONS_LIVE);
+  const [productError, setProductError] = useState(false);
   const [statusLoading, setStatusLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<BusyAction>(null);
+  const [selectedPlan, setSelectedPlan] = useState<PlanChoice>('annual');
   const [accessRefreshMessage, setAccessRefreshMessage] = useState<string | null>(null);
   const activeAccountRef = useRef(accountId);
   const statusRequestRef = useRef(0);
@@ -85,21 +99,34 @@ export default function PlansScreen() {
       }
     }
   }, [accessToken, accountId, t]);
-  const loadProduct = useCallback(async () => {
+  const loadProducts = useCallback(async (force = false) => {
+    if (!SUBSCRIPTIONS_LIVE) {
+      setProductLoading(false);
+      return;
+    }
     setProductLoading(true);
+    setProductError(false);
     try {
-      setProduct(await purchaseService.getStudentPassProduct());
+      const nextProducts = await subscriptionService.loadProducts(force);
+      setProducts(nextProducts);
+      setSelectedPlan((current) => {
+        if (nextProducts[current]) return current;
+        if (nextProducts.annual) return 'annual';
+        if (nextProducts.monthly) return 'monthly';
+        return current;
+      });
     } catch {
-      setProduct(null);
+      setProducts({ monthly: null, annual: null });
+      setProductError(true);
     } finally {
       setProductLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    void loadProduct();
-    return () => purchaseService.cleanup();
-  }, [loadProduct]);
+    void loadProducts();
+    return () => subscriptionService.cleanup();
+  }, [loadProducts]);
   useEffect(() => {
     statusRequestRef.current += 1;
     setPlanStatus(null);
@@ -120,24 +147,21 @@ export default function PlansScreen() {
 
   const currentStatus = planStatusAccountId === accountId ? planStatus : null;
   const activeEntitlement = currentStatus?.entitlement?.active ? currentStatus.entitlement : null;
+  const activeSubscriptionPlan = planForSubscriptionProductId(activeEntitlement?.productId);
   const purchaseVisible = shouldShowPurchaseEntry(currentStatus);
   const purchaseUnavailable = currentStatus?.studentPass?.isPurchasable === false;
-  const purchaseDisabled = isGuest || !accessToken || !purchaseVisible || productLoading || !product || busy !== null;
-  const purchaseButtonLabel = purchaseUnavailable
-    ? t('plans.comingSoon')
-    : productLoading
-      ? t('plans.loading')
-      : t('plans.purchase');
+  const selectedProduct = products[selectedPlan];
+  const purchaseDisabled = isGuest || !accessToken || !purchaseVisible || productLoading || !selectedProduct || busy !== null;
   const studentBasicStatus = getStudentBasicStatus(currentStatus, statusLoading);
 
   const handlePurchase = async () => {
     if (isGuest || !accessToken) return Alert.alert(t('plans.signInRequired'), t('plans.signInPurchase'));
-    if (purchaseLockRef.current || busy !== null || !purchaseVisible || !product) return;
+    if (purchaseLockRef.current || busy !== null || !purchaseVisible || !selectedProduct) return;
     purchaseLockRef.current = true;
     setBusy('purchase');
     setAccessRefreshMessage(null);
     try {
-      const result = await purchaseService.purchaseStudentPass(accessToken);
+      const result = await subscriptionService.purchase(selectedPlan, accessToken, accountId);
       if (result.code === 'cancelled') return;
       if (result.code === 'pending') {
         Alert.alert(t('plans.purchasePending'), result.message);
@@ -167,10 +191,10 @@ export default function PlansScreen() {
     if (busy !== null) return;
     setBusy('refresh');
     try {
-      const result = await purchaseService.restoreStudentPass(accessToken);
+      const result = await subscriptionService.restore(accessToken);
       const refreshedStatus = await loadStatus();
       if (!refreshedStatus) {
-        setAccessRefreshMessage(result.message || restoreMessageForCode(result.code));
+        setAccessRefreshMessage(result.message);
         Alert.alert(t('plans.refreshFailed'), t('plans.refreshFailedBody'));
         return;
       }
@@ -179,6 +203,13 @@ export default function PlansScreen() {
       Alert.alert(t('plans.refreshed'), message);
     } finally {
       setBusy(null);
+    }
+  };
+  const handleManageSubscription = async () => {
+    try {
+      await subscriptionService.manageSubscriptions();
+    } catch {
+      Alert.alert(t('plans.appStoreUnavailable'), t('plans.manageFailed'));
     }
   };
   const handleSignIn = async () => { await exitGuest(); router.replace('/auth'); };
@@ -215,9 +246,47 @@ export default function PlansScreen() {
               <Text style={styles.title}>{t('plans.studentBasic')}</Text>
               <Text style={styles.subtitle}>{t('plans.subtitle')}</Text>
 
-              <View style={styles.priceRow}>
-                <Text style={styles.price}>{productLoading ? t('plans.loading') : product?.displayPrice ?? t('plans.appStoreUnavailable')}</Text>
-                <Text style={styles.priceTerm}>{t('plans.term')}</Text>
+              <View style={styles.planOptions}>
+                <Pressable
+                  accessibilityRole="radio"
+                  accessibilityState={{ selected: selectedPlan === 'monthly', disabled: SUBSCRIPTIONS_LIVE && !products.monthly }}
+                  disabled={SUBSCRIPTIONS_LIVE && !products.monthly}
+                  onPress={() => { if (!SUBSCRIPTIONS_LIVE || products.monthly) setSelectedPlan('monthly'); }}
+                  style={[styles.planOption, selectedPlan === 'monthly' && styles.planOptionSelected, SUBSCRIPTIONS_LIVE && !products.monthly && styles.planOptionDisabled]}
+                >
+                  <View style={styles.planOptionHead}>
+                    <Text style={styles.planName}>{t('plans.monthly')}</Text>
+                    <View style={[styles.radio, selectedPlan === 'monthly' && styles.radioOn]}>
+                      {selectedPlan === 'monthly' ? <Ionicons name="checkmark" size={12} color={colors.pearlWhite} /> : null}
+                    </View>
+                  </View>
+                  <View style={styles.planPriceRow}>
+                    <PlanPrice loading={productLoading} product={products.monthly} previewPrice={PREVIEW_PRICES.monthly} unavailableLabel={t('plans.unavailableShort')} />
+                    <Text style={styles.planTerm}>{periodLabel(products.monthly, 'monthly', t)}</Text>
+                  </View>
+                </Pressable>
+
+                <Pressable
+                  accessibilityRole="radio"
+                  accessibilityState={{ selected: selectedPlan === 'annual', disabled: SUBSCRIPTIONS_LIVE && !products.annual }}
+                  disabled={SUBSCRIPTIONS_LIVE && !products.annual}
+                  onPress={() => { if (!SUBSCRIPTIONS_LIVE || products.annual) setSelectedPlan('annual'); }}
+                  style={[styles.planOption, selectedPlan === 'annual' && styles.planOptionSelected, SUBSCRIPTIONS_LIVE && !products.annual && styles.planOptionDisabled]}
+                >
+                  <View style={styles.planOptionHead}>
+                    <Text style={styles.planName}>{t('plans.annual')}</Text>
+                    <View style={[styles.radio, selectedPlan === 'annual' && styles.radioOn]}>
+                      {selectedPlan === 'annual' ? <Ionicons name="checkmark" size={12} color={colors.pearlWhite} /> : null}
+                    </View>
+                  </View>
+                  <View style={styles.planPriceRow}>
+                    <PlanPrice loading={productLoading} product={products.annual} previewPrice={PREVIEW_PRICES.annual} unavailableLabel={t('plans.unavailableShort')} />
+                    <Text style={styles.planTerm}>{periodLabel(products.annual, 'annual', t)}</Text>
+                  </View>
+                  <View style={styles.savePill}>
+                    <Text style={styles.savePillText}>{t('plans.save')}</Text>
+                  </View>
+                </Pressable>
               </View>
 
               <View style={styles.divider} />
@@ -236,10 +305,28 @@ export default function PlansScreen() {
 
               {activeEntitlement ? (
                 <>
+                  {activeSubscriptionPlan ? (
+                    <View style={styles.accessEndsRow}>
+                      <Text style={styles.accessEndsLabel}>{t('plans.currentPlan')}</Text>
+                      <Text style={styles.accessEndsValue}>
+                        {activeSubscriptionPlan === 'annual' ? t('plans.annual') : t('plans.monthly')}
+                      </Text>
+                    </View>
+                  ) : null}
                   <View style={styles.accessEndsRow}>
-                    <Text style={styles.accessEndsLabel}>{t('plans.accessEnds')}</Text>
+                    <Text style={styles.accessEndsLabel}>
+                      {activeEntitlement.autoRenewStatus ? t('plans.renewsOn') : t('plans.accessEnds')}
+                    </Text>
                     <Text style={styles.accessEndsValue}>{formatDate(activeEntitlement?.expiresAt)}</Text>
                   </View>
+                  {activeSubscriptionPlan && activeEntitlement.autoRenewStatus !== null && activeEntitlement.autoRenewStatus !== undefined ? (
+                    <View style={styles.accessEndsRow}>
+                      <Text style={styles.accessEndsLabel}>{t('plans.autoRenew')}</Text>
+                      <Text style={styles.accessEndsValue}>
+                        {activeEntitlement.autoRenewStatus ? t('plans.autoRenewOn') : t('plans.autoRenewOff')}
+                      </Text>
+                    </View>
+                  ) : null}
                   <Text style={styles.activeNote}>{t('plans.activeNote')}</Text>
                 </>
               ) : null}
@@ -251,16 +338,20 @@ export default function PlansScreen() {
               ) : null}
 
               <View style={styles.actions}>
-                {purchaseVisible || purchaseUnavailable ? (
-                  <PrimaryButton
-                    label={purchaseButtonLabel}
-                    icon={purchaseUnavailable ? 'time-outline' : 'card-outline'}
-                    onPress={() => void handlePurchase()}
-                    disabled={purchaseDisabled}
-                    loading={busy === 'purchase'}
-                  />
-                ) : null}
-                {purchaseUnavailable ? (
+                <PrimaryButton
+                  label={t('plans.subscribe')}
+                  icon="sparkles-outline"
+                  onPress={() => void handlePurchase()}
+                  disabled={!SUBSCRIPTIONS_LIVE || purchaseDisabled}
+                  loading={busy === 'purchase'}
+                />
+                {!SUBSCRIPTIONS_LIVE ? (
+                  <Text style={styles.unavailableNote}>{t('plans.comingSoonNote')}</Text>
+                ) : productError ? (
+                  <Pressable onPress={() => void loadProducts(true)}>
+                    <Text style={styles.unavailableNote}>{t('plans.storeLoadFailed')} {t('settings.plan.tapToRetry')}</Text>
+                  </Pressable>
+                ) : purchaseUnavailable ? (
                   <Text style={styles.unavailableNote}>{t('plans.unavailable')}</Text>
                 ) : null}
 
@@ -270,6 +361,14 @@ export default function PlansScreen() {
                   onPress={() => void handleRefreshAccess()}
                   disabled={busy !== null || isGuest || !accessToken}
                 />
+                {activeEntitlement && isSubscriptionProductId(activeEntitlement.productId) ? (
+                  <SecondaryButton
+                    label={t('plans.manageSubscription')}
+                    icon="open-outline"
+                    onPress={() => void handleManageSubscription()}
+                    disabled={busy !== null}
+                  />
+                ) : null}
                 {isGuest ? (
                   <SecondaryButton label={t('common.signIn')} icon="log-in-outline" onPress={() => void handleSignIn()} />
                 ) : null}
@@ -278,12 +377,46 @@ export default function PlansScreen() {
               <Text style={styles.helper}>{t('plans.purchaseCheck')}</Text>
               {accessRefreshMessage ? <Text style={styles.refreshMessage}>{accessRefreshMessage}</Text> : null}
               <Text style={styles.fine}>{t('plans.fine')}</Text>
+              <View style={styles.legalLinks}>
+                <Pressable onPress={() => void Linking.openURL(SUBSCRIPTION_TERMS_URL)}>
+                  <Text style={styles.legalLink}>{t('plans.termsOfUse')}</Text>
+                </Pressable>
+                <Text style={styles.legalDivider}>·</Text>
+                <Pressable onPress={() => void Linking.openURL(SUBSCRIPTION_PRIVACY_URL)}>
+                  <Text style={styles.legalLink}>{t('plans.privacyPolicy')}</Text>
+                </Pressable>
+              </View>
             </GlassCard>
           )}
         </View>
       </ScrollView>
     </SafeAreaView>
   );
+}
+
+function PlanPrice({
+  loading,
+  product,
+  previewPrice,
+  unavailableLabel,
+}: {
+  loading: boolean;
+  product: LoadedSubscriptionProduct | null;
+  previewPrice: string;
+  unavailableLabel: string;
+}) {
+  if (!SUBSCRIPTIONS_LIVE) return <Text style={styles.planPrice}>{previewPrice}</Text>;
+  if (loading) return <View style={styles.priceSkeleton} />;
+  return <Text style={styles.planPrice}>{product?.displayPrice ?? unavailableLabel}</Text>;
+}
+
+function periodLabel(
+  product: LoadedSubscriptionProduct | null,
+  fallback: SubscriptionPlan,
+  t: (key: string) => string,
+): string {
+  const unit = product?.periodUnit ?? (fallback === 'monthly' ? 'month' : 'year');
+  return unit === 'month' ? t('plans.monthlyTerm') : t('plans.annualTerm');
 }
 
 function getStudentBasicStatus(status: PlanStatus | null, loading: boolean): StudentBasicStatus {
@@ -346,9 +479,27 @@ const styles = StyleSheet.create({
   title: { color: colors.ink, fontSize: 28, lineHeight: 33, fontWeight: '800', letterSpacing: -0.5, marginTop: 20 },
   subtitle: { color: colors.textSecondary, fontSize: 15, lineHeight: 21, marginTop: 7 },
 
-  priceRow: { flexDirection: 'row', alignItems: 'baseline', gap: 9, marginTop: 16 },
-  price: { color: colors.ink, fontSize: 26, fontWeight: '800', letterSpacing: -0.5 },
-  priceTerm: { color: colors.textTertiary, fontSize: 12.5, fontWeight: '500' },
+  // Two selectable subscription plans, side by side.
+  planOptions: { flexDirection: 'row', gap: 11, marginTop: 18 },
+  planOption: {
+    flex: 1, borderRadius: 16, padding: 14, gap: 10,
+    borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border, backgroundColor: colors.surfaceMuted,
+  },
+  planOptionSelected: { borderColor: colors.navy, borderWidth: 1.5, backgroundColor: colors.iceTint },
+  planOptionDisabled: { opacity: 0.45 },
+  planOptionHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  planName: { color: colors.ink, fontSize: 14, fontWeight: '700', letterSpacing: -0.2 },
+  radio: {
+    width: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1.5, borderColor: colors.border, backgroundColor: 'transparent',
+  },
+  radioOn: { borderColor: colors.navy, backgroundColor: colors.navy },
+  planPriceRow: { flexDirection: 'row', alignItems: 'baseline', gap: 4 },
+  planPrice: { color: colors.ink, fontSize: 20, fontWeight: '800', letterSpacing: -0.5 },
+  priceSkeleton: { width: 64, height: 22, borderRadius: 6, backgroundColor: colors.border },
+  planTerm: { color: colors.textTertiary, fontSize: 12, fontWeight: '500' },
+  savePill: { alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 3, borderRadius: radius.pill, backgroundColor: colors.successTint },
+  savePillText: { color: colors.success, fontSize: 10, fontWeight: '800', letterSpacing: 0.3 },
 
   divider: { height: StyleSheet.hairlineWidth, backgroundColor: colors.border, marginVertical: 22 },
 
@@ -373,4 +524,7 @@ const styles = StyleSheet.create({
   helper: { color: colors.textTertiary, fontSize: 11.5, lineHeight: 16, textAlign: 'center', marginTop: 12 },
   refreshMessage: { color: colors.textSecondary, fontSize: 12, lineHeight: 17, textAlign: 'center', marginTop: 10 },
   fine: { color: colors.textTertiary, fontSize: 11.5, lineHeight: 17, textAlign: 'center', marginTop: 14 },
+  legalLinks: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, marginTop: 8 },
+  legalLink: { color: colors.accent, fontSize: 11.5, lineHeight: 17, fontWeight: '600' },
+  legalDivider: { color: colors.textTertiary, fontSize: 11.5 },
 });

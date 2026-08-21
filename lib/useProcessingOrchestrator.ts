@@ -73,6 +73,8 @@ export function useProcessingOrchestrator(): void {
         accessToken,
         durationMillis: lecture.durationMillis,
         course: getCourse(lecture.courseId)?.name,
+        // Canonical Course identity → the row is linked at first insert.
+        courseId: lecture.courseId,
         title: lecture.title,
         liveTranscript: lecture.liveTranscript,
         translatedLiveTranscript: lecture.translatedLiveTranscript,
@@ -80,11 +82,21 @@ export function useProcessingOrchestrator(): void {
         translationLanguage: lecture.translationLanguage ?? 'zh-Hans',
       })
         .then((result) => {
+          // Cloud Marks V1 activation: the audio upload just created the cloud
+          // `recordings` row (id === remoteRecordingId), so this is the first
+          // moment the marks captured at Finish have a row to attach to. The
+          // audio-upload payload does NOT carry marks, so without this they stay
+          // device-local forever. Including `markedTimestamps` here makes the
+          // store's existing writer push `marked_timestamps` + `marks_updated_at`
+          // exactly once, best-effort. Local marks were already saved at Finish;
+          // this never blocks upload, Finish, navigation, or playback, and an
+          // upload failure simply leaves them local to re-sync on the next upload.
           updateLecture(lectureId, {
             uploadStatus: 'uploaded',
             storagePath: result.storagePath,
             uploadError: undefined,
             uploadedAt: new Date().toISOString(),
+            markedTimestamps: lecture.markedTimestamps ?? [],
           });
         })
         .catch((error: unknown) => {
@@ -101,8 +113,18 @@ export function useProcessingOrchestrator(): void {
     const startProcessing = (lectureId: string, remoteRecordingId: string) => {
       if (startingRef.current.has(lectureId)) return;
       startingRef.current.add(lectureId);
-      updateLecture(lectureId, { processingStatus: 'processing', processingError: undefined });
+      // Do NOT optimistically mark 'processing' before the request. If the
+      // backend rejects the trigger (e.g. HTTP 503 "AI unavailable" on a dev
+      // backend with no transcription provider), we must land on a terminal
+      // 'failed' immediately. Marking 'processing' first caused the poll loop to
+      // start; that poll then read the never-enqueued remote ai_status
+      // ('pending') and overwrote the 'failed' back to a waiting state for the
+      // whole poll budget — the "stuck on Waiting…" symptom. Only a SUCCESSFUL
+      // trigger enters 'processing' (and thus polling); a failure is terminal.
       void startRemoteProcessing({ remoteRecordingId, accessToken })
+        .then(() => {
+          updateLecture(lectureId, { processingStatus: 'processing', processingError: undefined });
+        })
         .catch((error: unknown) => {
           updateLecture(lectureId, {
             processingStatus: 'failed',
