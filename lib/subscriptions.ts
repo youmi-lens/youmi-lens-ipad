@@ -6,6 +6,7 @@ import {
   finishTransaction,
   getAvailablePurchases,
   initConnection,
+  isEligibleForIntroOfferIOS,
   purchaseErrorListener,
   purchaseUpdatedListener,
   requestPurchase,
@@ -28,6 +29,7 @@ import {
 } from './subscriptionCore';
 import {
   LEGACY_STUDENT_ACCESS_PRODUCT_IDS,
+  SUBSCRIPTION_GROUP_ID,
   SUBSCRIPTION_PRODUCTS,
   SUBSCRIPTION_PRODUCT_IDS,
   isSubscriptionProductId,
@@ -156,6 +158,27 @@ class SubscriptionService {
       normalized.name = String(error?.code ?? 'storekit_error');
       pending?.reject(normalized);
     });
+  }
+
+  /**
+   * Whether the current Apple ID is eligible for the subscription group's
+   * introductory offer. FAILS CLOSED: any throw, rejection, or unexpected
+   * value resolves to `false` — the Plans UI must never advertise a trial it
+   * isn't sure about. This is purely a UI-advisory signal; it is never on
+   * the purchase path (see `purchase()` below, unchanged) and its failure
+   * can never block or alter a purchase — Apple's own purchase sheet is the
+   * actual source of truth and re-validates eligibility independently.
+   */
+  async getIntroOfferEligibility(): Promise<boolean> {
+    if (Platform.OS !== 'ios') return false;
+    try {
+      await this.connect();
+      const eligible = await isEligibleForIntroOfferIOS(SUBSCRIPTION_GROUP_ID);
+      return eligible === true;
+    } catch (error) {
+      logIap('IAP_INTRO_ELIGIBILITY_FAILED', error instanceof Error ? error.message : String(error));
+      return false;
+    }
   }
 
   async loadProducts(force = false): Promise<SubscriptionCatalog> {

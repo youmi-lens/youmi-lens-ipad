@@ -17,7 +17,7 @@ import { fetchPlanStatus, PlanStatus } from '@/lib/planStatus';
 import {
   shouldShowPurchaseEntry,
 } from '@/lib/purchases';
-import type { LoadedSubscriptionProduct, SubscriptionCatalog } from '@/lib/subscriptionCore';
+import { isTrialAvailable, type LoadedSubscriptionProduct, type SubscriptionCatalog } from '@/lib/subscriptionCore';
 import { PREVIEW_PRICES, SUBSCRIPTIONS_LIVE } from '@/lib/subscriptionPreview';
 import type { SubscriptionPlan } from '@/lib/subscriptionProducts';
 import {
@@ -54,6 +54,9 @@ export default function PlansScreen() {
   const [planStatus, setPlanStatus] = useState<PlanStatus | null>(null);
   const [planStatusAccountId, setPlanStatusAccountId] = useState<string | null>(null);
   const [products, setProducts] = useState<SubscriptionCatalog>({ monthly: null, annual: null });
+  // Fails closed: starts (and stays, on any query failure) `false` — the UI
+  // must never advertise a trial it isn't sure the current Apple ID gets.
+  const [introEligible, setIntroEligible] = useState(false);
   const [productLoading, setProductLoading] = useState(SUBSCRIPTIONS_LIVE);
   const [productError, setProductError] = useState(false);
   const [statusLoading, setStatusLoading] = useState(true);
@@ -125,6 +128,12 @@ export default function PlansScreen() {
 
   useEffect(() => {
     void loadProducts();
+    // Independent of product loading: getIntroOfferEligibility() already
+    // fails closed internally, and its failure must never affect whether
+    // products load or purchase remains available.
+    if (SUBSCRIPTIONS_LIVE) {
+      void subscriptionService.getIntroOfferEligibility().then(setIntroEligible);
+    }
     return () => subscriptionService.cleanup();
   }, [loadProducts]);
   useEffect(() => {
@@ -153,6 +162,11 @@ export default function PlansScreen() {
   const selectedProduct = products[selectedPlan];
   const purchaseDisabled = isGuest || !accessToken || !purchaseVisible || productLoading || !selectedProduct || busy !== null;
   const studentBasicStatus = getStudentBasicStatus(currentStatus, statusLoading);
+  // Necessary AND sufficient: the product's own offer mode, AND live Apple-ID
+  // eligibility (fails closed to false — see getIntroOfferEligibility).
+  const monthlyTrialAvailable = SUBSCRIPTIONS_LIVE && isTrialAvailable(products.monthly, introEligible);
+  const annualTrialAvailable = SUBSCRIPTIONS_LIVE && isTrialAvailable(products.annual, introEligible);
+  const selectedTrialAvailable = selectedPlan === 'monthly' ? monthlyTrialAvailable : annualTrialAvailable;
 
   const handlePurchase = async () => {
     if (isGuest || !accessToken) return Alert.alert(t('plans.signInRequired'), t('plans.signInPurchase'));
@@ -266,9 +280,18 @@ export default function PlansScreen() {
                     </View>
                   </View>
                   <View style={styles.planPriceRow}>
-                    <PlanPrice loading={productLoading} product={products.monthly} previewPrice={PREVIEW_PRICES.monthly} unavailableLabel={t('plans.unavailableShort')} />
-                    <Text style={styles.planTerm}>{periodLabel(products.monthly, 'monthly', t)}</Text>
+                    {monthlyTrialAvailable ? (
+                      <Text style={styles.planPrice}>{t('plans.freeTrialOneMonth')}</Text>
+                    ) : (
+                      <>
+                        <PlanPrice loading={productLoading} product={products.monthly} previewPrice={PREVIEW_PRICES.monthly} unavailableLabel={t('plans.unavailableShort')} />
+                        <Text style={styles.planTerm}>{periodLabel(products.monthly, 'monthly', t)}</Text>
+                      </>
+                    )}
                   </View>
+                  {monthlyTrialAvailable && products.monthly ? (
+                    <Text style={styles.planTrialThen}>{t('plans.thenPricePerMonth', { price: products.monthly.displayPrice })}</Text>
+                  ) : null}
                 </Pressable>
 
                 <Pressable
@@ -285,9 +308,18 @@ export default function PlansScreen() {
                     </View>
                   </View>
                   <View style={styles.planPriceRow}>
-                    <PlanPrice loading={productLoading} product={products.annual} previewPrice={PREVIEW_PRICES.annual} unavailableLabel={t('plans.unavailableShort')} />
-                    <Text style={styles.planTerm}>{periodLabel(products.annual, 'annual', t)}</Text>
+                    {annualTrialAvailable ? (
+                      <Text style={styles.planPrice}>{t('plans.freeTrialOneMonth')}</Text>
+                    ) : (
+                      <>
+                        <PlanPrice loading={productLoading} product={products.annual} previewPrice={PREVIEW_PRICES.annual} unavailableLabel={t('plans.unavailableShort')} />
+                        <Text style={styles.planTerm}>{periodLabel(products.annual, 'annual', t)}</Text>
+                      </>
+                    )}
                   </View>
+                  {annualTrialAvailable && products.annual ? (
+                    <Text style={styles.planTrialThen}>{t('plans.thenPricePerYear', { price: products.annual.displayPrice })}</Text>
+                  ) : null}
                   <View style={styles.savePill}>
                     <Text style={styles.savePillText}>{t('plans.save')}</Text>
                   </View>
@@ -344,7 +376,7 @@ export default function PlansScreen() {
 
               <View style={styles.actions}>
                 <PrimaryButton
-                  label={t('plans.subscribe')}
+                  label={selectedTrialAvailable ? t('plans.startFreeTrial') : t('plans.subscribe')}
                   icon="sparkles-outline"
                   onPress={() => void handlePurchase()}
                   disabled={!SUBSCRIPTIONS_LIVE || purchaseDisabled}
@@ -503,6 +535,7 @@ const styles = StyleSheet.create({
   planPrice: { color: colors.ink, fontSize: 20, fontWeight: '800', letterSpacing: -0.5 },
   priceSkeleton: { width: 64, height: 22, borderRadius: 6, backgroundColor: colors.border },
   planTerm: { color: colors.textTertiary, fontSize: 12, fontWeight: '500' },
+  planTrialThen: { color: colors.textTertiary, fontSize: 12, fontWeight: '500', marginTop: 2 },
   savePill: { alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 3, borderRadius: radius.pill, backgroundColor: colors.successTint },
   savePillText: { color: colors.success, fontSize: 10, fontWeight: '800', letterSpacing: 0.3 },
 

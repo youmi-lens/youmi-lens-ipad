@@ -3,6 +3,8 @@ import test from 'node:test';
 
 import {
   chooseAvailablePlan,
+  isFreeTrialPaymentMode,
+  isTrialAvailable,
   isUuid,
   normalizeSubscriptionCatalog,
   shouldFinishSubscriptionTransaction,
@@ -116,5 +118,58 @@ test('appAccountToken: accepts Supabase UUIDs and rejects arbitrary IDs', () => 
   assert.equal(isUuid('00000000-0000-4000-8000-000000000000'), true);
   assert.equal(isUuid('user-123'), false);
   assert.equal(isUuid(null), false);
+});
+
+// ── Build 45: free-trial introductory-offer fields ──────────────────────────
+
+const monthlyWithTrial = {
+  ...monthly,
+  introductoryPriceIOS: '$0.00',
+  introductoryPricePaymentModeIOS: 'free-trial',
+  introductoryPriceNumberOfPeriodsIOS: '1',
+  introductoryPriceSubscriptionPeriodIOS: { unit: 'MONTH', value: 1 },
+};
+
+test('FT1: introductory-offer fields survive normalization unchanged', () => {
+  const catalog = normalizeSubscriptionCatalog([monthlyWithTrial, annual], SUBSCRIPTION_PRODUCTS);
+  assert.equal(catalog.monthly?.introductoryPriceIOS, '$0.00');
+  assert.equal(catalog.monthly?.introductoryPricePaymentModeIOS, 'free-trial');
+  assert.equal(catalog.monthly?.introductoryPriceNumberOfPeriodsIOS, '1');
+  assert.deepEqual(catalog.monthly?.introductoryPriceSubscriptionPeriodIOS, { unit: 'MONTH', value: 1 });
+  // A product with no offer configured normalizes to explicit nulls, not
+  // `undefined` — so downstream code can rely on the field always existing.
+  assert.equal(catalog.annual?.introductoryPricePaymentModeIOS, null);
+});
+
+test('FT2: free-trial payment mode is recognized, other modes are not', () => {
+  const catalog = normalizeSubscriptionCatalog([monthlyWithTrial], SUBSCRIPTION_PRODUCTS);
+  assert.equal(isFreeTrialPaymentMode(catalog.monthly), true);
+  for (const mode of ['pay-as-you-go', 'pay-up-front', 'empty', null, undefined]) {
+    const product = { ...catalog.monthly, introductoryPricePaymentModeIOS: mode };
+    assert.equal(isFreeTrialPaymentMode(product), false);
+  }
+  assert.equal(isFreeTrialPaymentMode(null), false);
+});
+
+test('FT6/FT7: normalized displayPrice is exactly StoreKit\'s own string — never a literal', () => {
+  const catalog = normalizeSubscriptionCatalog([monthlyWithTrial, annual], SUBSCRIPTION_PRODUCTS);
+  assert.equal(catalog.monthly.displayPrice, monthlyWithTrial.displayPrice);
+  assert.equal(catalog.annual.displayPrice, annual.displayPrice);
+  // Prove it is not coincidentally matching a hardcoded USD default: a
+  // different localized currency string round-trips unchanged too.
+  const jpy = normalizeSubscriptionCatalog([{ ...monthlyWithTrial, displayPrice: '¥650' }], SUBSCRIPTION_PRODUCTS);
+  assert.equal(jpy.monthly.displayPrice, '¥650');
+});
+
+test('isTrialAvailable requires BOTH eligibility AND free-trial payment mode', () => {
+  const catalog = normalizeSubscriptionCatalog([monthlyWithTrial, annual], SUBSCRIPTION_PRODUCTS);
+  assert.equal(isTrialAvailable(catalog.monthly, true), true);
+  // Mutation guard A: eligible=true alone is NOT sufficient without the
+  // product's own free-trial payment mode.
+  assert.equal(isTrialAvailable(catalog.annual, true), false, 'eligible=true without free-trial mode must not advertise a trial');
+  // Mutation guard B: free-trial mode alone is NOT sufficient without
+  // eligibility — this is what "fail closed" means in practice.
+  assert.equal(isTrialAvailable(catalog.monthly, false), false, 'free-trial mode without eligibility must not advertise a trial');
+  assert.equal(isTrialAvailable(null, true), false);
 });
 

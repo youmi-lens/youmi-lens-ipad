@@ -262,4 +262,17 @@ check('press state is only tracked when a pressedStyle is supplied', () => {
   assert.match(pressable, /if \(pressedStyle\) setPressed\(false\)/);
 });
 
+check('the wide sidebar shell is a TABLET composition — a phone is compact in both orientations', () => {
+  const responsive = read('../constants/responsive.ts');
+  // A width-only breakpoint hands a phone the iPad sidebar shell in
+  // landscape: iPhone 17 Pro Max is 956pt wide on its side, clearing 900,
+  // on a canvas only 440pt tall. Observed on device; guarded here.
+  assert.match(responsive, /import \{ isPad \} from '\.\/deviceClass'/);
+  assert.match(responsive, /if \(!isPad\) return true;/, 'a non-tablet must always be compact');
+  // ...and width still decides on iPad, so Split View / Stage Manager keep
+  // falling back to the compact layout at narrow widths.
+  assert.match(responsive, /return width < breakpoint;/);
+  assert.equal(/COMPACT_WIDTH_BREAKPOINT = 900/.test(responsive), true, 'breakpoint value unchanged');
+});
+
 console.log(`\nnavigation polish: ${passed} checks passed`);
