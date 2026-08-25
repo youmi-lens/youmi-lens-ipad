@@ -17,6 +17,7 @@ import { fetchPlanStatus, PlanStatus } from '@/lib/planStatus';
 import {
   shouldShowPurchaseEntry,
 } from '@/lib/purchases';
+import { logDiag } from '@/lib/iapDiag';
 import { isTrialAvailable, type LoadedSubscriptionProduct, type SubscriptionCatalog } from '@/lib/subscriptionCore';
 import { PREVIEW_PRICES, SUBSCRIPTIONS_LIVE } from '@/lib/subscriptionPreview';
 import type { SubscriptionPlan } from '@/lib/subscriptionProducts';
@@ -203,6 +204,7 @@ export default function PlansScreen() {
     } finally {
       purchaseLockRef.current = false;
       setBusy(null);
+      logDiag('purchase_busy_cleared', { plan: selectedPlan });
     }
   };
   const handleRefreshAccess = async () => {

@@ -14,10 +14,11 @@ import {
   type ProductSubscription,
   type Purchase,
 } from 'expo-iap';
-import { Platform } from 'react-native';
+import { AppState, Platform } from 'react-native';
 
 import { API_BASE_URL } from './config';
 import { boundedFetch, isBoundedFetchTimeout } from './boundedFetch';
+import { logDiag } from './iapDiag';
 import { logIap } from './iapLog';
 import type { BackendEntitlement, EntitlementResponse } from './purchases';
 import {
@@ -50,7 +51,8 @@ export type SubscriptionResultCode =
   | 'revoked'
   | 'offline'
   | 'verify_timeout'
-  | 'storekit_error';
+  | 'storekit_error'
+  | 'presentation_unavailable';
 
 export type SubscriptionResult = {
   ok: boolean;
@@ -111,6 +113,7 @@ function result(code: SubscriptionResultCode, message?: string): SubscriptionRes
     verify_timeout:
       'Purchase verification is taking longer than expected. You will not be charged again. Please refresh access or restore purchases.',
     storekit_error: 'The Apple purchase could not be completed. Please try again.',
+    presentation_unavailable: 'Youmi Lens could not show the Apple purchase screen right now. Please try again.',
   };
   return { ok: code === 'success', code, message: message ?? defaults[code] };
 }
@@ -147,11 +150,13 @@ class SubscriptionService {
     this.connected = true;
     this.updateSubscription = purchaseUpdatedListener((purchase) => {
       if (!isSubscriptionProductId(purchase.productId)) return;
+      logDiag('purchase_update_received', { productId: purchase.productId });
       const pending = this.pending;
       this.pending = null;
       pending?.resolve(purchase);
     });
     this.errorSubscription = purchaseErrorListener((error) => {
+      logDiag('purchase_error_received', { code: String(error?.code ?? 'unknown') });
       const pending = this.pending;
       this.pending = null;
       const normalized = new Error(error?.message || 'StoreKit purchase failed');
@@ -174,6 +179,7 @@ class SubscriptionService {
     try {
       await this.connect();
       const eligible = await isEligibleForIntroOfferIOS(SUBSCRIPTION_GROUP_ID);
+      logDiag('intro_eligibility_result', { eligible: eligible === true });
       return eligible === true;
     } catch (error) {
       logIap('IAP_INTRO_ELIGIBILITY_FAILED', error instanceof Error ? error.message : String(error));
@@ -184,10 +190,23 @@ class SubscriptionService {
   async loadProducts(force = false): Promise<SubscriptionCatalog> {
     if (!force && (this.catalog.monthly || this.catalog.annual)) return this.catalog;
     if (!force && this.loadPromise) return this.loadPromise;
+    logDiag('products_load_start', {});
     this.loadPromise = (async () => {
       await this.connect();
       const products = await fetchProducts({ skus: [...SUBSCRIPTION_PRODUCT_IDS], type: 'subs' });
       this.catalog = normalizeSubscriptionCatalog((products ?? []) as ProductSubscription[], SUBSCRIPTION_PRODUCTS);
+      for (const plan of ['monthly', 'annual'] as const) {
+        const product = this.catalog[plan];
+        logDiag('intro_product_fields', {
+          plan,
+          available: product != null,
+          paymentMode: product?.introductoryPricePaymentModeIOS ?? null,
+          hasIntroPrice: product?.introductoryPriceIOS != null,
+          periodUnit: typeof product?.introductoryPriceSubscriptionPeriodIOS === 'string' ? product.introductoryPriceSubscriptionPeriodIOS : null,
+          periodCount: product?.introductoryPriceNumberOfPeriodsIOS ?? null,
+        });
+      }
+      logDiag('products_load_done', {});
       return this.catalog;
     })();
     try {
@@ -224,6 +243,7 @@ class SubscriptionService {
     const requestedProductId = productIdForPlan(plan);
     return new Promise((resolve, reject) => {
       let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const finish = (kind: 'resolve' | 'reject', value: Purchase | Error) => {
         if (settled) return;
         settled = true;
@@ -232,7 +252,26 @@ class SubscriptionService {
         if (kind === 'resolve') resolve(value as Purchase);
         else reject(value as Error);
       };
-      const timer = setTimeout(() => {
+
+      // A purchase sheet can only ever be presented against a foreground-
+      // active app. Attempting it otherwise is a known StoreKit 2 hang class:
+      // the native purchase call can be left awaiting a sheet iOS never
+      // actually shows, with no error and no bound on how long that takes.
+      // Failing fast here — before requestPurchase is ever invoked — means
+      // there is nothing native left pending to hang, and the busy state
+      // clears immediately through the normal error path below.
+      const appState = AppState.currentState;
+      const sceneActive = appState === 'active';
+      logDiag('active_scene_check', { plan, state: String(appState), allowed: sceneActive });
+      if (!sceneActive) {
+        const error = new Error('Youmi Lens was not in the foreground; the Apple purchase sheet was not requested.');
+        error.name = 'presentation_not_active';
+        finish('reject', error);
+        return;
+      }
+
+      timer = setTimeout(() => {
+        logDiag('purchase_timeout_fired', { plan });
         const error = new Error('StoreKit timed out');
         error.name = 'storekit_timeout';
         finish('reject', error);
@@ -241,6 +280,7 @@ class SubscriptionService {
         resolve: (purchase) => finish('resolve', purchase),
         reject: (error) => finish('reject', error),
       };
+      logDiag('purchase_request_start', { plan });
       // expo-iap delivers the purchase outcome through purchaseUpdatedListener /
       // purchaseErrorListener — NOT requestPurchase's return value. Keeping a
       // single authoritative completion path (the listeners + the 120s bound)
@@ -355,6 +395,7 @@ class SubscriptionService {
     const name = error instanceof Error ? error.name.toLowerCase() : '';
     const message = error instanceof Error ? error.message.toLowerCase() : '';
     if (name === ErrorCode.UserCancelled || name.includes('cancel') || message.includes('cancel')) return result('cancelled');
+    if (name === 'presentation_not_active') return result('presentation_unavailable');
     if (name === ErrorCode.Pending || name === ErrorCode.DeferredPayment) return result('pending');
     if ([ErrorCode.NetworkError, ErrorCode.RemoteError, ErrorCode.ServiceError, ErrorCode.ServiceDisconnected, ErrorCode.ServiceTimeout].includes(name as ErrorCode)) return result('offline');
     logIap('subscription purchase error', name || 'unknown');

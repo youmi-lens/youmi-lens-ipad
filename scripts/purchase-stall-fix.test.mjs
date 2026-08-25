@@ -94,7 +94,7 @@ test('P6: verify maps a bounded-fetch timeout to verify_timeout (never hangs)', 
 
 test('P7: verify network/HTTP failure clears loading via a terminal result', () => {
   assert.match(verifyFn, /return isBoundedFetchTimeout\(error\) \? result\('verify_timeout'\) : result\('offline'\)/);
-  assert.match(handlePurchaseFn, /finally \{\s*purchaseLockRef\.current = false;\s*setBusy\(null\);\s*\}/);
+  assert.match(handlePurchaseFn, /finally \{\s*purchaseLockRef\.current = false;\s*setBusy\(null\);[\s\S]*?\}/);
 });
 
 test('P6: fetchJson is bounded (mutation A: removing the timeout would fail)', () => {
@@ -105,7 +105,7 @@ test('P6: fetchJson is bounded (mutation A: removing the timeout would fail)', (
 // ── P3/P4/P5: loading invariant ─────────────────────────────────────────────
 
 test('P3/P4/P5: every purchase path reaches setBusy(null) in finally', () => {
-  assert.match(handlePurchaseFn, /finally \{\s*purchaseLockRef\.current = false;\s*setBusy\(null\);\s*\}/);
+  assert.match(handlePurchaseFn, /finally \{\s*purchaseLockRef\.current = false;\s*setBusy\(null\);[\s\S]*?\}/);
 });
 
 test('P5: cancel is a terminal, loading-clearing path', () => {
