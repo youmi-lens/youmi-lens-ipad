@@ -12,6 +12,7 @@ import { GlassIconButton } from '@/components/WorkspaceUI';
 import { colors, radius } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
 import { formatDate as formatAppDate } from '@/lib/format';
+import { ensureGuestIapIdentity, hasGuestIapIdentity } from '@/lib/guestIap';
 import { useI18n } from '@/lib/i18n';
 import { fetchPlanStatus, PlanStatus } from '@/lib/planStatus';
 import {
@@ -54,6 +55,15 @@ export default function PlansScreen() {
   const accountId = user?.id ?? null;
   const [planStatus, setPlanStatus] = useState<PlanStatus | null>(null);
   const [planStatusAccountId, setPlanStatusAccountId] = useState<string | null>(null);
+  // App Review 5.1.1(v): the guest-IAP identity/status are ENTIRELY separate
+  // from the main account's session/status above — sourced from the isolated
+  // client in lib/guestIapClient.ts, never from useAuth(). This is what lets a
+  // guest purchase, see their own active plan, and Restore, while Cloud
+  // Library and every other main-session consumer stay completely unaware.
+  const [guestAccountId, setGuestAccountId] = useState<string | null>(null);
+  const [guestPlanStatus, setGuestPlanStatus] = useState<PlanStatus | null>(null);
+  const [guestPlanStatusAccountId, setGuestPlanStatusAccountId] = useState<string | null>(null);
+  const [guestStatusLoading, setGuestStatusLoading] = useState(false);
   const [products, setProducts] = useState<SubscriptionCatalog>({ monthly: null, annual: null });
   // Fails closed: starts (and stays, on any query failure) `false` — the UI
   // must never advertise a trial it isn't sure the current Apple ID gets.
@@ -103,6 +113,43 @@ export default function PlansScreen() {
       }
     }
   }, [accessToken, accountId, t]);
+
+  /**
+   * Read-only guest status refresh: reuses an EXISTING guest-IAP identity if
+   * one is already on this device (never mints a new anonymous user just from
+   * viewing the screen — only an actual purchase/restore attempt does that).
+   * This is what makes a relaunch correctly show a returning guest's active
+   * plan (G5) without ever touching the main account's session or status.
+   */
+  const loadGuestStatus = useCallback(async () => {
+    if (!(await hasGuestIapIdentity())) {
+      setGuestPlanStatus(null);
+      setGuestPlanStatusAccountId(null);
+      setGuestStatusLoading(false);
+      return null;
+    }
+    const identity = await ensureGuestIapIdentity();
+    if (!identity) {
+      setGuestPlanStatus(null);
+      setGuestPlanStatusAccountId(null);
+      setGuestStatusLoading(false);
+      return null;
+    }
+    setGuestAccountId(identity.accountId);
+    setGuestStatusLoading(true);
+    try {
+      const nextStatus = await fetchPlanStatus(identity.accessToken);
+      setGuestPlanStatus(nextStatus);
+      setGuestPlanStatusAccountId(identity.accountId);
+      return nextStatus;
+    } catch (nextError) {
+      console.warn('[plans] guest plan status load failed', nextError);
+      return null;
+    } finally {
+      setGuestStatusLoading(false);
+    }
+  }, []);
+
   const loadProducts = useCallback(async (force = false) => {
     if (!SUBSCRIPTIONS_LIVE) {
       setProductLoading(false);
@@ -145,38 +192,75 @@ export default function PlansScreen() {
     setError(null);
     setStatusLoading(Boolean(accessToken && accountId));
   }, [accessToken, accountId]);
-  useFocusEffect(useCallback(() => { void loadStatus(); }, [loadStatus]));
+  useFocusEffect(useCallback(() => { void loadStatus(); if (isGuest) void loadGuestStatus(); }, [loadStatus, loadGuestStatus, isGuest]));
   useEffect(() => {
     const appStateListener = AppState.addEventListener('change', (nextState) => {
       const wasBackgrounded = appStateRef.current === 'background' || appStateRef.current === 'inactive';
       appStateRef.current = nextState;
-      if (wasBackgrounded && nextState === 'active') void loadStatus();
+      if (wasBackgrounded && nextState === 'active') {
+        void loadStatus();
+        if (isGuest) void loadGuestStatus();
+      }
     });
     return () => appStateListener.remove();
-  }, [loadStatus]);
+  }, [loadStatus, loadGuestStatus, isGuest]);
 
-  const currentStatus = planStatusAccountId === accountId ? planStatus : null;
+  // App Review 5.1.1(v): a guest's "current status" comes from the isolated
+  // guest-IAP identity, never from the main account — this single branch is
+  // what makes every derived value below (active entitlement, purchase
+  // visibility, the status pill) correct for guests with zero further changes.
+  const currentStatus = isGuest
+    ? (guestAccountId && guestPlanStatusAccountId === guestAccountId ? guestPlanStatus : null)
+    : (planStatusAccountId === accountId ? planStatus : null);
   const activeEntitlement = currentStatus?.entitlement?.active ? currentStatus.entitlement : null;
   const activeSubscriptionPlan = planForSubscriptionProductId(activeEntitlement?.productId);
-  const purchaseVisible = shouldShowPurchaseEntry(currentStatus);
+  // A guest with NO known status yet (never purchased, no identity created)
+  // must default to purchasable — shouldShowPurchaseEntry(null) is false,
+  // which is correct for "still loading" on the main-account path but wrong
+  // for "genuinely nothing to hide it" on the guest path.
+  const purchaseVisible = isGuest
+    ? (currentStatus ? shouldShowPurchaseEntry(currentStatus) : true)
+    : shouldShowPurchaseEntry(currentStatus);
   const purchaseUnavailable = currentStatus?.studentPass?.isPurchasable === false;
   const selectedProduct = products[selectedPlan];
-  const purchaseDisabled = isGuest || !accessToken || !purchaseVisible || productLoading || !selectedProduct || busy !== null;
-  const studentBasicStatus = getStudentBasicStatus(currentStatus, statusLoading);
+  const purchaseDisabled = !purchaseVisible || productLoading || !selectedProduct || busy !== null;
+  const studentBasicStatus = getStudentBasicStatus(currentStatus, isGuest ? guestStatusLoading : statusLoading);
   // Necessary AND sufficient: the product's own offer mode, AND live Apple-ID
   // eligibility (fails closed to false — see getIntroOfferEligibility).
   const monthlyTrialAvailable = SUBSCRIPTIONS_LIVE && isTrialAvailable(products.monthly, introEligible);
   const annualTrialAvailable = SUBSCRIPTIONS_LIVE && isTrialAvailable(products.annual, introEligible);
   const selectedTrialAvailable = selectedPlan === 'monthly' ? monthlyTrialAvailable : annualTrialAvailable;
 
+  /**
+   * App Review 5.1.1(v): the identity that drives purchase/restore. For a
+   * signed-in user this is unchanged — the main session, exactly as before.
+   * For a guest, this obtains (creating on first use) the ISOLATED guest-IAP
+   * identity — never the main session, never anything that touches
+   * AuthProvider or Cloud Library. `subscriptionService.purchase`/`.restore`
+   * are otherwise completely unmodified: they only ever see an access token +
+   * a UUID, and cannot tell (nor need to) which source it came from.
+   */
+  const resolvePurchaseIdentity = async (): Promise<{ token: string; account: string } | null> => {
+    if (!isGuest) return accessToken && accountId ? { token: accessToken, account: accountId } : null;
+    const identity = await ensureGuestIapIdentity();
+    if (!identity) return null;
+    setGuestAccountId(identity.accountId);
+    return { token: identity.accessToken, account: identity.accountId };
+  };
+  const refreshCurrentStatus = () => (isGuest ? loadGuestStatus() : loadStatus());
+
   const handlePurchase = async () => {
-    if (isGuest || !accessToken) return Alert.alert(t('plans.signInRequired'), t('plans.signInPurchase'));
     if (purchaseLockRef.current || busy !== null || !purchaseVisible || !selectedProduct) return;
     purchaseLockRef.current = true;
     setBusy('purchase');
     setAccessRefreshMessage(null);
     try {
-      const result = await subscriptionService.purchase(selectedPlan, accessToken, accountId);
+      const identity = await resolvePurchaseIdentity();
+      if (!identity) {
+        Alert.alert(t('plans.purchaseUnavailableTitle'), t('plans.guestPurchaseUnavailable'));
+        return;
+      }
+      const result = await subscriptionService.purchase(selectedPlan, identity.token, identity.account);
       if (result.code === 'cancelled') return;
       if (result.code === 'pending') {
         Alert.alert(t('plans.purchasePending'), result.message);
@@ -192,7 +276,7 @@ export default function PlansScreen() {
         return;
       }
 
-      const refreshedStatus = await loadStatus();
+      const refreshedStatus = await refreshCurrentStatus();
       if (refreshedStatus && confirmsStudentBasicGrant(refreshedStatus)) {
         Alert.alert(t('plans.activeTitle'), t('plans.activeBody'));
       } else {
@@ -208,12 +292,16 @@ export default function PlansScreen() {
     }
   };
   const handleRefreshAccess = async () => {
-    if (isGuest || !accessToken) return Alert.alert(t('plans.signInRequired'), t('plans.refreshSignIn'));
     if (busy !== null) return;
     setBusy('refresh');
     try {
-      const result = await subscriptionService.restore(accessToken);
-      const refreshedStatus = await loadStatus();
+      const identity = await resolvePurchaseIdentity();
+      if (!identity) {
+        Alert.alert(t('plans.purchaseUnavailableTitle'), t('plans.guestPurchaseUnavailable'));
+        return;
+      }
+      const result = await subscriptionService.restore(identity.token);
+      const refreshedStatus = await refreshCurrentStatus();
       if (!refreshedStatus) {
         setAccessRefreshMessage(result.message);
         Alert.alert(t('plans.refreshFailed'), t('plans.refreshFailedBody'));
@@ -282,15 +370,12 @@ export default function PlansScreen() {
                     </View>
                   </View>
                   <View style={styles.planPriceRow}>
-                    {monthlyTrialAvailable ? (
-                      <Text style={styles.planPrice}>{t('plans.freeTrialOneMonth')}</Text>
-                    ) : (
-                      <>
-                        <PlanPrice loading={productLoading} product={products.monthly} previewPrice={PREVIEW_PRICES.monthly} unavailableLabel={t('plans.unavailableShort')} />
-                        <Text style={styles.planTerm}>{periodLabel(products.monthly, 'monthly', t)}</Text>
-                      </>
-                    )}
+                    <PlanPrice loading={productLoading} product={products.monthly} previewPrice={PREVIEW_PRICES.monthly} unavailableLabel={t('plans.unavailableShort')} />
+                    <Text style={styles.planTerm}>{periodLabel(products.monthly, 'monthly', t)}</Text>
                   </View>
+                  {monthlyTrialAvailable ? (
+                    <Text style={styles.planTrialBadge}>{t('plans.freeTrialOneMonth')}</Text>
+                  ) : null}
                   {monthlyTrialAvailable && products.monthly ? (
                     <Text style={styles.planTrialThen}>{t('plans.thenPricePerMonth', { price: products.monthly.displayPrice })}</Text>
                   ) : null}
@@ -310,15 +395,12 @@ export default function PlansScreen() {
                     </View>
                   </View>
                   <View style={styles.planPriceRow}>
-                    {annualTrialAvailable ? (
-                      <Text style={styles.planPrice}>{t('plans.freeTrialOneMonth')}</Text>
-                    ) : (
-                      <>
-                        <PlanPrice loading={productLoading} product={products.annual} previewPrice={PREVIEW_PRICES.annual} unavailableLabel={t('plans.unavailableShort')} />
-                        <Text style={styles.planTerm}>{periodLabel(products.annual, 'annual', t)}</Text>
-                      </>
-                    )}
+                    <PlanPrice loading={productLoading} product={products.annual} previewPrice={PREVIEW_PRICES.annual} unavailableLabel={t('plans.unavailableShort')} />
+                    <Text style={styles.planTerm}>{periodLabel(products.annual, 'annual', t)}</Text>
                   </View>
+                  {annualTrialAvailable ? (
+                    <Text style={styles.planTrialBadge}>{t('plans.freeTrialOneMonth')}</Text>
+                  ) : null}
                   {annualTrialAvailable && products.annual ? (
                     <Text style={styles.planTrialThen}>{t('plans.thenPricePerYear', { price: products.annual.displayPrice })}</Text>
                   ) : null}
@@ -398,7 +480,7 @@ export default function PlansScreen() {
                   label={busy === 'refresh' ? t('plans.refreshing') : t('plans.refreshAccess')}
                   icon="refresh-outline"
                   onPress={() => void handleRefreshAccess()}
-                  disabled={busy !== null || isGuest || !accessToken}
+                  disabled={busy !== null}
                 />
                 {activeEntitlement && isSubscriptionProductId(activeEntitlement.productId) ? (
                   <SecondaryButton
@@ -537,6 +619,11 @@ const styles = StyleSheet.create({
   planPrice: { color: colors.ink, fontSize: 20, fontWeight: '800', letterSpacing: -0.5 },
   priceSkeleton: { width: 64, height: 22, borderRadius: 6, backgroundColor: colors.border },
   planTerm: { color: colors.textTertiary, fontSize: 12, fontWeight: '500' },
+  // SECONDARY: visually subordinate to planPrice (fontSize 20/weight 800) — the
+  // billed amount must read first. App Review 3.1.2(c): a free trial can never
+  // out-weigh the price it's offered against.
+  planTrialBadge: { color: colors.accent, fontSize: 13, fontWeight: '700', marginTop: 3 },
+  // TERTIARY: smallest, most muted — the auto-renewal disclosure.
   planTrialThen: { color: colors.textTertiary, fontSize: 12, fontWeight: '500', marginTop: 2 },
   savePill: { alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 3, borderRadius: radius.pill, backgroundColor: colors.successTint },
   savePillText: { color: colors.success, fontSize: 10, fontWeight: '800', letterSpacing: 0.3 },

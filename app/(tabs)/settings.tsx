@@ -268,6 +268,7 @@ export default function SettingsScreen() {
                         <Text style={styles.profileEmail}>{t('settings.account.guestSubtitle')}</Text>
                       </View>
                     </View>
+                    <SettingRow icon="sparkles-outline" label={t('settings.plan.studentBasicRow')} detail={t('settings.plan.studentBasicDetail')} value={t('settings.plan.explore')} onPress={() => router.push('/plans')} />
                     <SettingRow icon="log-in-outline" label={t('settings.account.signIn')} detail={t('settings.account.signInDetail')} onPress={handleGuestSignIn} roomy={!isCompact} last />
                   </>
                 ) : (

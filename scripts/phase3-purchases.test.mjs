@@ -110,7 +110,11 @@ assert.ok(verifyIndex < backendGrantIndex && backendGrantIndex < serviceSuccessI
 assert.match(subscriptions, /requestPurchase\(\{[\s\S]*type: 'subs'/);
 assert.match(subscriptions, /appAccountToken/);
 assert.match(plans, /if \(!result\.ok\) \{[\s\S]*plans\.purchaseIncomplete[\s\S]*return;/);
-assert.match(plans, /const refreshedStatus = await loadStatus\(\);/);
+// App Review 5.1.1(v): status refresh is dispatched to loadStatus (signed-in)
+// or loadGuestStatus (guest) — refreshCurrentStatus is the single indirection
+// point; assert both the call site and that the dispatch itself is correct.
+assert.match(plans, /const refreshedStatus = await refreshCurrentStatus\(\);/);
+assert.match(plans, /const refreshCurrentStatus = \(\) => \(isGuest \? loadGuestStatus\(\) : loadStatus\(\)\);/);
 assert.match(plans, /refreshedStatus && confirmsStudentBasicGrant\(refreshedStatus\)/);
 assert.match(plans, /t\('plans\.refreshNeededBody'\)/);
 assert.doesNotMatch(plans, /Student Basic active'[^]*result\.ok/);
@@ -119,7 +123,7 @@ assert.doesNotMatch(plans, /Student Basic active'[^]*result\.ok/);
 assert.match(subscriptions, /\/api\/iap\/entitlement/);
 assert.match(subscriptions, /\/api\/iap\/restore/);
 assert.match(subscriptions, /await syncIOS\(\)/);
-assert.match(plans, /const result = await subscriptionService\.restore\(accessToken\);[\s\S]*const refreshedStatus = await loadStatus\(\);/);
+assert.match(plans, /const result = await subscriptionService\.restore\(identity\.token\);[\s\S]*const refreshedStatus = await refreshCurrentStatus\(\);/);
 assert.match(plans, /plans\.refreshAccess/);
 
 // 12. Status is keyed to Supabase user.id and stale requests are discarded.
@@ -220,6 +224,6 @@ assert.equal(storekit.products[0].displayPrice, '4.99');
 assert.equal(storekit.products[1].productID, legacyProductId);
 assert.equal(storekit.products[1].type, 'NonConsumable');
 assert.equal(appConfig.expo.version, '0.1.7');
-assert.equal(appConfig.expo.ios.buildNumber, '46');
+assert.equal(appConfig.expo.ios.buildNumber, '47');
 
 console.log('Phase 3 purchase hardening tests passed.');

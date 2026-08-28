@@ -146,10 +146,10 @@ export default function RecordHomeScreen() {
               </ContentReveal>
               <View style={[styles.emptyGrid, isCompact && styles.emptyGridCompact, isTabletCompact && styles.emptyGridTabletCompact]}>
                 <GlassCard elevated style={[styles.emptyHero, isCompact && styles.emptyHeroCompact]}>
-                  <View style={styles.emptyHeroContent}>
+                  <View style={[styles.emptyHeroContent, isTabletCompact && styles.emptyHeroContentTabletCompact]}>
                     <LogoMark size={36} />
                     <Text style={styles.emptyTitle}>{t('home.createFirstCourse')}</Text>
-                    <Text style={styles.emptyBody}>{t('home.emptyBody')}</Text>
+                    <Text style={[styles.emptyBody, isTabletCompact && styles.emptyBodyTabletCompact]}>{t('home.emptyBody')}</Text>
                     <View style={styles.emptyActions}>
                       <PrimaryButton label={t('home.createCourse')} icon="add" onPress={openCreateCourse} />
                       <SecondaryButton label={t('home.quickRecording')} icon="mic-outline" onPress={startQuickRecording} />
@@ -380,13 +380,22 @@ const styles = StyleSheet.create({
   emptyRecent: { color: colors.textTertiary, fontSize: 12.5, marginTop: 18 },
   emptyGrid: { flexDirection: 'row', gap: 16, minHeight: 410, alignItems: 'stretch' },
   emptyGridCompact: { flexDirection: 'column', minHeight: 0 },
-  // Empty-state cards stay intrinsically sized; this only distributes the
-  // existing product information across a portrait iPad viewport so the lower
-  // half is intentional negative space rather than an accidental blank.
-  emptyGridTabletCompact: { minHeight: 650, justifyContent: 'space-between', gap: 24, paddingBottom: 12 },
+  // Portrait iPad: stack the empty-state cards naturally, top-aligned, at their
+  // intrinsic height. A previous attempt forced `minHeight: 650` +
+  // `space-between` to "distribute" them down the taller canvas, but on a real
+  // 11" portrait viewport that reads as an accidental hole between two cramped
+  // cards rather than deliberate negative space. Any leftover room now simply
+  // falls below the content, which is what a scroll view should do.
+  emptyGridTabletCompact: { gap: 24, paddingBottom: 12 },
   emptyHero: { flex: 1, justifyContent: 'center', overflow: 'hidden' },
   emptyHeroCompact: { flex: 0 },
   emptyHeroContent: { width: '100%', maxWidth: 430, alignSelf: 'center' },
+  // The 430/340 caps above are sized for the WIDE two-column layout, where the
+  // hero is a narrow column beside the steps card. On portrait iPad the hero is
+  // full-width, so those caps leave the copy stranded in a thin centred ribbon
+  // with large dead margins. These widen it to suit the single-column canvas.
+  emptyHeroContentTabletCompact: { maxWidth: 560 },
+  emptyBodyTabletCompact: { maxWidth: 520 },
   emptyTitle: { marginTop: 14, color: colors.ink, fontSize: 22, fontWeight: '800' },
   emptyBody: { marginTop: 8, maxWidth: 340, color: colors.textSecondary, fontSize: 13.5, lineHeight: 21 },
   emptyActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 22 },

@@ -21,6 +21,62 @@ export type ResendGateResult = {
 
 const RESEND_RATE_LIMIT_PATTERN = /only request this|rate limit|too many|security purposes/i;
 
+/**
+ * App Review Guideline 4 — Sign in with Apple must never make a user re-enter
+ * identity information Apple already supplied. `true` for any session whose
+ * primary or linked provider is `apple` (Supabase sets `app_metadata.provider`
+ * to the identity used for the CURRENT sign-in, and keeps every linked
+ * provider in `app_metadata.providers`).
+ */
+export function isAppleProvider(user: {
+  app_metadata?: { provider?: string | null; providers?: string[] | null } | null;
+} | null | undefined): boolean {
+  const meta = user?.app_metadata;
+  if (!meta) return false;
+  if (meta.provider === 'apple') return true;
+  return Array.isArray(meta.providers) && meta.providers.includes('apple');
+}
+
+/**
+ * Build a display-name candidate from whatever identity Apple (or the email)
+ * actually supplied — never a form the user has to fill in. Pure so the
+ * collision/fallback behavior is directly testable.
+ *
+ *   1. Apple's full name, if this authorization returned one.
+ *   2. the email local-part, humanized (dots/underscores → spaces, title-cased).
+ *   3. a neutral, non-empty fallback — profiles.username is NOT NULL, so this
+ *      candidate must never be blank.
+ */
+export function deriveDisplayNameCandidate(input: { fullName?: string | null; email?: string | null }): string {
+  const trimmedName = input.fullName?.trim();
+  if (trimmedName) return trimmedName.slice(0, 64);
+
+  const localPart = input.email?.split('@')[0]?.trim();
+  if (localPart) {
+    const humanized = localPart
+      .replace(/[._-]+/g, ' ')
+      .trim()
+      .split(/\s+/)
+      .map((word) => (word ? word[0].toUpperCase() + word.slice(1) : word))
+      .join(' ');
+    if (humanized) return humanized.slice(0, 64);
+  }
+
+  return 'Youmi User';
+}
+
+/**
+ * Disambiguate a username candidate against a "taken" signal (profiles.username
+ * has a unique index) without ever surfacing a form to the user. Deterministic
+ * per attempt so retries are reproducible in tests: attempt 0 is the bare
+ * candidate, attempt N>0 appends " N+1" (still readable, still under 64 chars).
+ */
+export function usernameAttempt(candidate: string, attempt: number): string {
+  if (attempt <= 0) return candidate;
+  const suffix = ` ${attempt + 1}`;
+  return candidate.slice(0, 64 - suffix.length) + suffix;
+}
+
 /** API-facing email: trim + lower-case only (preserves +aliases and domain). */
 export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();

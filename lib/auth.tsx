@@ -22,7 +22,10 @@ import { Platform } from 'react-native';
 
 import {
   classifyPasswordSignupResult,
+  deriveDisplayNameCandidate,
+  isAppleProvider,
   normalizeEmail,
+  usernameAttempt,
   type PasswordSignupClassification,
 } from './authSignup';
 import { GUEST_MODE_KEY } from './guest';
@@ -189,6 +192,39 @@ function mapProviderError(provider: 'apple' | 'google', message?: string): strin
     : 'Google sign-in could not be completed. Please try again.';
 }
 
+const CLAIM_USERNAME_MAX_ATTEMPTS = 4;
+
+/**
+ * App Review Guideline 4: claim a `profiles.username` in the BACKGROUND, with
+ * no form and no user interaction, so a provider (Apple) that already supplied
+ * an identity never makes the user re-enter it. `profiles.username` has a
+ * unique index, so a collision (23505) is expected and handled here — never
+ * surfaced as an error the user has to resolve. Best-effort: on repeated
+ * collision or any other failure this simply gives up; the user is never
+ * blocked either way (see `needsUsernameSetup` at every Apple-provider call
+ * site), and can still set/change their name later in Settings.
+ */
+async function claimUsernameSilently(userId: string, candidate: string): Promise<string | null> {
+  for (let attempt = 0; attempt < CLAIM_USERNAME_MAX_ATTEMPTS; attempt += 1) {
+    const value = usernameAttempt(candidate, attempt);
+    try {
+      const { error } = await supabase.from('profiles').upsert({ id: userId, username: value });
+      if (!error) return value;
+      const code = (error as { code?: string }).code;
+      const isCollision = code === '23505' || /duplicate|unique/i.test(error.message ?? '');
+      if (!isCollision) {
+        console.warn('[auth] silent username claim failed', error.message);
+        return null;
+      }
+      // Collision: try the next disambiguated candidate.
+    } catch (e) {
+      console.warn('[auth] silent username claim threw', e instanceof Error ? e.message : String(e));
+      return null;
+    }
+  }
+  return null;
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [user, setUser] = useState<User | null>(null);
@@ -232,12 +268,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (result.error) {
       console.warn('[auth] unable to load profile username', result.error.message);
       setUsername(metadataUsername);
-      setNeedsUsernameSetup(!metadataUsername);
+      setNeedsUsernameSetup(!metadataUsername && !isAppleProvider(nextUser));
       return;
     }
 
     const nextUsername = result.data?.username ?? metadataUsername;
     setUsername(nextUsername);
+
+    // App Review Guideline 4: Apple already supplied an identity for this
+    // account (on first authorization, or via the email itself) — never gate
+    // entry on typing a name again. If no username has landed yet (e.g. the
+    // first-authorization claim in signInWithApple hasn't resolved, or that
+    // authorization returned no name), derive one from the email in the
+    // background and let the user in immediately either way. They can still
+    // rename themselves later in Settings.
+    if (!nextUsername && isAppleProvider(nextUser)) {
+      setNeedsUsernameSetup(false);
+      const fallback = deriveDisplayNameCandidate({ email: nextUser.email ?? null });
+      void claimUsernameSilently(nextUser.id, fallback).then((claimed) => {
+        if (claimed) setUsername((current) => current ?? claimed);
+      });
+      return;
+    }
+
     setNeedsUsernameSetup(!nextUsername);
   }, []);
 
@@ -440,15 +493,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (error) return { error: mapProviderError('apple', error.message) };
     if (!data.session) return { error: 'Sign-in completed without a valid session.' };
 
-    // Apple returns the full name only on the *first* authorization. Persist it
-    // to auth metadata (best-effort) so the existing username/profile flow can
-    // offer it; never block sign-in on this, and never overwrite a chosen name.
+    // Apple returns the full name only on the *first* authorization. App Review
+    // Guideline 4: use it immediately — never make the user re-type an identity
+    // Apple just supplied. Persist to metadata AND claim profiles.username with
+    // it (best-effort, collision-tolerant, no form) so `needsUsernameSetup`
+    // resolves to false before applySessionState's loadUsername even runs. If
+    // Apple gives no name (repeat sign-in) there is nothing to claim here —
+    // loadUsername's Apple-provider fallback still guarantees entry is never
+    // blocked, deriving a placeholder from the email in the background instead.
     const display = [credential.fullName?.givenName, credential.fullName?.familyName]
       .filter(Boolean)
       .join(' ')
       .trim();
     if (display) {
       await supabase.auth.updateUser({ data: { full_name: display } }).catch(() => {});
+      await claimUsernameSilently(data.session.user.id, deriveDisplayNameCandidate({ fullName: display }));
     }
 
     await applySessionState(data.session);
