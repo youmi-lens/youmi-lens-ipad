@@ -22,7 +22,7 @@
 import { useEffect, useRef } from 'react';
 
 import { useAuth } from './auth';
-import { startRemoteProcessing } from './processRecording';
+import { ProcessingUnrecoverableError, startRemoteProcessing } from './processRecording';
 import { nextProcessingAction, mergeProcessingSnapshot } from './processingResume.mjs';
 import { useData } from './store';
 import { fetchRemoteRecording } from './syncRecording';
@@ -122,10 +122,49 @@ export function useProcessingOrchestrator(): void {
       // whole poll budget — the "stuck on Waiting…" symptom. Only a SUCCESSFUL
       // trigger enters 'processing' (and thus polling); a failure is terminal.
       void startRemoteProcessing({ remoteRecordingId, accessToken })
-        .then(() => {
+        .then(async (result) => {
+          // The server — never this client — decided the resume stage
+          // (transcription vs summary). 'already_processing' means another
+          // request/worker already owns the durable lease; that is normal
+          // processing, not an error. Both land in the same 'processing'
+          // state, which the main effect below then polls.
+          if (result.status === 'already_complete') {
+            // Nothing left to trigger — fetch the now-complete snapshot once
+            // directly, the same merge poll() would apply, so a recovery tap
+            // on an already-finished recording doesn't flash "Processing" for
+            // a no-op poll cycle first.
+            try {
+              const remote = await fetchRemoteRecording({ remoteRecordingId, accessToken, userId });
+              const reference = lectures.find((l) => l.id === lectureId) ?? {};
+              const patch = mergeProcessingSnapshot(reference, remote);
+              updateLecture(lectureId, { ...patch, lastSyncedAt: new Date().toISOString() });
+            } catch {
+              // Fall back to the normal processing->poll path; the poll loop
+              // will resolve this the same way on its next tick regardless.
+              updateLecture(lectureId, { processingStatus: 'processing', processingError: undefined });
+            }
+            return;
+          }
           updateLecture(lectureId, { processingStatus: 'processing', processingError: undefined });
         })
         .catch((error: unknown) => {
+          if (error instanceof ProcessingUnrecoverableError) {
+            // The backend found neither a persisted transcript nor usable
+            // uploaded audio. If a local recording file is still referenced,
+            // route the NEXT manual retry through re-upload (the server just
+            // told us its copy is unusable, regardless of what uploadStatus
+            // says) rather than a reprocess that would hit the same 409
+            // again. With no local audio either, this is genuinely terminal —
+            // flipping uploadStatus here still correctly yields no functional
+            // Retry action (see getLectureRecoveryState), never a silent loop.
+            const lecture = lectures.find((l) => l.id === lectureId);
+            updateLecture(lectureId, {
+              processingStatus: 'failed',
+              processingError: error.message,
+              ...(lecture?.localAudioUri ? { uploadStatus: 'upload_failed', uploadError: error.message } : {}),
+            });
+            return;
+          }
           updateLecture(lectureId, {
             processingStatus: 'failed',
             processingError: error instanceof Error ? error.message : 'Could not start processing.',

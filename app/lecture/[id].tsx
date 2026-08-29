@@ -22,6 +22,7 @@ import { LectureSectionHeader } from '@/components/LectureSectionHeader';
 import { MoveLectureToCourseModal } from '@/components/MoveLectureToCourseModal';
 import { RenameModal } from '@/components/RenameModal';
 import { PressableScale } from '@/components/PressableScale';
+import { SecondaryButton } from '@/components/SecondaryButton';
 import { StatusPill, StatusVariant } from '@/components/StatusPill';
 import { TranscriptReadList, TranscriptReadPrewarmer } from '@/components/TranscriptReadList';
 import { WorkspaceSidebar } from '@/components/WorkspaceSidebar';
@@ -55,6 +56,8 @@ import {
   resolveLectureAudioPlaybackState,
   shouldShowAudioPlayer,
 } from '@/lib/lectureLocalAudio';
+import { getLectureRecoveryState } from '@/lib/processingResume.mjs';
+import { retryLectureProcessing } from '@/lib/retryLectureProcessing';
 import { useRecordingNotes } from '@/lib/recordingNotes';
 import { requestCloudLectureAudio } from '@/lib/cloudLectureAudio.mjs';
 import { API_BASE_URL } from '@/lib/config';
@@ -95,6 +98,36 @@ export default function LectureDetailScreen() {
   const [renameVisible, setRenameVisible] = useState(false);
   const [moveVisible, setMoveVisible] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
+  // Local-only, transient: just prevents a double-tap in the brief window
+  // before the reset lands and the orchestrator's own in-flight guards
+  // (uploadingRef/startingRef in useProcessingOrchestrator) take over — those
+  // refs, not this flag, are what actually make a second concurrent request
+  // impossible. Cleared as soon as the lecture leaves the failed/upload_failed
+  // state that made Retry visible in the first place (see the effect below),
+  // never relied on alone, and never the reason Retry disappears after a
+  // relaunch — getLectureRecoveryState (persisted-field-driven) is.
+  const [retryingLectureId, setRetryingLectureId] = useState<string | null>(null);
+  // Single source of truth for whether/how this lecture can recover from a
+  // stuck upload or processing failure — see getLectureRecoveryState's own
+  // doc comment. Recomputed from persisted fields on every render, so it is
+  // correct immediately after an app relaunch with no dependency on any
+  // in-memory/component state. Null-safe: `lecture` can be undefined before
+  // the not-found guard below, and this must still be called unconditionally
+  // (React hooks rule) — the effect just below only reads `recovery`/
+  // `retryInFlight`, which are plain consts, not hooks, so they are safe to
+  // leave computed here even though they are only USED after the guard.
+  const recovery = getLectureRecoveryState(lecture);
+  const retryInFlight = retryingLectureId != null && retryingLectureId === lecture?.id;
+  // Clear the transient tap-guard once the reset has visibly taken effect —
+  // the orchestrator moved the lecture off the failed/upload_failed state
+  // that made Retry visible (into uploading/processing, or all the way to
+  // ready/failed-again). Never the source of truth for whether Retry shows;
+  // only for how long the button stays disabled after a tap.
+  useEffect(() => {
+    if (retryInFlight && recovery.kind !== 'retry') {
+      setRetryingLectureId(null);
+    }
+  }, [retryInFlight, recovery.kind]);
   const [cloudRetry, setCloudRetry] = useState(0);
   const [cloudAudio, setCloudAudio] = useState<{ url: string | null; loading: boolean; failed: boolean }>({
     url: null,
@@ -420,6 +453,12 @@ export default function LectureDetailScreen() {
           ? { label: t('status.failed'), variant: 'idle' as StatusVariant }
           : { label: t('status.recorded'), variant: 'idle' as StatusVariant };
 
+  const handleRetryProcessing = () => {
+    if (retryInFlight || recovery.kind !== 'retry') return;
+    setRetryingLectureId(lecture.id);
+    retryLectureProcessing(lecture, updateLecture);
+  };
+
   const openNotesEditor = () => {
     // Notebook (the handwritten + typed Pencil editor) is an iPad-only
     // experience. iPhone never mounts NotebookCanvas or navigates into the
@@ -586,6 +625,33 @@ export default function LectureDetailScreen() {
           )}
         </GlassCard>
       </View>
+
+      {recovery.kind === 'retry' ? (
+        <View style={[styles.recoveryBanner, isPhoneWidth && styles.recoveryBannerCompact]}>
+          <GlassCard padding={16}>
+            <View style={styles.recoveryRow}>
+              <Ionicons name="refresh-circle-outline" size={22} color={colors.warning} />
+              <Text style={styles.recoveryText}>{t('lecture.retryRecoveryMessage')}</Text>
+            </View>
+            <SecondaryButton
+              label={retryInFlight ? t('lecture.retryingProcessing') : t('lecture.retryProcessing')}
+              icon="refresh-outline"
+              onPress={handleRetryProcessing}
+              disabled={retryInFlight}
+              style={styles.recoveryButton}
+            />
+          </GlassCard>
+        </View>
+      ) : recovery.kind === 'unrecoverable' ? (
+        <View style={[styles.recoveryBanner, isPhoneWidth && styles.recoveryBannerCompact]}>
+          <GlassCard padding={16}>
+            <View style={styles.recoveryRow}>
+              <Ionicons name="alert-circle-outline" size={22} color={colors.textSecondary} />
+              <Text style={styles.recoveryText}>{t('lecture.retryUnrecoverableMessage')}</Text>
+            </View>
+          </GlassCard>
+        </View>
+      ) : null}
 
       {/* Tab bar */}
       <TranscriptReadPrewarmer {...transcriptReadProps} />
@@ -949,6 +1015,31 @@ const styles = StyleSheet.create({
   },
   playerWrapCompact: {
     paddingHorizontal: 18,
+  },
+  recoveryBanner: {
+    paddingHorizontal: 38,
+    marginBottom: spacing.md,
+    maxWidth: 1040,
+    width: '100%',
+    alignSelf: 'center',
+  },
+  recoveryBannerCompact: {
+    paddingHorizontal: 18,
+  },
+  recoveryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: spacing.md,
+  },
+  recoveryText: {
+    flex: 1,
+    color: colors.textPrimary,
+    fontSize: fontSize.md,
+    fontWeight: '600',
+  },
+  recoveryButton: {
+    alignSelf: 'flex-start',
   },
   compactPlayer: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   compactPlayerNarrow: { flexWrap: 'wrap' },

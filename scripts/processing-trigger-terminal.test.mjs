@@ -53,7 +53,13 @@ check('startProcessing does NOT mark processing before the trigger request', () 
     optimisticProcessingAt > triggerAt,
     "'processing' must be set only after startRemoteProcessing (in .then), never optimistically before it",
   );
-  assert.match(fn, /\.then\(\(\) => \{[\s\S]{0,120}processingStatus: 'processing'/);
+  // Processing-recovery contract (already_complete / unrecoverable) added a
+  // branch before the unconditional 'processing' write, so this no longer
+  // has to be the first thing inside .then() — the index-based check above
+  // is the real invariant guard. This just confirms the write still lives
+  // inside the success handler itself, not floated out to module scope.
+  const thenAt = fn.indexOf('.then(');
+  assert.ok(thenAt >= 0 && thenAt < optimisticProcessingAt, "'processing' write is inside .then(), not before it");
 });
 
 check('a failed trigger goes straight to terminal failed', () => {
@@ -61,7 +67,10 @@ check('a failed trigger goes straight to terminal failed', () => {
     orchestrator.indexOf('const startProcessing ='),
     orchestrator.indexOf('const startPoll ='),
   );
-  assert.match(fn, /\.catch\(\(error: unknown\) => \{[\s\S]{0,200}processingStatus: 'failed'/);
+  const catchAt = fn.indexOf('.catch((error: unknown) => {');
+  const failedAt = fn.indexOf("processingStatus: 'failed'", catchAt);
+  assert.ok(catchAt >= 0, 'startProcessing must have a .catch handler');
+  assert.ok(failedAt > catchAt, "'failed' is set inside the .catch handler");
 });
 
 check("nextProcessingAction keeps 'failed' terminal (no auto-retry loop)", () => {
