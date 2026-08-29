@@ -30,6 +30,7 @@ import { useGuestRecordingUsage } from '@/lib/guest';
 import { useI18n, localizeSystemDefaultTitle } from '@/lib/i18n';
 import { COURSE_PRESETS } from '@/lib/models';
 import { fetchPlanStatus, PlanStatus } from '@/lib/planStatus';
+import { isLectureComplete } from '@/lib/processingResume.mjs';
 import { useData } from '@/lib/store';
 
 type IconName = ComponentProps<typeof Ionicons>['name'];
@@ -272,7 +273,9 @@ export default function RecordHomeScreen() {
                           onPress={() =>
                             inProgress
                               ? router.push({ pathname: '/recording', params: { lectureId: lecture.id } })
-                              : router.push({ pathname: '/lecture/[id]', params: { id: lecture.id } })
+                              : isLectureComplete(lecture)
+                                ? router.push({ pathname: '/lecture/[id]', params: { id: lecture.id } })
+                                : router.push({ pathname: '/processing', params: { lectureId: lecture.id } })
                           }
                           scaleTo={0.995}
                           pressedStyle={styles.lectureRowPressed}

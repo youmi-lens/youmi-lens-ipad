@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 
 import {
   isCommittedLecture,
+  isLectureComplete,
   nextProcessingAction,
   mergeProcessingSnapshot,
 } from '../lib/processingResume.mjs';
@@ -186,5 +187,15 @@ const afterTranscriptEdit = mergeProcessingSnapshot(
 assert.equal('transcript' in afterTranscriptEdit, false, 'user English transcript preserved');
 assert.equal('transcriptZh' in afterTranscriptEdit, false);
 assert.equal('translatedTranscript' in afterTranscriptEdit, false);
+
+// ---- isLectureComplete: the single canonical routing/gating predicate ----
+// CASE 9 / CASE 15: only 'ready' is complete — never merely uploaded, never
+// merely a live draft, never a terminal failure.
+assert.equal(isLectureComplete({ processingStatus: 'ready' }), true);
+assert.equal(isLectureComplete({ processingStatus: 'processing' }), false);
+assert.equal(isLectureComplete({ processingStatus: 'not_started' }), false);
+assert.equal(isLectureComplete({ processingStatus: 'failed' }), false);
+assert.equal(isLectureComplete(undefined), false);
+assert.equal(isLectureComplete(null), false);
 
 console.log('Processing resume/orchestration tests passed.');

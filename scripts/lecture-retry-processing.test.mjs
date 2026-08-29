@@ -207,15 +207,37 @@ assert.match(orchestrator, /result\.status === 'already_complete'/, 'already_com
 }
 
 // 409 unrecoverable: must be distinguished from a generic failure, and must
-// only re-route to upload (uploadStatus: 'upload_failed') when local audio is
-// still present — never unconditionally, and never silently looping (no
-// upload/process call is made directly in this catch — it only resets state
-// for the NEXT manual tap, matching "do not loop infinitely").
+// only auto-fall-back into an upload retry (uploadStatus: 'not_uploaded')
+// when local audio is still present — never unconditionally. One user tap
+// must be enough (CASE 6): the fallback sets state, not a direct network
+// call, so the SAME reactive orchestrator effect (not a new retry loop)
+// picks the upload up on its next pass — never a second manual tap, and
+// never a synchronous loop (no upload/process call is made directly inside
+// this catch).
 {
   const fn = orchestrator.slice(orchestrator.indexOf('const startProcessing ='), orchestrator.indexOf('const startPoll ='));
   assert.match(fn, /ProcessingUnrecoverableError/, 'ProcessingUnrecoverableError is imported/handled');
   assert.match(fn, /lecture\?\.localAudioUri/, 'unrecoverable re-routing is gated on local audio actually being present');
   assert.doesNotMatch(fn, /ProcessingUnrecoverableError[\s\S]{0,400}void startRemoteProcessing/, 'unrecoverable catch never re-invokes the network call itself (no automatic loop)');
+  // CASE 6 — one-tap fallback: local audio present -> reset straight to
+  // 'not_uploaded'/'not_started' (auto-picked-up by the reactive effect),
+  // NOT the old terminal 'upload_failed' that waited on a second manual tap.
+  assert.match(
+    fn,
+    /uploadStatus:\s*'not_uploaded'/,
+    'CASE 6: local-audio fallback resets uploadStatus to not_uploaded so the orchestrator auto-retries the upload — no second manual tap required',
+  );
+  assert.doesNotMatch(
+    fn,
+    /lecture\?\.localAudioUri\s*\?\s*\{\s*uploadStatus:\s*'upload_failed'/,
+    'CASE 6: the local-audio branch must not land on the terminal upload_failed state (that would require a second manual tap)',
+  );
+  // CASE 7 — no local audio: still genuinely terminal (processingStatus stays 'failed').
+  assert.match(
+    fn,
+    /processingStatus:\s*lecture\?\.localAudioUri\s*\?\s*'not_started'\s*:\s*'failed'/,
+    'CASE 7: with no local audio, the lecture still lands on terminal failed — no fallback possible',
+  );
 }
 
 console.log('\nprocessRecording.ts — response contract');
@@ -231,5 +253,46 @@ assert.match(detailScreen, /getLectureRecoveryState\(lecture\)/, 'screen consult
 assert.match(detailScreen, /retryLectureProcessing\(lecture, updateLecture\)/, 'screen calls the shared retry orchestrator, not a bespoke inline implementation');
 assert.doesNotMatch(detailScreen, /retryTranscript|retrySummary|regenerateSummary\(/i, 'no separate Retry Transcript / Retry Summary / regenerate actions — exactly one recovery action');
 assert.match(detailScreen, /disabled={retryInFlight}/, 'Retry button is disabled while a retry is in flight (button-level dedup)');
+
+console.log('\nProcessing gate — canonical routing (CASE 1/8/10/11)');
+
+// An incomplete-but-committed lecture must route to the Processing gate, not
+// straight into Lecture Detail, from every normal list entry point — never
+// only from one list (that would let a reviewer bypass the gate by tapping a
+// different list). isLectureComplete is the single shared predicate so the
+// gate and the routing can never drift apart.
+{
+  const home = read('../app/(tabs)/index.tsx');
+  assert.match(home, /import \{ isLectureComplete \} from '@\/lib\/processingResume\.mjs'/, 'home list imports the shared completion predicate');
+  assert.match(
+    home,
+    /isLectureComplete\(lecture\)\s*\?\s*router\.push\(\{ pathname: '\/lecture\/\[id\]'.*\}\)\s*:\s*router\.push\(\{ pathname: '\/processing'/s,
+    'home recent-lectures tap: complete -> Lecture Detail, incomplete -> Processing gate',
+  );
+
+  const course = read('../app/course/[id].tsx');
+  assert.match(course, /import \{ isLectureComplete \} from '@\/lib\/processingResume\.mjs'/, 'course lecture list imports the shared completion predicate');
+  assert.match(
+    course,
+    /if \(!isLectureComplete\(lecture\)\) \{\s*router\.push\(\{ pathname: '\/processing'/,
+    'course lecture list: incomplete lecture routes to the Processing gate before it can reach Lecture Detail',
+  );
+}
+
+console.log('\nProcessing screen — View Lecture gating (CASE 15)');
+
+// View Lecture must resolve into Lecture Detail ONLY once the lecture is
+// actually complete — never merely because the lecture record exists. This
+// deliberately supersedes the pre-gate design (View Lecture was always
+// reachable); the gate is now the product requirement.
+{
+  const processingScreen = read('../app/processing.tsx');
+  assert.match(processingScreen, /import \{ isLectureComplete \} from '@\/lib\/processingResume\.mjs'/, 'Processing screen imports the shared completion predicate');
+  assert.match(
+    processingScreen,
+    /if \(!isLectureComplete\(lecture\)\) \{ Alert\.alert\(t\('processing\.notReadyAlert'\)\); return; \}/,
+    'View Lecture is gated: incomplete shows the wait message, never navigates into Lecture Detail',
+  );
+}
 
 console.log('\nAll lecture retry-processing tests passed.');

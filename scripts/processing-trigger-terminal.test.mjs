@@ -17,9 +17,17 @@
  * poll to clobber it. nextProcessingAction already treats 'failed' as terminal
  * ('none'), so it settles immediately and the manual Retry drives recovery.
  *
- * Invariant: AI processing failure must never trap the user — "View Lecture"
- * on app/processing.tsx is gated on the lecture existing, not on processing
- * completing.
+ * Invariant (unchanged by the later Processing-gate redesign): a failed/
+ * stuck job must never leave "View Lecture" a DEAD control — the button
+ * itself stays rendered/tappable purely because `lecture` exists, never
+ * hidden or disabled outright. What changed later (see
+ * scripts/lecture-retry-processing.test.mjs, "Processing screen — View
+ * Lecture gating") is what a TAP does: it now resolves into a brief "still
+ * processing" message instead of Lecture Detail until the lecture is
+ * actually complete (isLectureComplete) — the reviewer-facing product
+ * requirement is to keep the user in the Processing flow until ready, not to
+ * let a failed run silently drop them into a misleading blank Lecture
+ * Detail. Both are true at once: never a dead button, never a bypass.
  *
  * Source-level guards (the orchestrator is a React hook; the behaviour was
  * confirmed against the physical staging device).
@@ -80,15 +88,19 @@ check("nextProcessingAction keeps 'failed' terminal (no auto-retry loop)", () =>
   assert.match(resume, /\/\/ 'failed'[\s\S]{0,80}return 'none'/);
 });
 
-console.log('\nInvariant — processing failure never traps the user');
+console.log('\nInvariant — View Lecture is never a dead/hidden control');
 
-check('View Lecture is available whenever the lecture exists, not gated on done', () => {
-  // The primary action is gated on `lecture`, not on processingDone/'ready'.
+check('View Lecture stays rendered/tappable whenever the lecture exists (render-level, not done-gated)', () => {
+  // The primary action's RENDER condition is gated on `lecture` existing,
+  // not on processingDone/'ready' — a failed job must never hide or disable
+  // the button outright. What the tap itself does is separately gated inside
+  // viewLecture() — see "Processing screen — View Lecture gating" in
+  // scripts/lecture-retry-processing.test.mjs.
   assert.match(processingScreen, /\{lecture \? <PrimaryButton label=\{t\('processing\.viewLecture'\)/);
   assert.doesNotMatch(
     processingScreen,
     /\{processingDone \? <PrimaryButton label=\{t\('processing\.viewLecture'\)/,
-    'View Lecture must not be gated on processingDone',
+    'View Lecture must not be RENDER-gated on processingDone (it must stay visible/tappable; the completion check lives inside the tap handler instead)',
   );
 });
 

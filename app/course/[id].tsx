@@ -15,6 +15,7 @@ import { formatDate, formatDuration, formatShortDate } from '@/lib/format';
 import { pickAndImportPdf } from '@/lib/importMaterial';
 import { useI18n, localizeSystemDefaultTitle } from '@/lib/i18n';
 import type { CourseMaterial, Lecture } from '@/lib/models';
+import { isLectureComplete } from '@/lib/processingResume.mjs';
 import { useData } from '@/lib/store';
 
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
@@ -170,6 +171,10 @@ export default function CourseDetailScreen() {
     const lecture = lectures.find((l) => l.id === lectureId);
     if (lecture?.status === 'in_progress') {
       router.push({ pathname: '/recording', params: { lectureId } });
+      return;
+    }
+    if (!isLectureComplete(lecture)) {
+      router.push({ pathname: '/processing', params: { lectureId } });
       return;
     }
     router.push({ pathname: '/lecture/[id]', params: { id: lectureId } });

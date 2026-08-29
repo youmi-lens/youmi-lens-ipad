@@ -150,18 +150,27 @@ export function useProcessingOrchestrator(): void {
         .catch((error: unknown) => {
           if (error instanceof ProcessingUnrecoverableError) {
             // The backend found neither a persisted transcript nor usable
-            // uploaded audio. If a local recording file is still referenced,
-            // route the NEXT manual retry through re-upload (the server just
-            // told us its copy is unusable, regardless of what uploadStatus
-            // says) rather than a reprocess that would hit the same 409
-            // again. With no local audio either, this is genuinely terminal —
-            // flipping uploadStatus here still correctly yields no functional
-            // Retry action (see getLectureRecoveryState), never a silent loop.
+            // uploaded audio. One-tap recovery: if a local recording file is
+            // still referenced, transition STRAIGHT into an upload retry —
+            // not a terminal 'upload_failed' waiting on a second manual tap.
+            // This effect re-runs on every lecture-state change, so setting
+            // uploadStatus:'not_uploaded' here is picked up by the SAME
+            // reactive loop on its very next pass and nextProcessingAction()
+            // naturally drives upload -> (on success) start_processing,
+            // continuing the pipeline with no new retry machinery. Loop
+            // safety is inherited, not new: if the re-upload itself fails,
+            // startUpload's own catch lands on the existing terminal
+            // 'upload_failed' (manual-retry-only), and each attempt requires
+            // a full async upload round-trip, so this can never tighten into
+            // a synchronous loop. With no local audio at all, this is
+            // genuinely terminal — see getLectureRecoveryState.
             const lecture = lectures.find((l) => l.id === lectureId);
             updateLecture(lectureId, {
-              processingStatus: 'failed',
+              processingStatus: lecture?.localAudioUri ? 'not_started' : 'failed',
               processingError: error.message,
-              ...(lecture?.localAudioUri ? { uploadStatus: 'upload_failed', uploadError: error.message } : {}),
+              ...(lecture?.localAudioUri
+                ? { uploadStatus: 'not_uploaded', uploadError: undefined }
+                : {}),
             });
             return;
           }

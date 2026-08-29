@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { GlassCard } from '@/components/GlassCard';
@@ -11,6 +11,7 @@ import { WorkspaceSidebar } from '@/components/WorkspaceSidebar';
 import { colors, fontSize, radius, spacing } from '@/constants/theme';
 import { formatDateTime, formatDuration } from '@/lib/format';
 import { useI18n, localizeSystemDefaultTitle } from '@/lib/i18n';
+import { isLectureComplete } from '@/lib/processingResume.mjs';
 import { useData } from '@/lib/store';
 
 type IndicatorState = 'done' | 'active' | 'pending' | 'failed';
@@ -60,7 +61,15 @@ export default function ProcessingScreen() {
     processingStatus === 'ready' ? 'done' : processingStatus === 'processing' ? 'active' : processingStatus === 'failed' ? 'failed' : 'pending';
 
   const backToLectures = () => router.replace('/');
-  const viewLecture = () => lecture ? router.replace({ pathname: '/lecture/[id]', params: { id: lecture.id } }) : router.replace('/');
+  // This screen is the canonical gate for any incomplete lecture — View
+  // Lecture must never let the user skip ahead into a Lecture Detail that
+  // isn't ready yet (App Review-adjacent: a misleading blank Transcript/
+  // Summary screen is worse than a brief "still processing" message).
+  const viewLecture = () => {
+    if (!lecture) { router.replace('/'); return; }
+    if (!isLectureComplete(lecture)) { Alert.alert(t('processing.notReadyAlert')); return; }
+    router.replace({ pathname: '/lecture/[id]', params: { id: lecture.id } });
+  };
 
   return (
     <View style={styles.root}>
@@ -121,12 +130,12 @@ export default function ProcessingScreen() {
           </GlassCard>
 
           <View style={styles.actions}>
-            {/* HARD INVARIANT: AI processing failure/stall must NEVER trap the
-                user outside the Lecture. The recording is valid content the
-                moment it is captured, so "View Lecture" is available as soon as
-                the lecture exists — not gated on processing completing.
-                Transcript/summary simply show pending/unavailable inside until
-                (or unless) processing finishes. */}
+            {/* Processing is the canonical gate for an incomplete lecture:
+                View Lecture stays tappable (never a dead/disabled control),
+                but resolves into a brief "still processing" message instead
+                of Lecture Detail until isLectureComplete() is true — see
+                viewLecture() above. Back to Lectures always works; the list
+                itself re-routes back here on the next tap while incomplete. */}
             {lecture ? <PrimaryButton label={t('processing.viewLecture')} icon="document-text" onPress={viewLecture} /> : null}
             <SecondaryButton label={t('processing.backToLectures')} icon="chevron-back" onPress={backToLectures} />
           </View>
