@@ -124,17 +124,33 @@ check('a genuine ownership conflict (different pre-existing account) is DETECTED
   assert.doesNotMatch(guestIap, /\.from\(['"]/);
 });
 
-console.log('\nG7/G8 — backend ownership: no cross-account claim, no transfer (unmodified)');
-check('G7: assertSubscriptionIdentity requires appAccountToken === the verifying user — a different account cannot claim it', () => {
-  assert.match(iapSubscriptions, /if \(verified\.appAccountToken\.toLowerCase\(\) !== requestingUserId\.toLowerCase\(\)\) \{/);
-  assert.match(iapSubscriptions, /throw new SubscriptionAccountTokenError/);
+console.log('\nG7/G8 — backend ownership: Guest cross-device restore fixed, permanent-account anti-theft intact');
+// App Review 5.1.1(v) clarification (post Build-47 physical QA): appAccountToken
+// is permanently fixed to whichever identity made the ORIGINAL purchase, so a
+// legitimate Guest restore on a SECOND device (a different anonymous UUID) or a
+// later upgrade to a permanent account can never equal it. The backend no
+// longer gates ownership on that equality — see claimSubscriptionBinding's doc
+// comment in server/iapSubscriptions.mjs for the full model.
+check('G7: anonymous (Guest) callers never touch app_store_subscription_bindings at all — verifyAndPersistSubscription skips claimSubscriptionBinding when isAnonymous', () => {
+  const fn = iapSubscriptions.slice(iapSubscriptions.indexOf('export async function verifyAndPersistSubscription'), iapSubscriptions.length);
+  assert.match(fn, /if \(!isAnonymous\) \{\s*\n\s*await claimSubscriptionBinding\(db, userId, verified\)/);
 });
-check('G8: claimSubscriptionBinding rejects a second user for an existing originalTransactionId — no transfer path exists', () => {
+check('G7: assertSubscriptionIdentity no longer compares appAccountToken to a requesting user id (the fixed contradiction) — presence-only', () => {
+  const fn = iapSubscriptions.slice(iapSubscriptions.indexOf('export function assertSubscriptionIdentity'), iapSubscriptions.indexOf('export async function isAnonymousUser'));
+  assert.doesNotMatch(fn, /requestingUserId/);
+  assert.match(fn, /throw new SubscriptionAccountTokenError\('Subscription is missing appAccountToken'\)/);
+});
+check('G8: claimSubscriptionBinding rejects a DIFFERENT PERMANENT owner — no unrelated permanent account can ever take canonical ownership', () => {
   const fn = iapSubscriptions.slice(iapSubscriptions.indexOf('export async function claimSubscriptionBinding'), iapSubscriptions.indexOf('export function shouldReplaceSubscriptionState'));
-  assert.match(fn, /if \(existing\.owner_state !== 'active' \|\| existing\.user_id !== userId\) \{/);
-  assert.match(fn, /throw new SubscriptionAlreadyLinkedError/);
-  // the race-condition branch (23505) enforces the SAME rule, not a bypass.
+  assert.match(fn, /const existingOwnerIsAnonymous = await isAnonymousUser\(db, existing\.user_id\)/);
+  assert.match(fn, /if \(!existingOwnerIsAnonymous\) \{\s*\n\s*throw new SubscriptionAlreadyLinkedError/);
+  // the race-condition branch (23505) enforces the SAME anti-theft rule, not a bypass.
   assert.match(fn, /if \(raced\?\.owner_state === 'active' && raced\.user_id === userId/);
+});
+check('G8: claimSubscriptionBinding MAY promote a permanent claim over an anonymous owner (the actual fix) — this is the only case ownership moves', () => {
+  const fn = iapSubscriptions.slice(iapSubscriptions.indexOf('export async function claimSubscriptionBinding'), iapSubscriptions.indexOf('export function shouldReplaceSubscriptionState'));
+  assert.match(fn, /\.update\(promoted\)/);
+  assert.match(fn, /\.eq\('user_id', existing\.user_id\)/); // compare-and-swap: only the checked anonymous owner is replaced
 });
 check('AlreadyLinkedError / already-linked responses are still wired through the route (unchanged)', () => {
   assert.match(iapRoutes, /AlreadyLinkedError/);
@@ -169,13 +185,24 @@ console.log(`\nguest-purchase-architecture (G1–G10): ${passed} checks passed`)
 // ══ Mutation guards ═══════════════════════════════════════════════════════
 console.log('\nMutation guards');
 
-check('M4: allowing ownership transfer (skip the appAccountToken check) makes the G7 assertion fail', () => {
+check('M4: allowing an UNRELATED permanent account to bypass the anonymity check makes the G8 assertion fail', () => {
   const mutant = iapSubscriptions.replace(
-    "if (verified.appAccountToken.toLowerCase() !== requestingUserId.toLowerCase()) {\n    throw new SubscriptionAccountTokenError('Subscription appAccountToken does not match this account')\n  }",
-    '// ownership check removed',
+    'if (!existingOwnerIsAnonymous) {\n      throw new SubscriptionAlreadyLinkedError(\'Subscription is already linked to another account\')\n    }',
+    '// anti-theft check removed',
   );
   assert.notEqual(mutant, iapSubscriptions);
-  assert.doesNotMatch(mutant, /if \(verified\.appAccountToken\.toLowerCase\(\) !== requestingUserId\.toLowerCase\(\)\) \{/);
+  const fn = mutant.slice(mutant.indexOf('export async function claimSubscriptionBinding'), mutant.indexOf('export function shouldReplaceSubscriptionState'));
+  assert.doesNotMatch(fn, /if \(!existingOwnerIsAnonymous\) \{/);
+});
+
+check('M4b: making anonymous callers claim a binding (reintroducing the original bug) makes the G7 assertion fail', () => {
+  const mutant = iapSubscriptions.replace(
+    'if (!isAnonymous) {\n    await claimSubscriptionBinding(db, userId, verified)\n  } else {',
+    'if (true) {\n    await claimSubscriptionBinding(db, userId, verified)\n  } else {',
+  );
+  assert.notEqual(mutant, iapSubscriptions);
+  const fn = mutant.slice(mutant.indexOf('export async function verifyAndPersistSubscription'), mutant.length);
+  assert.doesNotMatch(fn, /if \(!isAnonymous\) \{\s*\n\s*await claimSubscriptionBinding\(db, userId, verified\)/);
 });
 
 check('M5: requiring registration before purchase again makes the G2 assertion fail', () => {

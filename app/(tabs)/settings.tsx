@@ -17,6 +17,7 @@ import { colors, layout, radius } from '@/constants/theme';
 import { deleteAccount } from '@/lib/account';
 import { useAuth } from '@/lib/auth';
 import { formatDate } from '@/lib/format';
+import { ensureGuestIapIdentity, hasGuestIapIdentity } from '@/lib/guestIap';
 import { useI18n } from '@/lib/i18n';
 import { fetchPlanStatus, PlanStatus, safeAccessLabel } from '@/lib/planStatus';
 import { purchaseService } from '@/lib/purchases';
@@ -118,6 +119,12 @@ export default function SettingsScreen() {
   const [planStatus, setPlanStatus] = useState<PlanStatus | null>(null);
   const [planLoading, setPlanLoading] = useState(true);
   const [planError, setPlanError] = useState<string | null>(null);
+  // App Review 5.1.1(v): a Guest's Student Basic row must not read "Explore"
+  // forever after a real purchase — this mirrors app/plans.tsx's read-only
+  // guest status check (lib/guestIap.ts), reusing an EXISTING guest-IAP
+  // identity if one is already on this device and never minting a new one
+  // just from viewing Settings.
+  const [guestPlanStatus, setGuestPlanStatus] = useState<PlanStatus | null>(null);
   const [usernameModalVisible, setUsernameModalVisible] = useState(false);
   const [usernameSaving, setUsernameSaving] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
@@ -139,13 +146,31 @@ export default function SettingsScreen() {
       setPlanLoading(false);
     }
   }, [session?.access_token, t]);
+  const loadGuestPlan = useCallback(async () => {
+    if (!(await hasGuestIapIdentity())) {
+      setGuestPlanStatus(null);
+      return;
+    }
+    const identity = await ensureGuestIapIdentity();
+    if (!identity) {
+      setGuestPlanStatus(null);
+      return;
+    }
+    try {
+      setGuestPlanStatus(await fetchPlanStatus(identity.accessToken));
+    } catch {
+      // Silent: this row falls back to "Explore" on failure, same as a
+      // never-purchased guest — never a blocking error for a read-only check.
+    }
+  }, []);
   // Bumped once per tab focus, never by plan/account data — the page
   // heading's entrance below keys on this alone.
   const [focusKey, setFocusKey] = useState(0);
   useFocusEffect(useCallback(() => {
     setFocusKey((key) => key + 1);
-    void loadPlan();
-  }, [loadPlan]));
+    if (isGuest) void loadGuestPlan();
+    else void loadPlan();
+  }, [isGuest, loadGuestPlan, loadPlan]));
 
   const email = user?.email ?? t('sidebar.signedIn');
   const displayName = username ?? email;
@@ -159,7 +184,16 @@ export default function SettingsScreen() {
   };
   const handleGuestSignIn = async () => { await exitGuest(); router.replace('/auth'); };
   const handleRestorePurchases = async () => {
-    if (!session?.access_token || isGuest) {
+    // App Review 5.1.1(v): Apple purchase restoration must never require a
+    // Youmi sign-in. This card is already hidden for Guests (see the isGuest
+    // branch above, which routes to Plans — where Restore Purchases works
+    // fully without sign-in), so this branch only guards a future entry
+    // point; it must redirect, never claim sign-in is required.
+    if (isGuest) {
+      router.push('/plans');
+      return;
+    }
+    if (!session?.access_token) {
       Alert.alert(t('settings.alerts.signInRequiredTitle'), t('settings.alerts.refreshSignInBody'));
       return;
     }
@@ -268,7 +302,7 @@ export default function SettingsScreen() {
                         <Text style={styles.profileEmail}>{t('settings.account.guestSubtitle')}</Text>
                       </View>
                     </View>
-                    <SettingRow icon="sparkles-outline" label={t('settings.plan.studentBasicRow')} detail={t('settings.plan.studentBasicDetail')} value={t('settings.plan.explore')} onPress={() => router.push('/plans')} />
+                    <SettingRow icon="sparkles-outline" label={t('settings.plan.studentBasicRow')} detail={t('settings.plan.studentBasicDetail')} value={guestPlanStatus?.entitlement?.active ? t('settings.plan.view') : t('settings.plan.explore')} onPress={() => router.push('/plans')} />
                     <SettingRow icon="log-in-outline" label={t('settings.account.signIn')} detail={t('settings.account.signInDetail')} onPress={handleGuestSignIn} roomy={!isCompact} last />
                   </>
                 ) : (
