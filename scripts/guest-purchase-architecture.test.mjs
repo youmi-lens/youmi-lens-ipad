@@ -52,8 +52,10 @@ check('G1: the real guest Settings composition exposes a direct Plans route', ()
   assert.match(guestBranch, /router\.push\('\/plans'\)/);
   assert.match(guestBranch, /settings\.plan\.studentBasicRow/);
 });
-check('G1: purchase visibility defaults to true for a guest with no known status (never hidden by a main-account-only gate)', () => {
-  assert.match(plans, /const purchaseVisible = isGuest\s*\n\s*\? \(currentStatus \? shouldShowPurchaseEntry\(currentStatus\) : true\)/);
+check('G1: live subscriptions are not blocked by the retired Student Basic sales gate, while a guest with no known status remains purchasable', () => {
+  assert.match(plans, /const purchaseVisible = SUBSCRIPTIONS_LIVE\s*\n\s*\? !activeEntitlement/);
+  assert.match(plans, /: isGuest\s*\n\s*\? \(currentStatus \? shouldShowPurchaseEntry\(currentStatus\) : true\)/);
+  assert.match(plans, /const purchaseUnavailable = !SUBSCRIPTIONS_LIVE && currentStatus\?\.studentPass\?\.isPurchasable === false/);
 });
 check('G2: handlePurchase no longer alerts sign-in-required for a guest — it resolves a guest-IAP identity instead', () => {
   const fn = plans.slice(plans.indexOf('const handlePurchase = async () => {'), plans.indexOf('const handleRefreshAccess = async () => {'));

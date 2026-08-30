@@ -214,14 +214,21 @@ export default function PlansScreen() {
     : (planStatusAccountId === accountId ? planStatus : null);
   const activeEntitlement = currentStatus?.entitlement?.active ? currentStatus.entitlement : null;
   const activeSubscriptionPlan = planForSubscriptionProductId(activeEntitlement?.productId);
-  // A guest with NO known status yet (never purchased, no identity created)
-  // must default to purchasable — shouldShowPurchaseEntry(null) is false,
-  // which is correct for "still loading" on the main-account path but wrong
-  // for "genuinely nothing to hide it" on the guest path.
-  const purchaseVisible = isGuest
-    ? (currentStatus ? shouldShowPurchaseEntry(currentStatus) : true)
-    : shouldShowPurchaseEntry(currentStatus);
-  const purchaseUnavailable = currentStatus?.studentPass?.isPurchasable === false;
+  // The legacy Student Basic purchase flag only governs the retired
+  // single-pass product. It must not hide the live Monthly/Annual StoreKit
+  // subscriptions once those products are enabled and loaded. A genuinely
+  // active entitlement still suppresses a duplicate subscription entry.
+  // Outside the live surface, retain the legacy availability behavior.
+  const purchaseVisible = SUBSCRIPTIONS_LIVE
+    ? !activeEntitlement
+    // A guest with NO known status yet (never purchased, no identity created)
+    // must default to purchasable — shouldShowPurchaseEntry(null) is false,
+    // which is correct for "still loading" on the main-account path but wrong
+    // for "genuinely nothing to hide it" on the guest path.
+    : isGuest
+      ? (currentStatus ? shouldShowPurchaseEntry(currentStatus) : true)
+      : shouldShowPurchaseEntry(currentStatus);
+  const purchaseUnavailable = !SUBSCRIPTIONS_LIVE && currentStatus?.studentPass?.isPurchasable === false;
   const selectedProduct = products[selectedPlan];
   const purchaseDisabled = !purchaseVisible || productLoading || !selectedProduct || busy !== null;
   const studentBasicStatus = getStudentBasicStatus(currentStatus, isGuest ? guestStatusLoading : statusLoading);
