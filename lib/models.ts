@@ -104,6 +104,13 @@ export type Course = {
 export type LectureUploadStatus = 'not_uploaded' | 'uploading' | 'uploaded' | 'upload_failed';
 export type LectureProcessingStatus = 'not_started' | 'processing' | 'ready' | 'failed';
 
+/** Local-only evidence retained when a legacy recovered recording has multiple files. */
+export type LectureAudioSegment = {
+  uri: string;
+  role: 'prior_canonical' | 'resumed_segment';
+  createdAt: string;
+};
+
 export type Lecture = {
   id: string;
   courseId: string;
@@ -120,6 +127,63 @@ export type Lecture = {
   durationMillis: number;
   /** Local file URI of the captured audio. */
   localAudioUri: string | null;
+  /**
+   * Legacy recovery can create a second audio file. Until an assembled asset is
+   * validated, this blocks upload/processing and preserves every source URI.
+   */
+  audioAssemblyStatus?: 'required';
+  audioAssemblyReason?: string;
+  audioSegments?: LectureAudioSegment[];
+  /**
+   * ISO timestamp of when legacy-resume audio recovery successfully
+   * assembled `audioSegments` into `localAudioUri`. Provenance only — the
+   * source segments and their metadata are never deleted after recovery.
+   */
+  audioAssemblyCompletedAt?: string;
+  /**
+   * Recovery-time media integrity diagnostics. `recordingEngine` describes
+   * only the current/last engine, not a complete media manifest — a
+   * lecture can carry recoverable audio from more than one historical
+   * engine. When source discovery cannot prove a safe, non-overlapping
+   * order across all discovered media (see lib/recording/
+   * mediaSourceDiscovery.ts), recovery is blocked rather than silently
+   * uploading an incomplete subset, and this records why — auditable even
+   * though nothing was lost (every source stays exactly where it was).
+   */
+  mediaIntegrityStatus?: 'ambiguous_overlap' | 'durable_export_failed' | 'legacy_persist_failed' | 'no_sources';
+  mediaIntegrityDetail?: string;
+  mediaIntegrityCheckedAt?: string;
+  /**
+   * `recordingEngine`/`audioAssemblyStatus` only ever describe a SINGLE
+   * legacy-resume episode. A lecture that already finished that flow (and
+   * even already uploaded + finished AI processing) can still be missing
+   * validated media from an earlier, separate native-durable session that
+   * legacy-only recovery never knew to look for — this is the general,
+   * re-entrant check for that, distinct from the one-shot legacy guard so
+   * the two concerns never get confused with each other.
+   *   'required'  -> checked at a low-frequency boundary (Lecture Detail /
+   *                  Processing open) and found validated media not yet
+   *                  represented in the current canonical asset.
+   *   'running'   -> discovery/export/composition in progress.
+   *   'complete'  -> localAudioUri/durationMillis now reflect the full
+   *                  discovered source set; mediaReconciliationSourceIds
+   *                  records exactly which sources, so re-opening the
+   *                  lecture again is a no-op unless NEW media appears.
+   *   'ambiguous' -> extra media exists but a safe order could not be
+   *                  proven; the guard from mediaSourceDiscovery.ts fired.
+   *   'failed'    -> discovery ran but composition/export failed.
+   * The lecture's PRE-existing canonical asset, upload, and AI results are
+   * never touched while this is 'required'/'running'/'ambiguous'/'failed'
+   * — they only move to reflect the corrected media once reconciliation
+   * actually succeeds, so an already-Ready lecture never becomes
+   * unusable because a later, more complete recovery hasn't finished yet.
+   */
+  mediaReconciliationStatus?: 'required' | 'running' | 'complete' | 'ambiguous' | 'failed';
+  mediaReconciliationDetail?: string;
+  /** Source ids (durable session ids, legacy source ids) already folded
+   *  into the current canonical asset — the idempotency record. */
+  mediaReconciliationSourceIds?: string[];
+  mediaReconciliationCompletedAt?: string;
   /** UUID used by the backend recordings table; separate from the local lecture id. */
   remoteRecordingId?: string;
   uploadStatus?: LectureUploadStatus;
@@ -232,8 +296,14 @@ export type CourseMaterial = {
   fileSize?: number;
   /** Number of pages — filled lazily after the PDF viewer reports it. */
   pageCount?: number;
+  /** Immutable source-PDF page count once the native reader has loaded it. */
+  sourcePageCount?: number;
+  /** Persisted count of Youmi-owned blank pages appended after the source PDF. */
+  appendedPageCount?: number;
   /** 1-based last page the user viewed. Persisted on page change. */
   lastOpenedPage?: number;
+  /** Versioned, material-scoped PDFKit reading position. PDF-space anchor is layout independent. */
+  lastOpenedViewport?: MaterialViewport;
   /** ISO timestamp. */
   createdAt: string;
   /** ISO timestamp. Bumped on rename / last-page update. */
@@ -244,6 +314,16 @@ export type CourseMaterial = {
   deletedAt?: string | null;
   /** Why the material was soft-deleted (e.g. 'manual'). */
   deletedReason?: string | null;
+};
+
+export type MaterialViewport = {
+  version: 1;
+  /** 1-based PDF/composite page identity. */
+  pageIndex: number;
+  scaleFactor: number;
+  /** PDF page-space coordinate aligned to the viewport's top-left. */
+  anchorX: number;
+  anchorY: number;
 };
 
 /**
@@ -297,6 +377,18 @@ export type MaterialAnnotationStroke = {
   createdAt: string;
 };
 
+/** Plain text placed by the student on a material PDF page. All geometry is in PDF-page points. */
+export type MaterialTextAnnotation = {
+  id: string;
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  fontSize: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 /** Local-only page annotations for one lecture/material/page tuple. */
 export type MaterialPageAnnotation = {
   id: string;
@@ -304,6 +396,8 @@ export type MaterialPageAnnotation = {
   materialId: string;
   pageNumber: number;
   strokes: MaterialAnnotationStroke[];
+  /** Optional for backwards compatibility with existing ink-only records. */
+  textAnnotations?: MaterialTextAnnotation[];
   createdAt: string;
   updatedAt: string;
   deletedAt?: string | null;

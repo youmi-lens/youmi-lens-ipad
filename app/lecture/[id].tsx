@@ -6,6 +6,7 @@ import {
   ActivityIndicator,
   Alert,
   Modal,
+  PanResponder,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -57,6 +58,7 @@ import {
   shouldShowAudioPlayer,
 } from '@/lib/lectureLocalAudio';
 import { getLectureRecoveryState } from '@/lib/processingResume.mjs';
+import { useMediaReconciliation } from '@/lib/recording/useMediaReconciliation';
 import { retryLectureProcessing } from '@/lib/retryLectureProcessing';
 import { useRecordingNotes } from '@/lib/recordingNotes';
 import { requestCloudLectureAudio } from '@/lib/cloudLectureAudio.mjs';
@@ -89,6 +91,13 @@ export default function LectureDetailScreen() {
 
   const lecture = getLecture(params.id);
   const course = getCourse(lecture?.courseId);
+
+  // General media reconciliation re-entry: even an already-Ready lecture
+  // may have accumulated validated durable media that the old legacy-only
+  // assembly never discovered (see lib/recording/mediaReconciliation.ts).
+  // Lecture Detail open is the primary trigger point for this — the lecture
+  // stays fully usable throughout; nothing here blocks render.
+  useMediaReconciliation(lecture, updateLecture);
 
   const [tab, setTab] = useState<Tab>('Summary');
   const [notesDraft, setNotesDraft] = useState(lecture?.notes ?? '');
@@ -192,6 +201,55 @@ export default function LectureDetailScreen() {
   const audioStatus = useAudioPlayerStatus(player);
   const playbackDuration = audioStatus.duration || (lecture?.durationMillis ?? 0) / 1000;
   const playbackProgress = playbackDuration > 0 ? Math.min(audioStatus.currentTime / playbackDuration, 1) : 0;
+
+  // One-shot diagnostics for the long-audio seek investigation — no
+  // interval/polling, only fires on a genuine source change, a deliberate
+  // seek, or an unexplained backward jump in reported position.
+  const diagPrevUriRef = useRef<string | null>(null);
+  const diagSeekingUntilRef = useRef(0);
+  const diagPrevPositionMsRef = useRef<number | null>(null);
+  useEffect(() => {
+    const prevUri = diagPrevUriRef.current;
+    if (__DEV__ && prevUri !== null && prevUri !== (audioUri ?? null)) {
+      console.info('[AudioPlayer] source-change', { oldAssetId: prevUri, newAssetId: audioUri ?? null });
+    }
+    diagPrevUriRef.current = audioUri ?? null;
+    if (__DEV__ && audioAvailable && !suspendPlayerSource && audioUri) {
+      console.info('[AudioPlayer] load', { assetId: lecture?.id, uri: audioUri, durationMs: Math.round((lecture?.durationMillis ?? 0)) });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [audioUri, audioAvailable, suspendPlayerSource]);
+  useEffect(() => {
+    if (!__DEV__) return;
+    const nowMs = Date.now();
+    const positionMs = Math.round(audioStatus.currentTime * 1000);
+    const prevPositionMs = diagPrevPositionMsRef.current;
+    diagPrevPositionMsRef.current = positionMs;
+    if (prevPositionMs === null) return;
+    const droppedBackMs = prevPositionMs - positionMs;
+    // A deliberate seek is expected to move the position around, including
+    // backward — suppress this check for a short window after any seek we
+    // ourselves requested (see seekToSeconds below).
+    if (nowMs < diagSeekingUntilRef.current) return;
+    if (droppedBackMs > 5000) {
+      console.info('[AudioPlayer] position-reset', { reason: 'unexplained-backward-jump', previousMs: prevPositionMs, nextMs: positionMs });
+    }
+  }, [audioStatus.currentTime]);
+
+  // Playback scrubber: null while not dragging (display tracks the real
+  // player). While dragging, a preview ratio [0,1] — the finger position —
+  // drives the displayed time/fill WITHOUT calling player.seekTo() on every
+  // touch-move sample. expo-audio's seekTo() is not designed for 60fps
+  // scrubbing (it's a plain async native seek, not a scrub-mode API), so
+  // calling it per-frame would be wasteful and could stutter playback.
+  // Exactly one authoritative seek fires on release. The preview stays
+  // pinned at the target ratio through that async seek (not cleared back to
+  // null immediately) so the display never flashes back to the pre-drag
+  // position before snapping to the new one.
+  const [scrubRatio, setScrubRatio] = useState<number | null>(null);
+  const isScrubbing = scrubRatio !== null;
+  const displaySeconds = isScrubbing ? scrubRatio * playbackDuration : audioStatus.currentTime;
+  const displayProgress = isScrubbing ? scrubRatio : playbackProgress;
 
   // One-tick null→real flip: releases the (ended) native player, then
   // reconstructs it fresh on the very next render.
@@ -507,11 +565,31 @@ export default function LectureDetailScreen() {
 
   const seekToSeconds = async (seconds: number) => {
     if (!audioAvailable) return;
-    await player.seekTo(Math.max(0, Math.min(seconds, playbackDuration || seconds)));
+    const target = Math.max(0, Math.min(seconds, playbackDuration || seconds));
+    if (__DEV__) {
+      console.info('[AudioPlayer] seek-request', { fromMs: Math.round(audioStatus.currentTime * 1000), requestedMs: Math.round(target * 1000) });
+    }
+    // Suppress the position-reset watcher for a window around this
+    // deliberate seek — its own backward jump is expected, not a bug.
+    diagSeekingUntilRef.current = Date.now() + 4000;
+    await player.seekTo(target);
+    if (__DEV__) {
+      console.info('[AudioPlayer] seek-complete', { actualMs: Math.round(player.currentTime * 1000) });
+    }
   };
 
   const skipBy = async (delta: number) => {
     await seekToSeconds(audioStatus.currentTime + delta);
+  };
+
+  // The one authoritative seek for a drag gesture — called once, on release.
+  // Preserves whatever playing/paused state was active before the drag:
+  // seekTo() never toggles play state, matching skipBy's existing behavior.
+  const commitScrub = async (ratio: number) => {
+    if (playbackDuration > 0) {
+      await seekToSeconds(ratio * playbackDuration);
+    }
+    setScrubRatio(null);
   };
 
   return (
@@ -580,8 +658,13 @@ export default function LectureDetailScreen() {
               // below with Play/Pause as the obviously largest control.
               <View style={styles.playerStack}>
                 <View style={styles.playerSeekRow}>
-                  <Text style={styles.playerTimeText}>{formatClock(Math.floor(audioStatus.currentTime))}</Text>
-                  <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${playbackProgress * 100}%` }]} /></View>
+                  <Text style={styles.playerTimeText}>{formatClock(Math.floor(displaySeconds))}</Text>
+                  <PlaybackScrubTrack
+                    progress={displayProgress}
+                    onScrubMove={setScrubRatio}
+                    onScrubRelease={(ratio) => void commitScrub(ratio)}
+                    onScrubCancel={() => setScrubRatio(null)}
+                  />
                   <Text style={styles.playerTimeText}>{formatClock(Math.floor(playbackDuration))}</Text>
                 </View>
                 <View style={styles.playerTransportRow}>
@@ -598,8 +681,13 @@ export default function LectureDetailScreen() {
                   <Ionicons name={audioStatus.playing ? 'pause' : 'play'} size={20} color={colors.textOnNavy} />
                 </PressableScale>
                 <PressableScale accessibilityRole="button" accessibilityLabel={t('lecture.skipBack')} onPress={() => void skipBy(-10)} style={styles.skipButton}><Text style={styles.skipText}>↺ 10s</Text></PressableScale>
-                <Text style={styles.playerTimeText}>{formatClock(Math.floor(audioStatus.currentTime))}</Text>
-                <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${playbackProgress * 100}%` }]} /></View>
+                <Text style={styles.playerTimeText}>{formatClock(Math.floor(displaySeconds))}</Text>
+                <PlaybackScrubTrack
+                  progress={displayProgress}
+                  onScrubMove={setScrubRatio}
+                  onScrubRelease={(ratio) => void commitScrub(ratio)}
+                  onScrubCancel={() => setScrubRatio(null)}
+                />
                 <Text style={styles.playerTimeText}>{formatClock(Math.floor(playbackDuration))}</Text>
                 <PressableScale accessibilityRole="button" accessibilityLabel={t('lecture.skipForward')} onPress={() => void skipBy(10)} style={styles.skipButton}><Text style={styles.skipText}>10s ↻</Text></PressableScale>
               </View>
@@ -901,6 +989,87 @@ export default function LectureDetailScreen() {
       </Modal>
 
       </SafeAreaView>
+    </View>
+  );
+}
+
+/**
+ * Draggable playback progress bar. Replaces the previous static
+ * progressTrack/progressFill pair (display-only, no touch handling at all)
+ * with a real horizontal scrubber:
+ *
+ *  - press/drag anywhere on the track: onScrubMove fires continuously with
+ *    the clamped [0,1] ratio under the finger (cheap — the caller only
+ *    updates a preview time label + fill width, no audio seek per frame).
+ *  - release: onScrubRelease fires once with the final ratio — the caller's
+ *    single authoritative seek.
+ *  - a cancelled gesture (onPanResponderTerminate — e.g. an interruption)
+ *    calls onScrubCancel so the caller can drop the preview without seeking.
+ *
+ * Absolute page position is measured fresh on every gesture start
+ * (onPanResponderGrant) via `measure()`, then gestureState.moveX (itself
+ * page-absolute) is used for every move — the standard, reliable RN pattern
+ * for a custom slider; `locationX` is not used because its meaning can
+ * change mid-drag as the finger moves across nested views.
+ */
+function PlaybackScrubTrack({
+  progress,
+  onScrubMove,
+  onScrubRelease,
+  onScrubCancel,
+}: {
+  progress: number;
+  onScrubMove: (ratio: number) => void;
+  onScrubRelease: (ratio: number) => void;
+  onScrubCancel: () => void;
+}) {
+  const trackRef = useRef<View>(null);
+  const trackLayoutRef = useRef({ pageX: 0, width: 0 });
+  const lastRatioRef = useRef(0);
+
+  const ratioFromPageX = (pageX: number): number => {
+    const { pageX: trackPageX, width } = trackLayoutRef.current;
+    if (width <= 0) return lastRatioRef.current;
+    return Math.max(0, Math.min(1, (pageX - trackPageX) / width));
+  };
+
+  const responder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => true,
+        onPanResponderGrant: (evt) => {
+          trackRef.current?.measure((_x, _y, width, _height, pageX) => {
+            trackLayoutRef.current = { pageX, width };
+            const ratio = ratioFromPageX(evt.nativeEvent.pageX);
+            lastRatioRef.current = ratio;
+            onScrubMove(ratio);
+          });
+        },
+        onPanResponderMove: (_evt, gestureState) => {
+          const ratio = ratioFromPageX(gestureState.moveX);
+          lastRatioRef.current = ratio;
+          onScrubMove(ratio);
+        },
+        onPanResponderRelease: () => {
+          onScrubRelease(lastRatioRef.current);
+        },
+        onPanResponderTerminate: () => {
+          onScrubCancel();
+        },
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
+  return (
+    <View
+      ref={trackRef}
+      style={styles.progressTrack}
+      hitSlop={{ top: 12, bottom: 12 }}
+      {...responder.panHandlers}
+    >
+      <View style={[styles.progressFill, { width: `${progress * 100}%` }]} />
     </View>
   );
 }

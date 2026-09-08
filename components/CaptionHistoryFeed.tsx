@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import {
   FlatList,
   Pressable,
@@ -49,7 +49,13 @@ export type CaptionHistoryFeedProps = {
  * they scroll up it stays where they left it and offers Jump to Latest. English
  * text stays selectable for Copy and supports direct native dictionary lookup.
  */
-export function CaptionHistoryFeed({
+// Recording-time performance: memoized so an unrelated LiveCaptionsContext
+// change (e.g. status/error, or another consumer's re-render) can't force
+// this history FlatList to re-render — only an actual change to its own
+// props (lines/partialEnglish/partialTranslationZh/translatingPending) does.
+// Safe because these are exactly the props that determine what this
+// component shows; nothing here reads outside context.
+export const CaptionHistoryFeed = memo(function CaptionHistoryFeed({
   lines,
   partialEnglish,
   partialTranslationZh,
@@ -203,7 +209,7 @@ export function CaptionHistoryFeed({
       </View>
     </View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   wrap: {

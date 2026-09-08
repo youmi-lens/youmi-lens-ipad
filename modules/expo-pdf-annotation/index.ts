@@ -1,4 +1,4 @@
-import { requireNativeViewManager } from 'expo-modules-core';
+import { requireNativeModule, requireNativeViewManager } from 'expo-modules-core';
 
 export type NativePdfPageChangedEvent = {
   pageNumber: number;
@@ -7,7 +7,10 @@ export type NativePdfPageChangedEvent = {
 
 export type NativePdfLoadCompleteEvent = {
   totalPages: number;
+  sourcePageCount: number;
 };
+
+export type NativePdfViewport = { version: 1; pageIndex: number; scaleFactor: number; anchorX: number; anchorY: number };
 
 export type NativePdfErrorEvent = {
   message: string;
@@ -54,11 +57,34 @@ export type NativePdfAnnotationsByPage = {
   [pageNumber: string]: NativePdfAnnotationStroke[];
 };
 
+export type NativePdfTextAnnotation = {
+  id: string;
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  fontSize: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type NativePdfTextAnnotationsByPage = { [pageNumber: string]: NativePdfTextAnnotation[] };
+
+export type NativePdfTextAnnotationActionEvent = {
+  action: 'paste' | 'select' | 'move' | 'edit' | 'copy' | 'delete';
+  pageNumber: number;
+  annotationId?: string;
+  text?: string;
+  x?: number;
+  y?: number;
+};
+
 export type NativePdfAnnotationMode = 'scroll' | 'pen' | 'highlighter' | 'eraser';
 
 export type ExpoPdfAnnotationViewProps = {
   fileUri?: string;
   initialPage?: number;
+  initialViewport?: NativePdfViewport;
   /** "scroll" (default) lets PDFKit own all touches; "pen" turns the overlay on. */
   annotationMode?: NativePdfAnnotationMode;
   /** Hex color for new pen strokes. */
@@ -73,18 +99,42 @@ export type ExpoPdfAnnotationViewProps = {
   eraserRadius?: number;
   /** Strokes to render, in PDF page coordinates, keyed by 1-based page number. */
   annotationsByPage?: NativePdfAnnotationsByPage;
+  /** Synthetic, Youmi-owned pages after the immutable source document. */
+  appendedBlankPageCount?: number;
+  textAnnotationsByPage?: NativePdfTextAnnotationsByPage;
+  selectedTextAnnotationId?: string;
   onPageChanged?: (event: { nativeEvent: NativePdfPageChangedEvent }) => void;
   onLoadComplete?: (event: { nativeEvent: NativePdfLoadCompleteEvent }) => void;
+  onViewportChanged?: (event: { nativeEvent: NativePdfViewport }) => void;
   onError?: (event: { nativeEvent: NativePdfErrorEvent }) => void;
   onAnnotationsChanged?: (event: { nativeEvent: NativePdfAnnotationsChangedEvent }) => void;
   onEraserGestureEnded?: (event: { nativeEvent: NativePdfEraserGestureEndedEvent }) => void;
+  onTextAnnotationAction?: (event: { nativeEvent: NativePdfTextAnnotationActionEvent }) => void;
   style?: unknown;
 };
 
 export type ExpoPdfAnnotationNativeRef = {
   setPageAsync?: (pageNumber: number) => Promise<void>;
+  flushViewportAsync?: () => Promise<void>;
+  captureViewportAsync?: () => Promise<NativePdfViewport | null>;
 };
 
 export const ExpoPdfAnnotationView = requireNativeViewManager<ExpoPdfAnnotationViewProps>(
   'ExpoPdfAnnotation',
 );
+
+type ExpoPdfAnnotationModule = {
+  exportAnnotatedPdfAsync: (options: {
+    fileUri: string;
+    sourcePageCount: number;
+    appendedBlankPageCount: number;
+    annotationsByPage: NativePdfAnnotationsByPage;
+    textAnnotationsByPage: NativePdfTextAnnotationsByPage;
+  }) => Promise<string>;
+};
+
+const nativeModule = requireNativeModule<ExpoPdfAnnotationModule>('ExpoPdfAnnotation');
+
+export function exportAnnotatedPdfAsync(options: Parameters<ExpoPdfAnnotationModule['exportAnnotatedPdfAsync']>[0]) {
+  return nativeModule.exportAnnotatedPdfAsync(options);
+}

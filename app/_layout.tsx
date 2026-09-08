@@ -14,6 +14,8 @@ import { I18nProvider } from '@/lib/i18n';
 import { LiveCaptionsProvider } from '@/lib/liveCaptions';
 import { useProcessingOrchestrator } from '@/lib/useProcessingOrchestrator';
 import { RecordingNotesProvider } from '@/lib/recordingNotes';
+import { setDeveloperRecordingEngineOverride } from '@/lib/recording/featureGate';
+import { isNativeDurableRecorderDevForceEnabled } from '@/lib/recording/nativeDurableDevForce';
 import { isR6SimulatorVerifyEnabled } from '@/lib/recording/r6VerifyGate';
 import { DataProvider } from '@/lib/store';
 import { TutorialProvider } from '@/lib/tutorial';
@@ -22,6 +24,15 @@ import { TutorialTourProvider } from '@/lib/tutorialTour';
 export const unstable_settings = {
   anchor: '(tabs)',
 };
+
+// Dev-only, opt-in: EXPO_PUBLIC_FORCE_NATIVE_DURABLE_RECORDER=1 under __DEV__
+// forces the native durable recorder for physical validation. Inert in every
+// other build — see lib/recording/nativeDurableDevForce.ts. This never
+// touches CONFIGURED_RECORDING_ENGINE, remote rollout, or the dogfood cohort,
+// all of which stay on 'legacy'.
+if (isNativeDurableRecorderDevForceEnabled()) {
+  setDeveloperRecordingEngineOverride('nativeDurable');
+}
 
 /**
  * Root navigator for Youmi Lens for iPad.

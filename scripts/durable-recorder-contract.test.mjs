@@ -127,6 +127,20 @@ const linked = loadBoundary({
       ...finalizedRecordingSession,
       handoffCompletedAt: '2023-11-14T22:13:24.000Z',
     }),
+    assembleLegacyAudio: async () => ({
+      fileUri: 'file:///audio-assembly/lecture-contract/final/lecture.m4a',
+      durationMs: 203_500,
+      byteLength: 4096,
+      sourceCount: 2,
+      sourceFingerprint: 'prior_canonical::file:///a.m4a\u{1E}resumed_segment::file:///b.m4a',
+    }),
+    persistLegacyAudioSources: async () => ({
+      sourceCount: 2,
+      sources: [
+        { role: 'prior_canonical', durableRelativePath: 'sources/0-prior_canonical.m4a', byteLength: 2048, durationMs: 128_081, sourceModifiedAtMs: 1_757_213_134_000 },
+        { role: 'resumed_segment', durableRelativePath: 'sources/1-resumed_segment.m4a', byteLength: 2048, durationMs: 75_441, sourceModifiedAtMs: 1_757_213_176_000 },
+      ],
+    }),
   },
   platform: 'ios',
 });
@@ -158,6 +172,32 @@ assert.equal(
 assert.equal(
   (await linked.acknowledgeFinalAssetHandoff({ recordingSessionId: sessionResult.recordingSessionId })).handoffCompletedAt,
   '2023-11-14T22:13:24.000Z',
+);
+assert.deepEqual(
+  plain(await linked.assembleLegacyAudio('lecture-contract', [
+    { role: 'prior_canonical', uri: 'file:///prior.m4a' },
+    { role: 'resumed_segment', uri: 'file:///resumed.m4a' },
+  ])),
+  {
+    fileUri: 'file:///audio-assembly/lecture-contract/final/lecture.m4a',
+    durationMs: 203_500,
+    byteLength: 4096,
+    sourceCount: 2,
+    sourceFingerprint: 'prior_canonical::file:///a.m4a\u{1E}resumed_segment::file:///b.m4a',
+  },
+);
+assert.deepEqual(
+  plain(await linked.persistLegacyAudioSources('lecture-contract', [
+    { role: 'prior_canonical', uri: 'file:///prior.m4a' },
+    { role: 'resumed_segment', uri: 'file:///resumed.m4a' },
+  ])),
+  {
+    sourceCount: 2,
+    sources: [
+      { role: 'prior_canonical', durableRelativePath: 'sources/0-prior_canonical.m4a', byteLength: 2048, durationMs: 128_081, sourceModifiedAtMs: 1_757_213_134_000 },
+      { role: 'resumed_segment', durableRelativePath: 'sources/1-resumed_segment.m4a', byteLength: 2048, durationMs: 75_441, sourceModifiedAtMs: 1_757_213_176_000 },
+    ],
+  },
 );
 
 const unavailable = loadBoundary({ nativeModule: null, platform: 'web' });
@@ -193,10 +233,12 @@ assert.deepEqual(
     'DURABLE_RECORDER_RUNTIME_STATES',
     'DURABLE_RECORDING_STATES',
     'DurableRecorderError',
+    'LegacyAudioAssemblyError',
     'RECORDING_STATUS_CHANGE_EVENT',
     'abandonSession',
     'acknowledgeFinalAssetHandoff',
     'addRecordingStatusListener',
+    'assembleLegacyAudio',
     'createSession',
     'deleteSession',
     'exportFinalizedAsset',
@@ -208,6 +250,7 @@ assert.deepEqual(
     'listRecoverableSessions',
     'pauseRecording',
     'performCheckpointForTesting',
+    'persistLegacyAudioSources',
     'prepareRecording',
     'recoverRecordingSession',
     'resumeRecording',
@@ -234,6 +277,20 @@ await assert.rejects(
   unavailable.getRecordingStatus(),
   (error) => error instanceof unavailable.DurableRecorderError && error.code === 'ERR_DURABLE_RECORDER_UNAVAILABLE',
   'missing native recorder does not fall back to a fake JavaScript recorder',
+);
+
+await assert.rejects(
+  unavailable.assembleLegacyAudio('lecture-unavailable', [{ role: 'prior_canonical', uri: 'file:///a.m4a' }]),
+  (error) => error instanceof unavailable.LegacyAudioAssemblyError &&
+    error.code === 'ERR_LEGACY_AUDIO_ASSEMBLY_UNAVAILABLE',
+  'missing native module returns a deterministic typed error for legacy audio assembly too',
+);
+
+await assert.rejects(
+  unavailable.persistLegacyAudioSources('lecture-unavailable', [{ role: 'prior_canonical', uri: 'file:///a.m4a' }]),
+  (error) => error instanceof unavailable.LegacyAudioAssemblyError &&
+    error.code === 'ERR_LEGACY_AUDIO_ASSEMBLY_UNAVAILABLE',
+  'missing native module returns a deterministic typed error for early source preservation too',
 );
 
 const invalidNativeResult = loadBoundary({

@@ -28,6 +28,7 @@ public final class ExpoDurableRecorderModule: Module {
   private lazy var exporterResult = Result {
     DurableFinalAssetExporter(store: try storeResult.get())
   }
+  private lazy var legacyAudioAssemblyResult = Result { try LegacyAudioAssemblyStore() }
   private var statusBridgeInstalled = false
 
   public func definition() -> ModuleDefinition {
@@ -161,6 +162,45 @@ public final class ExpoDurableRecorderModule: Module {
       }
     }
 
+    // Legacy-resume audio recovery — unrelated to the durable recorder's own
+    // session state machine (see LegacyAudioAssembly.swift's doc comment).
+    // Kept on this module because it reuses this module's already-registered
+    // native bridge and the shared AudioSegmentComposer primitive.
+    AsyncFunction("persistLegacyAudioSources") { (input: [String: Any]) throws -> [String: Any] in
+      let (lectureId, orderedSources) = try self.parseLegacyAudioInput(input)
+      do {
+        let store = try self.legacyAudioAssemblyResult.get()
+        let sources = try store.persistSources(lectureId: lectureId, orderedSources: orderedSources)
+        return [
+          "sourceCount": sources.count,
+          "sources": sources.map { [
+            "role": $0.role,
+            "durableRelativePath": $0.durableRelativePath,
+            "byteLength": $0.byteLength,
+            "durationMs": $0.durationMs,
+            "sourceModifiedAtMs": $0.sourceModifiedAtMs,
+          ] },
+        ]
+      } catch let error as LegacyAudioAssemblyError {
+        throw self.legacyAssemblyException(error)
+      } catch {
+        throw self.storageException(error)
+      }
+    }
+
+    AsyncFunction("assembleLegacyAudio") { (input: [String: Any]) async throws -> [String: Any] in
+      let (lectureId, orderedSources) = try self.parseLegacyAudioInput(input)
+      do {
+        let store = try self.legacyAudioAssemblyResult.get()
+        let result = try await store.assemble(lectureId: lectureId, orderedSources: orderedSources)
+        return result.asDictionary()
+      } catch let error as LegacyAudioAssemblyError {
+        throw self.legacyAssemblyException(error)
+      } catch {
+        throw self.storageException(error)
+      }
+    }
+
     AsyncFunction("acknowledgeFinalAssetHandoff") {
       (input: DurableSessionIdentifierRecord) throws -> [String: Any] in
       try self.withStore { store in
@@ -232,6 +272,28 @@ public final class ExpoDurableRecorderModule: Module {
 
   private func moduleException(_ error: DurableRecorderCoreError) -> Exception {
     Exception(name: "DurableRecorderError", description: error.message, code: error.code)
+  }
+
+  private func parseLegacyAudioInput(_ input: [String: Any]) throws -> (lectureId: String, orderedSources: [(role: String, uri: String)]) {
+    guard let lectureId = input["lectureId"] as? String, !lectureId.isEmpty else {
+      throw legacyAssemblyException(.invalidLectureId)
+    }
+    guard let rawSources = input["sources"] as? [[String: Any]], !rawSources.isEmpty else {
+      throw legacyAssemblyException(.noSources)
+    }
+    var orderedSources: [(role: String, uri: String)] = []
+    for raw in rawSources {
+      guard let role = raw["role"] as? String, !role.isEmpty,
+            let uri = raw["uri"] as? String, !uri.isEmpty else {
+        throw legacyAssemblyException(.invalidSourceList)
+      }
+      orderedSources.append((role: role, uri: uri))
+    }
+    return (lectureId, orderedSources)
+  }
+
+  private func legacyAssemblyException(_ error: LegacyAudioAssemblyError) -> Exception {
+    Exception(name: "LegacyAudioAssemblyError", description: error.message, code: error.code)
   }
 
   private func storageException(_ error: Error) -> Exception {

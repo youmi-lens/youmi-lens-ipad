@@ -122,13 +122,27 @@ export function TutorialTourProvider({ children }: { children: ReactNode }) {
   // First-eligible-entry auto-show — the ONLY place that reads the completion
   // flag. Mirrors AuthGate's own canUseApp so this never auto-shows over the
   // username-setup or password-reset flows.
+  //
+  // The scope is marked checked only AFTER the completion read has actually
+  // been observed, not the moment the check starts. Auth state is not stable
+  // the instant scopeId first turns truthy — a slower, earlier-issued
+  // getSession() can still land after a newer sign-in and briefly flip
+  // session (and scopeId) back to null before it reasserts itself. If the
+  // ref were written up front, that flip would cancel this in-flight check
+  // (correctly, via `cancelled`) but leave the scope permanently marked
+  // checked, so scopeId's later return to the same value would be silently
+  // swallowed by the guard above and a genuinely new account could lose its
+  // one shot at the tutorial for the rest of the app session. Marking only
+  // on an uncancelled resolution means a cancelled check leaves the scope
+  // unmarked, so the next stable pass for that same scopeId retries it.
   useEffect(() => {
     if (loading || !canUseApp || !scopeId) return;
     if (autoCheckedScopeRef.current === scopeId) return;
-    autoCheckedScopeRef.current = scopeId;
     let cancelled = false;
     void loadTutorialCompleted(scopeId).then((completed) => {
-      if (cancelled || completed) return;
+      if (cancelled) return;
+      autoCheckedScopeRef.current = scopeId;
+      if (completed) return;
       setMomentIndex(0);
       setVisible(true);
     });

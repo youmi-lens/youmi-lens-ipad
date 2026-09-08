@@ -1,0 +1,23 @@
+import assert from 'node:assert/strict';
+import { clampedMaterialResumePage, compositePageCount, appendedPageCountAfterFinalPageContent, exportedPageCount, hasMeaningfulMaterialPageContent } from '../lib/materialWorkspace.ts';
+
+assert.equal(compositePageCount(7, 0), 7, 'untouched source does not gain a page');
+assert.equal(appendedPageCountAfterFinalPageContent(7, 0, 6), 0, 'non-final page does not extend');
+assert.equal(appendedPageCountAfterFinalPageContent(7, 0, 7), 1, 'ink/text on source final page creates one trailing page');
+assert.equal(compositePageCount(7, 1), 8);
+assert.equal(appendedPageCountAfterFinalPageContent(7, 1, 8), 2, 'content on trailing page creates next page');
+assert.equal(appendedPageCountAfterFinalPageContent(7, 2, 7), 2, 'page history never shrinks');
+assert.equal(exportedPageCount(7, 0), 7);
+assert.equal(exportedPageCount(7, 1), 7, 'empty trailing source extension is workspace-only');
+assert.equal(exportedPageCount(7, 2), 8, 'used appended page exports');
+assert.equal(hasMeaningfulMaterialPageContent([], []), false);
+assert.equal(hasMeaningfulMaterialPageContent([], [{ id: 'x', text: '  ', x: 0, y: 0, width: 10, fontSize: 12, createdAt: '', updatedAt: '' }]), false);
+assert.equal(hasMeaningfulMaterialPageContent([], [{ id: 'x', text: 'hello', x: 0, y: 0, width: 10, fontSize: 12, createdAt: '', updatedAt: '' }]), true);
+assert.equal(hasMeaningfulMaterialPageContent([{ id: 'ink', tool: 'pen', color: '#000', width: 1, points: [{ x: 1, y: 1 }], coordSpace: 'pdfPage', createdAt: '' }], []), true);
+assert.equal(clampedMaterialResumePage(undefined, 300), 1, 'a material without saved state starts at page one');
+assert.equal(clampedMaterialResumePage(15, 300), 15, 'saved source page restores exactly');
+assert.equal(clampedMaterialResumePage(8, compositePageCount(7, 2)), 8, 'saved appended note page restores exactly');
+assert.equal(clampedMaterialResumePage(187, 120), 120, 'stale saved page clamps to composite end');
+assert.equal(clampedMaterialResumePage(0, 120), 1, 'invalid zero value falls back safely');
+assert.equal(clampedMaterialResumePage('bad', 120), 1, 'corrupt value falls back safely');
+console.log('material workspace rules: PASS');

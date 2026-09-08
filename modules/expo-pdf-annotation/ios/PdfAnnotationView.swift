@@ -51,6 +51,8 @@ public final class PdfAnnotationView: ExpoView {
   }()
 
   private var document: PDFDocument?
+  private var sourceDocument: PDFDocument?
+  private var sourcePageCount: Int = 0
   private var loadedFileUri: String?
   private var hasAppliedInitialPage = false
   private var lastEmittedPage: Int?
@@ -67,19 +69,105 @@ public final class PdfAnnotationView: ExpoView {
   /// recompute min/max on actual orientation/splitview changes — never per
   /// layout pass (which would yank user pinch state mid-gesture).
   private var lastBoundsSize: CGSize = .zero
+  private var pendingTextMove: (id: String, pageNumber: Int)?
+  private var pendingInitialViewport: (pageIndex: Int, scale: CGFloat, anchor: CGPoint)?
+  private var restorationComplete = false
+  /// Guards against reentrant restore attempts. layoutSubviews() calls
+  /// applyInitialViewportIfPossible() on every layout pass, and the restore
+  /// sequence itself (go(to:) + a large scaleFactor change + go(to:) again)
+  /// triggers further layout passes on pdfView BEFORE restorationComplete
+  /// flips true — without this guard, those reentrant calls race the
+  /// original one and can leave PDFKit's actual scroll position settled on
+  /// the wrong page (proven from a physical repro: restore correctly
+  /// reaches the saved page, then an unprompted page-1 jump follows within
+  /// ~300ms, matching PDFKit's deferred layout/re-tiling after a large zoom
+  /// change racing this function's own later steps).
+  private var isRestoringViewport = false
+  private var viewportRestoreAttempts = 0
+  /// True only when a restore attempt's settled viewport was independently
+  /// VERIFIED to match the saved target. `restorationComplete` alone means
+  /// "the restore sequence stopped running" — that included exhausting the
+  /// retry budget WITHOUT a match, which used to still enable normal event
+  /// emission, letting a synthetic layout-driven page/scale change (not a
+  /// real user action) get persisted over the known-good saved viewport.
+  /// `restoreVerified` is the trust bit: emission is gated on
+  /// `restoreVerified || userHasInteracted`, never on `restorationComplete`
+  /// alone.
+  private var restoreVerified = false
+  /// True once a genuine user pan/pinch gesture has begun on the PDFView's
+  /// own scroll view (see startObservingScroll's gesture observers). This is
+  /// deliberately NOT inferred from PDFViewPageChanged/onViewportChanged,
+  /// since PDFKit itself generates those during layout and restore, not only
+  /// from real touches. Once true for this mount, normal persistence is
+  /// unlocked regardless of whether the initial restore ever verified —
+  /// the user has taken over the viewport.
+  private var userHasInteracted = false
+  /// Emission (onPageChanged / onViewportChanged / captureViewportPayload)
+  /// is only trustworthy once the restore actually verified against the
+  /// saved target, or the user has explicitly taken over navigation.
+  private var viewportTrustedForEmission: Bool { restoreVerified || userHasInteracted }
+  #if DEBUG
+  private var restoreTraceRemaining = 100
+  #endif
+
+  /// Bounded diagnostic for one mount; no timers or per-scroll bridge traffic.
+  private func traceRestore(_ phase: String) {
+    #if DEBUG
+    guard restoreTraceRemaining > 0 else { return }
+    restoreTraceRemaining -= 1
+    let actual = currentViewport()
+    let scroll = observedScrollView ?? findInnerScrollView(in: pdfView)
+    print("[material-restore-v2] t=\(ProcessInfo.processInfo.systemUptime) phase=\(phase) attempt=\(viewportRestoreAttempts) complete=\(restorationComplete) restoring=\(isRestoringViewport) target=\(String(describing: pendingInitialViewport)) actual=\(String(describing: actual)) bounds=\(pdfView.bounds) documentBounds=\(String(describing: pdfView.documentView?.bounds)) offset=\(String(describing: scroll?.contentOffset)) total=\(document?.pageCount ?? 0)")
+    #endif
+  }
+  private static let maxViewportRestoreAttempts = 3
+  private var viewportEmitWorkItem: DispatchWorkItem?
 
   let onPageChanged = EventDispatcher()
   let onLoadComplete = EventDispatcher()
+  let onViewportChanged = EventDispatcher()
   let onError = EventDispatcher()
   let onAnnotationsChanged = EventDispatcher()
   let onEraserGestureEnded = EventDispatcher()
+  let onTextAnnotationAction = EventDispatcher()
 
   var fileUri: String? {
     didSet { if fileUri != oldValue { loadDocumentIfNeeded() } }
   }
 
   var initialPage: Int = 1 {
-    didSet { if initialPage != oldValue { applyInitialPageIfPossible() } }
+    didSet {
+      #if DEBUG
+      print("[material-viewport] native prop initialPage=\(initialPage) oldValue=\(oldValue) hasAppliedInitialPage=\(hasAppliedInitialPage)")
+      #endif
+      if initialPage != oldValue { applyInitialPageIfPossible() }
+    }
+  }
+
+  var initialViewport: [String: Any]? {
+    didSet {
+      #if DEBUG
+      print("[material-viewport] native prop initialViewport-didSet raw=\(String(describing: initialViewport)) restorationCompleteBefore=\(restorationComplete)")
+      #endif
+      guard let value = initialViewport,
+            Self.double(value["version"]) == 1,
+            let page = Self.double(value["pageIndex"]),
+            let scale = Self.double(value["scaleFactor"]),
+            let x = Self.double(value["anchorX"]), let y = Self.double(value["anchorY"])
+      else {
+        #if DEBUG
+        print("[material-viewport] native prop initialViewport-didSet REJECTED (invalid/nil payload)")
+        #endif
+        return
+      }
+      pendingInitialViewport = (max(1, Int(page)), max(0.01, CGFloat(scale)), CGPoint(x: max(0, x), y: max(0, y)))
+      restorationComplete = false
+      restoreVerified = false
+      #if DEBUG
+      print("[material-viewport] native prop initialViewport-didSet ACCEPTED pendingInitialViewport=\(String(describing: pendingInitialViewport))")
+      #endif
+      applyInitialViewportIfPossible()
+    }
   }
 
   /// "scroll", "pen", "highlighter", or "eraser". Forwarded into the overlay's rendering mode AND
@@ -128,6 +216,22 @@ public final class PdfAnnotationView: ExpoView {
     didSet { annotationOverlay.loadAnnotations(annotationsByPage) }
   }
 
+  /// Number of stable, Youmi-owned blank pages after the immutable source PDF.
+  var appendedBlankPageCount: Int = 0 {
+    didSet {
+      guard appendedBlankPageCount != oldValue else { return }
+      rebuildCompositeDocument(preservingCurrentPage: true)
+    }
+  }
+
+  var textAnnotationsByPage: [String: Any]? {
+    didSet { annotationOverlay.loadTextAnnotations(textAnnotationsByPage) }
+  }
+
+  var selectedTextAnnotationId: String? {
+    didSet { annotationOverlay.selectedTextAnnotationId = selectedTextAnnotationId }
+  }
+
   public required init(appContext: AppContext? = nil) {
     super.init(appContext: appContext)
     clipsToBounds = true
@@ -169,6 +273,11 @@ public final class PdfAnnotationView: ExpoView {
     // Attach Pencil-only gesture recognizer to PDFView. allowedTouchTypes
     // is the OS-level filter that actually works (vs the hitTest dance).
     pdfView.addGestureRecognizer(pencilGesture)
+    let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleFingerLongPress(_:)))
+    longPress.minimumPressDuration = 0.45
+    longPress.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+    longPress.delegate = self
+    pdfView.addGestureRecognizer(longPress)
     applyWorkspaceCanvasColors()
 
     NotificationCenter.default.addObserver(
@@ -191,7 +300,9 @@ public final class PdfAnnotationView: ExpoView {
   }
 
   public override func layoutSubviews() {
+    traceRestore("layout-before-super")
     super.layoutSubviews()
+    traceRestore("layout-after-super")
     // Only re-apply the scale window when the outer bounds actually change
     // (orientation, splitview, modal resize). Per-frame layout passes during
     // a pinch must NOT touch scaleFactor or recompute min — that's what
@@ -206,6 +317,14 @@ public final class PdfAnnotationView: ExpoView {
     applyPdfGestureTouchPolicy()
     bringSubviewToFront(annotationOverlay)
     annotationOverlay.setNeedsDisplay()
+    applyInitialViewportIfPossible()
+  }
+
+  private static func double(_ value: Any?) -> Double? {
+    if let number = value as? NSNumber { return number.doubleValue }
+    if let number = value as? Double { return number }
+    if let number = value as? Int { return Double(number) }
+    return nil
   }
 
   /// Apply the scale window for the current bounds.
@@ -215,6 +334,7 @@ public final class PdfAnnotationView: ExpoView {
   ///     alone unless it's now outside the new [min, max] window, in which
   ///     case clamp it. PDFView's own pinch state is preserved otherwise.
   private func applyScaleSettings(forceFit: Bool) {
+    traceRestore("scale-settings forceFit=\(forceFit)")
     guard document != nil else { return }
     guard pdfView.bounds.width > 0, pdfView.bounds.height > 0 else { return }
     let fit = pdfView.scaleFactorForSizeToFit
@@ -261,7 +381,7 @@ public final class PdfAnnotationView: ExpoView {
   func setPage(_ pageNumber: Int) {
     DispatchQueue.main.async { [weak self] in
       guard let self else { return }
-      self.goToPage(pageNumber)
+      self.goToPage(pageNumber, reason: "setPage(JS-imperative)")
     }
   }
 
@@ -283,11 +403,18 @@ public final class PdfAnnotationView: ExpoView {
         self.emitError("The PDF could not be opened."); return
       }
 
-      self.document = pdfDocument
+      self.sourceDocument = pdfDocument
+      self.sourcePageCount = pdfDocument.pageCount
       self.loadedFileUri = fileUri
       self.hasAppliedInitialPage = false
       self.lastEmittedPage = nil
-      self.pdfView.document = pdfDocument
+      // A genuinely new document means starting the restore-trust state
+      // fresh — whatever verification/interaction happened for a
+      // previously-loaded document (if this view instance is reused) has no
+      // bearing on this one.
+      self.restoreVerified = false
+      self.userHasInteracted = false
+      self.rebuildCompositeDocument(preservingCurrentPage: false)
       // Apply the initial page-fit scale + min/max window. autoScales stays
       // off so subsequent layout passes don't fight user pinch.
       self.lastBoundsSize = self.bounds.size
@@ -300,22 +427,310 @@ public final class PdfAnnotationView: ExpoView {
       self.updateGestureMode()
       self.applyPdfGestureTouchPolicy()
       self.annotationOverlay.setNeedsDisplay()
-      self.onLoadComplete(["totalPages": pdfDocument.pageCount])
+      self.onLoadComplete(["totalPages": self.document?.pageCount ?? pdfDocument.pageCount, "sourcePageCount": self.sourcePageCount])
       self.emitCurrentPage()
+      self.applyInitialViewportIfPossible()
+    }
+  }
+
+  /// The source `PDFDocument` lives only in memory; appending/removing the
+  /// generated pages never writes to its URL. We rebuild from a fresh source
+  /// load so a prop update cannot accidentally accumulate blank pages.
+  private func rebuildCompositeDocument(preservingCurrentPage: Bool) {
+    traceRestore("rebuild preserving=\(preservingCurrentPage) appended=\(appendedBlankPageCount)")
+    guard let fileUri = loadedFileUri, let url = url(from: fileUri),
+          let freshSource = PDFDocument(url: url) else { return }
+
+    // Capture enough state to restore the EXACT visual position across the
+    // rebuild, not just the page number. Appending trailing blank pages
+    // never changes the geometry of any earlier page (the source PDF is
+    // reloaded byte-identical every time), so a PDF-space anchor point —
+    // whatever is currently sitting at the viewport's top-left corner —
+    // still means the same thing after the composite document is rebuilt.
+    // The previous code only called goToPage(), which restores the page
+    // number but resets scroll-within-page to the top, producing the
+    // reported "viewport jumps while writing near the bottom" defect.
+    let oldPage: Int
+    var restoreScale: CGFloat?
+    var restoreAnchor: (pageIndex: Int, point: CGPoint)?
+    if preservingCurrentPage, let currentDocument = document, let currentPage = pdfView.currentPage {
+      oldPage = max(1, currentDocument.index(for: currentPage) + 1)
+      restoreScale = pdfView.scaleFactor
+      if let anchorPage = pdfView.page(for: .zero, nearest: true) {
+        restoreAnchor = (currentDocument.index(for: anchorPage), pdfView.convert(.zero, to: anchorPage))
+      }
+    } else {
+      oldPage = initialPage
+    }
+
+    sourceDocument = freshSource
+    sourcePageCount = freshSource.pageCount
+    let blankBounds = freshSource.page(at: max(0, sourcePageCount - 1))?.bounds(for: .mediaBox)
+      ?? CGRect(x: 0, y: 0, width: 612, height: 792)
+    for _ in 0..<max(0, appendedBlankPageCount) {
+      let blank = PDFPage()
+      blank.setBounds(blankBounds, for: .mediaBox)
+      freshSource.insert(blank, at: freshSource.pageCount)
+    }
+    document = freshSource
+    pdfView.document = freshSource
+    annotationOverlay.setNeedsDisplay()
+
+    guard preservingCurrentPage else { return }
+    if let restoreScale { pdfView.scaleFactor = restoreScale }
+    if let restoreAnchor, restoreAnchor.pageIndex < freshSource.pageCount,
+       let page = freshSource.page(at: restoreAnchor.pageIndex) {
+      pdfView.go(to: PDFDestination(page: page, at: restoreAnchor.point))
+      emitCurrentPage()
+    } else {
+      // Defensive fallback only — e.g. the anchor page no longer exists.
+      goToPage(oldPage, reason: "rebuildCompositeDocument-anchorFallback")
     }
   }
 
   private func applyInitialPageIfPossible() {
-    guard !hasAppliedInitialPage else { return }
-    guard document != nil else { return }
+    guard !hasAppliedInitialPage else {
+      #if DEBUG
+      print("[material-viewport] native applyInitialPageIfPossible SKIP (hasAppliedInitialPage already true)")
+      #endif
+      return
+    }
+    guard document != nil else {
+      #if DEBUG
+      print("[material-viewport] native applyInitialPageIfPossible SKIP (document nil) initialPage=\(initialPage)")
+      #endif
+      return
+    }
     hasAppliedInitialPage = true
-    goToPage(initialPage)
+    #if DEBUG
+    print("[material-viewport] native applyInitialPageIfPossible APPLYING page=\(initialPage)")
+    #endif
+    goToPage(initialPage, reason: "applyInitialPageIfPossible")
   }
 
-  private func goToPage(_ pageNumber: Int) {
-    guard let document else { return }
+  /// Restore only after the composed PDF and its first layout are both real.
+  /// A next-main-turn layout pass is PDFKit's own destination/layout boundary,
+  /// not a time delay; until it completes every default event remains silent.
+  ///
+  /// Reentrancy-guarded (`isRestoringViewport`): layoutSubviews() calls this
+  /// function on every layout pass, and the restore steps below (go(to:), a
+  /// large scaleFactor change, go(to:) again) each trigger further layout
+  /// passes on pdfView before the async completion below runs — an
+  /// unguarded reentrant call here raced the original one and could leave
+  /// PDFKit settled on the wrong page (see the property's doc comment).
+  ///
+  /// Verified-before-complete: PDFKit can defer layout/re-tiling work after
+  /// a large scaleFactor change past this function's synchronous return, so
+  /// restorationComplete is only set once the ACTUAL settled page/scale/
+  /// anchor is independently confirmed to match the target — not merely on
+  /// the next run-loop turn. A mismatch retries the restore once more
+  /// (bounded by maxViewportRestoreAttempts, never an unbounded loop);
+  /// exhausting the bound still completes restoration with whatever PDFKit
+  /// actually settled on, so the view can never get stuck suppressed.
+  private func applyInitialViewportIfPossible() {
+    // Layout readiness is the INNER pdfView's bounds, not this custom
+    // container view's own bounds. The outer view can already have a valid
+    // (non-zero) frame while pdfView — a subview laid out on a later pass —
+    // is still 0×0; proven from a physical repro where restore attempts ran
+    // with pdfView.bounds == .zero, wasting retry budget on state where
+    // page(for:nearest:)/convert(_:to:) cannot report anything meaningful.
+    // Returning here before touching isRestoringViewport/viewportRestoreAttempts
+    // means a premature call costs nothing — layoutSubviews() re-invokes this
+    // on every later layout pass, so the real attempt starts fresh once
+    // pdfView actually has a size.
+    guard !restorationComplete, !isRestoringViewport, let document,
+          pdfView.bounds.width > 0, pdfView.bounds.height > 0 else {
+      #if DEBUG
+      print("[material-viewport] native applyInitialViewportIfPossible SKIP restorationComplete=\(restorationComplete) isRestoringViewport=\(isRestoringViewport) hasDocument=\(document != nil) pdfViewBounds=\(pdfView.bounds)")
+      #endif
+      return
+    }
+    let saved = pendingInitialViewport
+    let pageIndex = min(document.pageCount, max(1, saved?.pageIndex ?? initialPage))
+    guard let page = document.page(at: pageIndex - 1) else { return }
+    #if DEBUG
+    let savedPageDescription = saved.map { String($0.pageIndex) } ?? "none"
+    let savedScaleDescription = saved.map { String(describing: $0.scale) } ?? "none"
+    print("[material-viewport] native restore target=\(pageIndex) total=\(document.pageCount) savedPage=\(savedPageDescription) savedScale=\(savedScaleDescription) initialPageProp=\(initialPage) attempt=\(viewportRestoreAttempts)")
+    #endif
+    isRestoringViewport = true
+    restorationComplete = false
+    traceRestore("attempt-before-page")
+    pdfView.go(to: page)
+    traceRestore("attempt-after-page")
+    if let saved {
+      pdfView.scaleFactor = min(pdfView.maxScaleFactor, max(pdfView.minScaleFactor, saved.scale))
+      traceRestore("attempt-after-scale")
+      pdfView.go(to: PDFDestination(page: page, at: saved.anchor))
+      traceRestore("attempt-after-anchor")
+    }
+    DispatchQueue.main.async { [weak self] in
+      guard let self, self.document === document else { return }
+      let matches = self.currentViewportMatchesTarget(pageIndex: pageIndex, saved: saved)
+      self.traceRestore("verify matches=\(matches)")
+      #if DEBUG
+      print("[material-viewport] native restore VERIFY matches=\(matches) attempt=\(self.viewportRestoreAttempts)")
+      #endif
+      if !matches, self.viewportRestoreAttempts < Self.maxViewportRestoreAttempts {
+        self.viewportRestoreAttempts += 1
+        self.isRestoringViewport = false
+        self.applyInitialViewportIfPossible()
+        return
+      }
+      self.isRestoringViewport = false
+      self.viewportRestoreAttempts = 0
+      self.restorationComplete = true
+      // CRITICAL: restorationComplete only means "stopped attempting" — it
+      // does NOT mean "trust what's on screen". That trust bit is
+      // restoreVerified, and it is ONLY true on an actual match. Exhausting
+      // the retry budget without a match must NOT unlock emission — that
+      // was the exact bug: a failed verification still flipped
+      // restorationComplete, which was the ONLY gate emitCurrentPage/
+      // emitViewportSnapshot/captureViewportPayload checked, so a later
+      // synthetic (layout-driven, not user-driven) page/scale change could
+      // sail through and get persisted over the known-good saved viewport.
+      self.restoreVerified = matches
+      self.traceRestore("complete matches=\(matches)")
+      #if DEBUG
+      let confirmedPage = self.pdfView.page(for: .zero, nearest: true).map { self.document?.index(for: $0).description ?? "?" } ?? "none"
+      print("[material-viewport] native restore CONFIRMED restorationComplete=true restoreVerified=\(matches) nearestPageIndex0based=\(confirmedPage)")
+      #endif
+      self.emitCurrentPage()
+    }
+  }
+
+  /// Compares PDFKit's ACTUAL current page/scale to the restore target —
+  /// the only reliable way to know the settled state matches what was
+  /// requested, since a large scaleFactor change can defer PDFKit's own
+  /// layout/re-tiling past this function's synchronous return.
+  private func currentViewportMatchesTarget(
+    pageIndex: Int,
+    saved: (pageIndex: Int, scale: CGFloat, anchor: CGPoint)?
+  ) -> Bool {
+    guard let current = currentViewport(), current.pageIndex == pageIndex else { return false }
+    guard let saved else { return true }
+    let scaleTolerance = max(0.01, saved.scale * 0.05)
+    guard abs(current.scale - saved.scale) <= scaleTolerance else { return false }
+    // Y only, deliberately. displayDirection is .vertical with
+    // .singlePageContinuous, and this document's pages are narrower than
+    // pdfView's own bounds (proven from a physical repro: documentBounds
+    // width 363pt vs pdfView.bounds width 1194pt) — PDFKit horizontally
+    // CENTERS a page that doesn't fill the view, so `anchor.x` from
+    // pdfView.convert(.zero, to: page) reports how far left of the page's
+    // centered left edge the viewport's origin sits, a function of the
+    // current zoom/centering math, not of anything the user scrolled to.
+    // Comparing it as if it were a real horizontal scroll position produced
+    // a spurious mismatch (target x=0.0 vs actual x=-111.14) even though
+    // the page, scale, and vertical position were all already correct.
+    return abs(current.anchor.y - saved.anchor.y) <= 20
+  }
+
+  private func currentViewport() -> (pageIndex: Int, scale: CGFloat, anchor: CGPoint)? {
+    guard let document, document.pageCount > 0,
+          let page = pdfView.page(for: .zero, nearest: true) else { return nil }
+    let pageIndex = document.index(for: page) + 1
+    guard pageIndex > 0 else { return nil }
+    let anchor = pdfView.convert(CGPoint.zero, to: page)
+    return (pageIndex, pdfView.scaleFactor, anchor)
+  }
+
+  private func emitViewportSnapshot() {
+    // viewportTrustedForEmission (not restorationComplete alone) is the
+    // gate: a failed restore that exhausted its retry budget still flips
+    // restorationComplete (to stop attempting), but must not let a
+    // subsequent synthetic layout-driven change masquerade as a real
+    // navigation and overwrite the saved-good viewport. Only an actually
+    // verified restore, or genuine user interaction, unlocks this.
+    guard restorationComplete, viewportTrustedForEmission, let snapshot = currentViewport() else { return }
+    onViewportChanged([
+      "version": 1,
+      "pageIndex": snapshot.pageIndex,
+      "scaleFactor": snapshot.scale,
+      "anchorX": snapshot.anchor.x,
+      "anchorY": snapshot.anchor.y,
+    ])
+  }
+
+  private func scheduleViewportSnapshot() {
+    guard restorationComplete, viewportTrustedForEmission else { return }
+    viewportEmitWorkItem?.cancel()
+    let work = DispatchWorkItem { [weak self] in self?.emitViewportSnapshot() }
+    viewportEmitWorkItem = work
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+  }
+
+  func flushViewport() {
+    viewportEmitWorkItem?.cancel()
+    viewportEmitWorkItem = nil
+    #if DEBUG
+    if let snapshot = currentViewport() {
+      print("[material-viewport] native flush page=\(snapshot.pageIndex) scale=\(snapshot.scale) anchor=(\(snapshot.anchor.x),\(snapshot.anchor.y)) restored=\(restorationComplete) trusted=\(viewportTrustedForEmission)")
+    } else {
+      print("[material-viewport] native flush viewport=unavailable restored=\(restorationComplete) trusted=\(viewportTrustedForEmission)")
+    }
+    #endif
+    emitViewportSnapshot()
+  }
+
+  /// Direct diagnostic/read path used at navigation teardown. Unlike the
+  /// normal EventDispatcher path this returns PDFKit's current state to the
+  /// caller, so it can prove whether a delayed bridge snapshot is stale.
+  ///
+  /// Gated the same way as normal emission: an unverified, un-interacted-
+  /// with restore has nothing trustworthy to report yet. Returning empty
+  /// here (rather than the raw, possibly-mid-restore state) makes the JS
+  /// caller fall back to its own last-known-good snapshot instead of
+  /// persisting a synthetic in-flight value on leave.
+  func captureViewportPayload() -> [String: Any] {
+    #if DEBUG
+    // One-shot leave-time forensic snapshot — checkpoints A-F for the
+    // "rapid scroll then immediate leave" investigation. Bounded by the
+    // same restoreTraceRemaining budget as traceRestore, so this cannot
+    // spam on repeated leave attempts.
+    if restoreTraceRemaining > 0 {
+      restoreTraceRemaining -= 1
+      let scroll = observedScrollView ?? findInnerScrollView(in: pdfView)
+      func pageNumber(for pdfPage: PDFPage?) -> String {
+        guard let pdfPage, let document else { return "nil" }
+        return "\(document.index(for: pdfPage) + 1)"
+      }
+      let currentPageProp = pageNumber(for: pdfView.currentPage)
+      let centerPoint = CGPoint(x: pdfView.bounds.midX, y: pdfView.bounds.midY)
+      let centerPage = pageNumber(for: pdfView.page(for: centerPoint, nearest: true))
+      let topLeftPage = pageNumber(for: pdfView.page(for: .zero, nearest: true))
+      print("[material-leave-capture] A.pdfViewCurrentPage=\(currentPageProp) B.lastEmittedPage=\(String(describing: lastEmittedPage)) C.contentOffset=\(String(describing: scroll?.contentOffset)) D.topLeftResolvedPage=\(topLeftPage) E.centerResolvedPage=\(centerPage) restorationComplete=\(restorationComplete) restoreVerified=\(restoreVerified) userHasInteracted=\(userHasInteracted) isDecelerating=\(String(describing: scroll?.isDecelerating)) isDragging=\(String(describing: scroll?.isDragging)) isTracking=\(String(describing: scroll?.isTracking))")
+    }
+    #endif
+    guard viewportTrustedForEmission, let snapshot = currentViewport() else {
+      #if DEBUG
+      print("[material-viewport] native capture SUPPRESSED (not yet trusted) restored=\(restorationComplete) verified=\(restoreVerified) userInteracted=\(userHasInteracted)")
+      #endif
+      return [:]
+    }
+    #if DEBUG
+    print("[material-viewport] native capture F.anchor page=\(snapshot.pageIndex) scale=\(snapshot.scale) anchor=(\(snapshot.anchor.x),\(snapshot.anchor.y)) restored=\(restorationComplete)")
+    #endif
+    return [
+      "version": 1,
+      "pageIndex": snapshot.pageIndex,
+      "scaleFactor": snapshot.scale,
+      "anchorX": snapshot.anchor.x,
+      "anchorY": snapshot.anchor.y,
+    ]
+  }
+
+  private func goToPage(_ pageNumber: Int, reason: String) {
+    guard let document else {
+      #if DEBUG
+      print("[material-viewport] native goToPage SKIP (document nil) requested=\(pageNumber) reason=\(reason)")
+      #endif
+      return
+    }
     let clampedPage = max(1, min(pageNumber, document.pageCount))
     guard let page = document.page(at: clampedPage - 1) else { return }
+    #if DEBUG
+    print("[material-viewport] native goToPage requested=\(pageNumber) clamped=\(clampedPage) reason=\(reason)")
+    #endif
     pdfView.go(to: page)
     emitCurrentPage()
   }
@@ -361,6 +776,16 @@ public final class PdfAnnotationView: ExpoView {
   @objc private func handlePencilGesture(_ recognizer: PencilDrawGestureRecognizer) {
     switch recognizer.state {
     case .began:
+      // Exclusive interaction priority while a Pencil stroke is physically
+      // in progress: a resting palm or stray finger is `.direct`-type touch,
+      // which the mode-level allowedTouchTypes restriction above already
+      // permits for panning between strokes — so without this, palm contact
+      // during an active stroke can still drive PDFView's own pan/pinch and
+      // move the viewport out from under the hand that's writing. Disabling
+      // every other recognizer for the duration of just this one stroke
+      // (restored in .ended/.cancelled/.failed below) blocks that without
+      // touching intentional finger scroll/pinch between strokes.
+      setNonPencilGesturesEnabled(false)
       let p = recognizer.location(in: pdfView)
       let overlayPoint = recognizer.location(in: annotationOverlay)
       #if DEBUG
@@ -399,10 +824,11 @@ public final class PdfAnnotationView: ExpoView {
           emitPageReplacement(replacement.strokes, pageNumber: replacement.pageNumber)
         }
       } else {
-        annotationOverlay.appendPoint(at: p)
+        for point in recognizer.confirmedPoints { annotationOverlay.appendPoint(at: point) }
       }
 
     case .ended:
+      setNonPencilGesturesEnabled(true)
       if annotationMode == "eraser" {
         #if DEBUG
         print("[PdfAnnotationView] eraser ended")
@@ -410,18 +836,22 @@ public final class PdfAnnotationView: ExpoView {
         annotationOverlay.cancelStroke()
         annotationOverlay.hideEraserPreview()
         emitEraserGestureEnded(at: recognizer.location(in: pdfView))
-      } else if let commit = annotationOverlay.endStroke() {
+      } else {
+        for point in recognizer.confirmedPoints { annotationOverlay.appendPoint(at: point) }
+        if let commit = annotationOverlay.endStroke() {
         #if DEBUG
         print("[PdfAnnotationView] pencil .ended commit page=\(commit.pageNumber) points=\(commit.stroke.points.count)")
         #endif
         emitStrokeCommitted(commit.stroke, pageNumber: commit.pageNumber)
-      } else {
+        } else {
         #if DEBUG
         print("[PdfAnnotationView] pencil .ended NO commit (empty stroke)")
         #endif
+        }
       }
 
     case .cancelled, .failed:
+      setNonPencilGesturesEnabled(true)
       if annotationMode == "eraser" {
         #if DEBUG
         print("[PdfAnnotationView] eraser ended state=\(recognizer.state.rawValue)")
@@ -441,12 +871,15 @@ public final class PdfAnnotationView: ExpoView {
   // MARK: - Notifications + KVO
 
   @objc private func handlePageChanged(_ notification: Notification) {
+    traceRestore("PDFViewPageChanged")
     emitCurrentPage()
     annotationOverlay.setNeedsDisplay()
+    scheduleViewportSnapshot()
   }
 
   @objc private func handleAnnotationLayoutChange() {
     annotationOverlay.setNeedsDisplay()
+    scheduleViewportSnapshot()
   }
 
   private func startObservingScroll() {
@@ -454,6 +887,12 @@ public final class PdfAnnotationView: ExpoView {
     if let scroll = findInnerScrollView(in: pdfView) {
       scroll.addObserver(self, forKeyPath: "bounds", options: [.new], context: nil)
       scroll.addObserver(self, forKeyPath: "contentOffset", options: [.new], context: nil)
+      // Explicit user-navigation signal, independent of PDFViewPageChanged
+      // (which PDFKit also fires during layout/restore, not only real
+      // touches). Adding a target here observes the gesture without taking
+      // over it — PDFKit's own handling on these recognizers is untouched.
+      scroll.panGestureRecognizer.addTarget(self, action: #selector(handleUserScrollGesture(_:)))
+      scroll.pinchGestureRecognizer?.addTarget(self, action: #selector(handleUserScrollGesture(_:)))
       observedScrollView = scroll
       applyWorkspaceCanvasColors()
     }
@@ -463,8 +902,23 @@ public final class PdfAnnotationView: ExpoView {
     if let scroll = observedScrollView {
       scroll.removeObserver(self, forKeyPath: "bounds")
       scroll.removeObserver(self, forKeyPath: "contentOffset")
+      scroll.panGestureRecognizer.removeTarget(self, action: #selector(handleUserScrollGesture(_:)))
+      scroll.pinchGestureRecognizer?.removeTarget(self, action: #selector(handleUserScrollGesture(_:)))
     }
     observedScrollView = nil
+  }
+
+  /// Fires on the user's own pan/pinch gesture beginning on the PDF's
+  /// internal scroll view. This is the ONLY thing that lifts a
+  /// failed-verification restore's protection on the saved viewport — see
+  /// viewportTrustedForEmission's doc comment for why PDFViewPageChanged
+  /// itself is not a safe substitute for this.
+  @objc private func handleUserScrollGesture(_ recognizer: UIGestureRecognizer) {
+    guard recognizer.state == .began, !userHasInteracted else { return }
+    userHasInteracted = true
+    #if DEBUG
+    print("[material-viewport] native userHasInteracted=true (gesture began) — restore protection lifted if it had failed")
+    #endif
   }
 
   private func findInnerScrollView(in view: UIView) -> UIScrollView? {
@@ -481,6 +935,18 @@ public final class PdfAnnotationView: ExpoView {
       recognizers.append(contentsOf: allGestureRecognizers(in: subview))
     }
     return recognizers
+  }
+
+  /// Toggles every gesture recognizer in the PDFView hierarchy EXCEPT the
+  /// Pencil recognizer itself. Used to give an active Pencil stroke
+  /// exclusive interaction priority — see the .began/.ended/.cancelled
+  /// call sites in handlePencilGesture. Disabling cancels anything already
+  /// tracking; re-enabling only affects the NEXT touch, so this never
+  /// resurrects a gesture that was cancelled mid-recognition.
+  private func setNonPencilGesturesEnabled(_ enabled: Bool) {
+    for recognizer in allGestureRecognizers(in: pdfView) where recognizer !== pencilGesture {
+      recognizer.isEnabled = enabled
+    }
   }
 
   private func applyPdfGestureTouchPolicy() {
@@ -544,16 +1010,26 @@ public final class PdfAnnotationView: ExpoView {
     context: UnsafeMutableRawPointer?
   ) {
     annotationOverlay.setNeedsDisplay()
+    if keyPath == "contentOffset" || keyPath == "bounds" { scheduleViewportSnapshot() }
   }
 
   // MARK: - Event helpers
 
   private func emitCurrentPage() {
+    guard restorationComplete else {
+      #if DEBUG
+      print("[material-viewport] native emitCurrentPage SUPPRESSED (restorationComplete=false)")
+      #endif
+      return
+    }
     guard let document, let currentPage = pdfView.currentPage else { return }
     let pageNumber = document.index(for: currentPage) + 1
     guard pageNumber > 0 else { return }
     if lastEmittedPage == pageNumber { return }
     lastEmittedPage = pageNumber
+    #if DEBUG
+    print("[material-viewport] native emitCurrentPage SENT pageNumber=\(pageNumber) totalPages=\(document.pageCount)")
+    #endif
     onPageChanged([
       "pageNumber": pageNumber,
       "totalPages": document.pageCount
@@ -589,6 +1065,69 @@ public final class PdfAnnotationView: ExpoView {
       }
     }
     onEraserGestureEnded(payload)
+  }
+
+  // MARK: - Finger text annotations
+
+  @objc private func handleFingerLongPress(_ recognizer: UILongPressGestureRecognizer) {
+    guard recognizer.state == .began, annotationMode == "scroll" else { return }
+    let point = recognizer.location(in: pdfView)
+    guard let document, let page = pdfView.page(for: point, nearest: true) else { return }
+    let pageNumber = document.index(for: page) + 1
+    let pagePoint = pdfView.convert(point, to: page)
+    if let pending = pendingTextMove {
+      pendingTextMove = nil
+      onTextAnnotationAction(["action": "move", "pageNumber": pageNumber, "annotationId": pending.id, "x": pagePoint.x, "y": pagePoint.y])
+      return
+    }
+    if let existing = annotationOverlay.textAnnotation(at: point) {
+      onTextAnnotationAction(["action": "select", "pageNumber": existing.pageNumber, "annotationId": existing.id])
+      presentTextActions(existing, from: recognizer.view ?? pdfView)
+      return
+    }
+    let clipboard = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    guard !clipboard.isEmpty else { return }
+    let menu = UIAlertController(title: "Course Material", message: nil, preferredStyle: .actionSheet)
+    menu.addAction(UIAlertAction(title: "Paste", style: .default) { [weak self] _ in
+      self?.onTextAnnotationAction(["action": "paste", "pageNumber": pageNumber, "text": clipboard, "x": pagePoint.x, "y": pagePoint.y])
+    })
+    menu.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+    present(menu, from: recognizer.view ?? pdfView)
+  }
+
+  private func presentTextActions(_ annotation: TextAnnotationHit, from source: UIView) {
+    let menu = UIAlertController(title: "Text", message: nil, preferredStyle: .actionSheet)
+    menu.addAction(UIAlertAction(title: "Move", style: .default) { [weak self] _ in
+      self?.pendingTextMove = (annotation.id, annotation.pageNumber)
+      self?.onTextAnnotationAction(["action": "move", "pageNumber": annotation.pageNumber, "annotationId": annotation.id])
+    })
+    menu.addAction(UIAlertAction(title: "Edit", style: .default) { [weak self] _ in
+      self?.onTextAnnotationAction(["action": "edit", "pageNumber": annotation.pageNumber, "annotationId": annotation.id])
+    })
+    menu.addAction(UIAlertAction(title: "Copy", style: .default) { [weak self] _ in
+      UIPasteboard.general.string = annotation.text
+      self?.onTextAnnotationAction(["action": "copy", "pageNumber": annotation.pageNumber, "annotationId": annotation.id])
+    })
+    menu.addAction(UIAlertAction(title: "Delete", style: .destructive) { [weak self] _ in
+      self?.onTextAnnotationAction(["action": "delete", "pageNumber": annotation.pageNumber, "annotationId": annotation.id])
+    })
+    menu.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+    present(menu, from: source)
+  }
+
+  private func present(_ controller: UIAlertController, from source: UIView) {
+    var responder: UIResponder? = self
+    var owner: UIViewController?
+    while let next = responder?.next {
+      if let controller = next as? UIViewController { owner = controller; break }
+      responder = next
+    }
+    guard let owner else { return }
+    if let popover = controller.popoverPresentationController {
+      popover.sourceView = source
+      popover.sourceRect = CGRect(x: source.bounds.midX, y: source.bounds.midY, width: 1, height: 1)
+    }
+    owner.present(controller, animated: true)
   }
 
   private func serializeStroke(_ stroke: AnnotationStroke) -> [String: Any] {
@@ -628,6 +1167,7 @@ extension PdfAnnotationView: UIGestureRecognizerDelegate {
 /// Pencil-only gesture recognizer. `allowedTouchTypes = [.pencil]` is the
 /// OS-level filter that reliably routes only Apple Pencil touches to us.
 final class PencilDrawGestureRecognizer: UIGestureRecognizer {
+  private(set) var confirmedPoints: [CGPoint] = []
   override init(target: Any?, action: Selector?) {
     super.init(target: target, action: action)
   }
@@ -640,9 +1180,7 @@ final class PencilDrawGestureRecognizer: UIGestureRecognizer {
     guard let touch = touches.first, touch.type == .pencil else {
       state = .failed; return
     }
-    #if DEBUG
-    print("[PencilDrawGestureRecognizer] touchesBegan touch.type=\(touch.type.rawValue) (.pencil=\(UITouch.TouchType.pencil.rawValue))")
-    #endif
+    confirmedPoints = [touch.location(in: view)]
     state = .began
   }
 
@@ -650,21 +1188,91 @@ final class PencilDrawGestureRecognizer: UIGestureRecognizer {
     super.touchesMoved(touches, with: event)
     guard state == .began || state == .changed else { return }
     guard let touch = touches.first, touch.type == .pencil else { return }
+    confirmedPoints = (event.coalescedTouches(for: touch) ?? [touch]).map { $0.location(in: view) }
     state = .changed
   }
 
   override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
     super.touchesEnded(touches, with: event)
+    confirmedPoints = touches.filter { $0.type == .pencil }.map { $0.location(in: view) }
     state = (state == .began || state == .changed) ? .ended : .failed
   }
 
   override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
     super.touchesCancelled(touches, with: event)
+    confirmedPoints = []
     state = .cancelled
   }
 }
 
 // MARK: - AnnotationOverlay (pure rendering)
+
+/// Each live chunk has at most 32 samples: assigning its CGPath never copies
+/// the entire stroke. The parent opacity composites chunk joins uniformly.
+final class PageInkStrokeLayer: CALayer {
+  private let inkColor: CGColor
+  private let inkWidth: CGFloat
+  private var chunk = CAShapeLayer()
+  private var path = CGMutablePath()
+  private var sampleCount = 0
+  private var lastPoint: CGPoint?
+  private var dot: CAShapeLayer?
+
+  init(color: String, width: Double, opacity: Double) {
+    inkColor = (UIColor(annotationHex: color) ?? .black).cgColor
+    inkWidth = CGFloat(width)
+    super.init()
+    self.opacity = Float(opacity)
+    allowsGroupOpacity = true
+    masksToBounds = false
+    startChunk()
+  }
+  override init(layer: Any) {
+    let source = layer as! PageInkStrokeLayer
+    inkColor = source.inkColor
+    inkWidth = source.inkWidth
+    super.init(layer: layer)
+  }
+  required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+  private func startChunk() {
+    chunk = CAShapeLayer()
+    chunk.strokeColor = inkColor
+    chunk.fillColor = nil
+    chunk.lineWidth = inkWidth
+    chunk.lineCap = .round
+    chunk.lineJoin = .round
+    chunk.actions = ["path": NSNull(), "position": NSNull(), "bounds": NSNull()]
+    addSublayer(chunk)
+    path = CGMutablePath()
+    sampleCount = 0
+    if let lastPoint { path.move(to: lastPoint) }
+  }
+
+  func append(_ point: CGPoint) {
+    if point == lastPoint { return }
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    if lastPoint == nil {
+      let first = CAShapeLayer()
+      first.fillColor = inkColor
+      first.path = CGPath(ellipseIn: CGRect(x: point.x - inkWidth / 2, y: point.y - inkWidth / 2,
+                                            width: inkWidth, height: inkWidth), transform: nil)
+      addSublayer(first)
+      dot = first
+      path.move(to: point)
+    } else {
+      if sampleCount >= 32 { startChunk() }
+      path.addLine(to: point)
+      chunk.path = path
+      dot?.removeFromSuperlayer()
+      dot = nil
+    }
+    sampleCount += 1
+    lastPoint = point
+    CATransaction.commit()
+  }
+}
 
 /// Transparent UIView that draws committed + in-progress strokes on top of
 /// the PDF. NOT a touch surface — `isUserInteractionEnabled = false`. The
@@ -685,6 +1293,20 @@ final class AnnotationOverlay: UIView {
 
   /// Committed strokes loaded from JS, keyed by 1-based page number.
   private var pagedStrokes: [Int: [AnnotationStroke]] = [:]
+  /// IDs of strokes committed here (via `endStroke`) that a subsequent
+  /// `loadAnnotations` snapshot has not yet echoed back. JS rebuilds and
+  /// re-sends the whole `annotationsByPage` prop asynchronously after each
+  /// commit; a snapshot captured before that round-trip completes is stale
+  /// and must not be allowed to delete a stroke the user can already see.
+  /// Once a snapshot DOES contain the id, JS becomes canonical again for it
+  /// (including a real edit or delete), and the id is dropped from this set.
+  private var pendingLocalStrokeIds: Set<String> = []
+  private var pageInkLayers: [Int: CALayer] = [:]
+  private var savedInkLayers: [String: PageInkStrokeLayer] = [:]
+  private var liveInkLayer: PageInkStrokeLayer?
+  private weak var inkDocumentView: UIView?
+  private var pagedTextAnnotations: [Int: [TextAnnotation]] = [:]
+  var selectedTextAnnotationId: String? { didSet { setNeedsDisplay() } }
 
   // In-progress stroke state.
   private var inProgressStrokeId: String?
@@ -711,6 +1333,59 @@ final class AnnotationOverlay: UIView {
 
   required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
+  /// PDFKit owns the enclosing scroll/zoom transform. Three basis points
+  /// account for crop origins and rotated PDF pages without per-sample remaps.
+  private func pageInkLayer(_ pageNumber: Int) -> CALayer? {
+    guard let pdfView, let host = pdfView.documentView,
+          let page = pdfView.document?.page(at: pageNumber - 1) else { return nil }
+    if inkDocumentView !== host {
+      pageInkLayers.values.forEach { $0.removeFromSuperlayer() }
+      pageInkLayers.removeAll()
+      savedInkLayers.removeAll()
+      inkDocumentView = host
+    }
+    let layer = pageInkLayers[pageNumber] ?? CALayer()
+    if layer.superlayer == nil {
+      layer.anchorPoint = .zero
+      host.layer.addSublayer(layer)
+      pageInkLayers[pageNumber] = layer
+    }
+    func mapped(_ p: CGPoint) -> CGPoint { host.convert(pdfView.convert(p, from: page), from: pdfView) }
+    let origin = mapped(.zero), x = mapped(CGPoint(x: 1, y: 0)), y = mapped(CGPoint(x: 0, y: 1))
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    layer.setAffineTransform(CGAffineTransform(a: x.x - origin.x, b: x.y - origin.y,
+      c: y.x - origin.x, d: y.y - origin.y, tx: origin.x, ty: origin.y))
+    CATransaction.commit()
+    return layer
+  }
+
+  private func syncPageInk() {
+    guard pdfView?.documentView != nil else { return }
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    let retainedIds = Set(pagedStrokes.values.flatMap { $0.map { $0.id } })
+    for id in Array(savedInkLayers.keys) where !retainedIds.contains(id) {
+      savedInkLayers.removeValue(forKey: id)?.removeFromSuperlayer()
+    }
+    for (number, strokes) in pagedStrokes {
+      guard let pageLayer = pageInkLayer(number) else { continue }
+      for stroke in strokes {
+        if let existing = savedInkLayers[stroke.id] {
+          if existing.superlayer !== pageLayer { pageLayer.addSublayer(existing) }
+          continue
+        }
+        let ink = PageInkStrokeLayer(color: stroke.color, width: stroke.width, opacity: stroke.opacity)
+        stroke.points.forEach { ink.append($0) }
+        pageLayer.addSublayer(ink)
+        savedInkLayers[stroke.id] = ink
+      }
+    }
+    if let number = inProgressPageNumber, let liveInkLayer, let pageLayer = pageInkLayer(number),
+       liveInkLayer.superlayer !== pageLayer { pageLayer.addSublayer(liveInkLayer) }
+    CATransaction.commit()
+  }
+
   // MARK: - Stroke API (called by PdfAnnotationView's gesture handler)
 
   /// `viewPoint` is in the host PDFView's coordinate space; since the overlay
@@ -732,10 +1407,15 @@ final class AnnotationOverlay: UIView {
     inProgressColor = color
     inProgressWidth = width
     inProgressOpacity = tool == "highlighter" ? 0.34 : 1
+    if let pageLayer = pageInkLayer(pageNumber) {
+      let ink = PageInkStrokeLayer(color: color, width: width, opacity: inProgressOpacity)
+      pageLayer.addSublayer(ink)
+      ink.append(pagePoint)
+      liveInkLayer = ink
+    }
     #if DEBUG
     print("[AnnotationOverlay] beginStroke page=\(pageNumber) viewPoint=\(viewPoint) pagePoint=\(pagePoint)")
     #endif
-    setNeedsDisplay()
   }
 
   func appendPoint(at viewPoint: CGPoint) {
@@ -743,8 +1423,9 @@ final class AnnotationOverlay: UIView {
     guard let pageNumber = inProgressPageNumber else { return }
     guard let page = document.page(at: pageNumber - 1) else { return }
     let pagePoint = pdfView.convert(viewPoint, to: page)
+    if inProgressPoints.last == pagePoint { return }
     inProgressPoints.append(pagePoint)
-    setNeedsDisplay()
+    liveInkLayer?.append(pagePoint)
   }
 
   /// Returns the committed stroke + its page number, or nil if the stroke
@@ -767,6 +1448,9 @@ final class AnnotationOverlay: UIView {
       createdAt: AnnotationOverlay.isoFormatter.string(from: Date())
     )
     pagedStrokes[pageNumber, default: []].append(stroke)
+    pendingLocalStrokeIds.insert(id)
+    if let liveInkLayer { savedInkLayers[id] = liveInkLayer }
+    liveInkLayer = nil
     clearInProgress()
     setNeedsDisplay()
     return (stroke, pageNumber)
@@ -778,6 +1462,8 @@ final class AnnotationOverlay: UIView {
   }
 
   private func clearInProgress() {
+    liveInkLayer?.removeFromSuperlayer()
+    liveInkLayer = nil
     inProgressStrokeId = nil
     inProgressPageNumber = nil
     inProgressPoints = []
@@ -820,6 +1506,10 @@ final class AnnotationOverlay: UIView {
       return nil
     }
 
+    // An intentional erase must win even if the erased stroke was itself
+    // still pending JS acknowledgement — otherwise the reconciliation in
+    // loadAnnotations would "protect" it right back into existence.
+    pendingLocalStrokeIds.remove(strokes[eraseIndex].id)
     strokes.remove(at: eraseIndex)
     pagedStrokes[pageNumber] = strokes
     setNeedsDisplay()
@@ -853,8 +1543,68 @@ final class AnnotationOverlay: UIView {
         if !strokes.isEmpty { loaded[pageNumber] = strokes }
       }
     }
+
+    // Stale-snapshot protection (see pendingLocalStrokeIds' doc comment).
+    // Any pending id present in this snapshot is now acknowledged by JS;
+    // any pending id ABSENT from it means this snapshot predates that
+    // stroke's round-trip, so the currently-held local copy is re-injected
+    // rather than dropped. This never creates a duplicate (only ids missing
+    // from `loaded` are re-added) and never blocks a real delete (an
+    // intentional erase removes the id from pendingLocalStrokeIds first).
+    let loadedIds = Set(loaded.values.flatMap { $0.map(\.id) })
+    pendingLocalStrokeIds.subtract(loadedIds)
+    if !pendingLocalStrokeIds.isEmpty {
+      for (pageNumber, strokes) in pagedStrokes {
+        let survivors = strokes.filter { pendingLocalStrokeIds.contains($0.id) }
+        guard !survivors.isEmpty else { continue }
+        loaded[pageNumber, default: []].append(contentsOf: survivors)
+      }
+    }
+
+    // Reuse identical native layers through the JS acknowledgement; invalidate
+    // only changed strokes (same-id move/style edits must not retain stale ink).
+    let prior = Dictionary(pagedStrokes.values.flatMap { $0 }.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+    for stroke in loaded.values.flatMap({ $0 }) {
+      if let old = prior[stroke.id],
+         old.points == stroke.points && old.color == stroke.color &&
+         old.width == stroke.width && old.opacity == stroke.opacity && old.tool == stroke.tool { continue }
+      savedInkLayers.removeValue(forKey: stroke.id)?.removeFromSuperlayer()
+    }
     pagedStrokes = loaded
     setNeedsDisplay()
+  }
+
+  func loadTextAnnotations(_ annotationsByPage: [String: Any]?) {
+    var loaded: [Int: [TextAnnotation]] = [:]
+    for (key, value) in annotationsByPage ?? [:] {
+      guard let pageNumber = Int(key), let values = value as? [[String: Any]] else { continue }
+      let annotations = values.compactMap { item -> TextAnnotation? in
+        guard let id = item["id"] as? String, let text = item["text"] as? String,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let x = AnnotationOverlay.coerceDouble(item["x"]), let y = AnnotationOverlay.coerceDouble(item["y"])
+        else { return nil }
+        return TextAnnotation(id: id, text: text, x: x, y: y,
+          width: max(40, AnnotationOverlay.coerceDouble(item["width"]) ?? 180),
+          fontSize: max(8, AnnotationOverlay.coerceDouble(item["fontSize"]) ?? 16))
+      }
+      if !annotations.isEmpty { loaded[pageNumber] = annotations }
+    }
+    pagedTextAnnotations = loaded
+    setNeedsDisplay()
+  }
+
+  func textAnnotation(at viewPoint: CGPoint) -> TextAnnotationHit? {
+    guard let pdfView, let document = pdfView.document,
+          let page = pdfView.page(for: viewPoint, nearest: true) else { return nil }
+    let pageNumber = document.index(for: page) + 1
+    let pagePoint = pdfView.convert(viewPoint, to: page)
+    for annotation in (pagedTextAnnotations[pageNumber] ?? []).reversed() {
+      let height = annotation.estimatedHeight
+      if CGRect(x: annotation.x, y: annotation.y - height, width: annotation.width, height: height + 8).contains(pagePoint) {
+        return TextAnnotationHit(id: annotation.id, text: annotation.text, pageNumber: pageNumber)
+      }
+    }
+    return nil
   }
 
   // MARK: - Drawing
@@ -865,32 +1615,15 @@ final class AnnotationOverlay: UIView {
           let document = pdfView.document
     else { return }
 
-    for (pageNumber, strokes) in pagedStrokes {
+    syncPageInk()
+
+    for (pageNumber, annotations) in pagedTextAnnotations {
       guard pageNumber > 0, pageNumber <= document.pageCount,
             let page = document.page(at: pageNumber - 1)
       else { continue }
-      for stroke in strokes where stroke.tool == "highlighter" {
-        drawStroke(stroke, page: page, in: ctx)
-      }
-      for stroke in strokes where stroke.tool != "highlighter" {
-        drawStroke(stroke, page: page, in: ctx)
-      }
+      for annotation in annotations { drawTextAnnotation(annotation, page: page, in: ctx) }
     }
 
-    if let pageNumber = inProgressPageNumber,
-       !inProgressPoints.isEmpty,
-       let page = document.page(at: pageNumber - 1) {
-      let live = AnnotationStroke(
-        id: inProgressStrokeId ?? "live",
-        tool: inProgressTool,
-        color: inProgressColor,
-        width: inProgressWidth,
-        opacity: inProgressOpacity,
-        points: inProgressPoints,
-        createdAt: ""
-      )
-      drawStroke(live, page: page, in: ctx)
-    }
 
     // Eraser cursor sits on top of everything else so it's always readable.
     if let previewPoint = eraserPreviewPoint {
@@ -1001,6 +1734,29 @@ final class AnnotationOverlay: UIView {
     ctx.restoreGState()
   }
 
+  private func drawTextAnnotation(_ annotation: TextAnnotation, page: PDFPage, in ctx: CGContext) {
+    guard let pdfView else { return }
+    let origin = pdfView.convert(CGPoint(x: annotation.x, y: annotation.y), from: page)
+    let scale = max(0.01, pdfView.scaleFactor)
+    let width = CGFloat(annotation.width) * scale
+    let font = UIFont.systemFont(ofSize: CGFloat(annotation.fontSize) * scale)
+    let paragraph = NSMutableParagraphStyle(); paragraph.lineBreakMode = .byWordWrapping
+    let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.label, .paragraphStyle: paragraph]
+    let textSize = (annotation.text as NSString).boundingRect(with: CGSize(width: width, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: attributes, context: nil).size
+    let rect = CGRect(x: origin.x, y: origin.y - textSize.height, width: width, height: textSize.height + 4)
+    ctx.saveGState()
+    if selectedTextAnnotationId == annotation.id {
+      ctx.setStrokeColor(UIColor.systemBlue.withAlphaComponent(0.9).cgColor)
+      ctx.setFillColor(UIColor.systemBlue.withAlphaComponent(0.10).cgColor)
+      ctx.setLineWidth(1 / scale)
+      ctx.fill(rect.insetBy(dx: -4, dy: -3)); ctx.stroke(rect.insetBy(dx: -4, dy: -3))
+    }
+    UIGraphicsPushContext(ctx)
+    (annotation.text as NSString).draw(in: rect, withAttributes: attributes)
+    UIGraphicsPopContext()
+    ctx.restoreGState()
+  }
+
   private func strokeHitsEraser(
     _ stroke: AnnotationStroke,
     page: PDFPage,
@@ -1084,6 +1840,22 @@ struct AnnotationStroke {
   let opacity: Double
   let points: [CGPoint]
   let createdAt: String
+}
+
+struct TextAnnotation {
+  let id: String
+  let text: String
+  let x: Double
+  let y: Double
+  let width: Double
+  let fontSize: Double
+  var estimatedHeight: Double { max(fontSize * 1.5, ceil(Double(text.count) / max(1, width / (fontSize * 0.55))) * fontSize * 1.35) }
+}
+
+struct TextAnnotationHit {
+  let id: String
+  let text: String
+  let pageNumber: Int
 }
 
 private extension UIColor {

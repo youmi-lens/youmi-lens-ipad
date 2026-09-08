@@ -188,6 +188,77 @@ assert.equal('transcript' in afterTranscriptEdit, false, 'user English transcrip
 assert.equal('transcriptZh' in afterTranscriptEdit, false);
 assert.equal('translatedTranscript' in afterTranscriptEdit, false);
 
+// ---- WR112/WR2 production bug (Sep 4 2026): translated_live_transcript fallback ----
+// Real production row: ai_status='done', translation_ready=true, translated_summary
+// populated — but translated_transcript AND transcript_zh both null. The actual
+// translated transcript lived only in translated_live_transcript (12067 chars,
+// captured live during recording). Before the fix this permanently computed
+// 'processing' despite the backend being genuinely, fully done.
+const wr2Snapshot = {
+  source_language: 'en',
+  translation_language: 'zh-Hans',
+  transcript: 'So today what I want you to do is...',
+  transcript_zh: null,
+  translated_transcript: null,
+  translated_live_transcript: '今天我想让你做的是...',
+  source_summary: 'A short summary of the lecture.',
+  translated_summary: '讲座的简短摘要。',
+  ai_status: 'done',
+};
+const wr2 = mergeProcessingSnapshot({}, wr2Snapshot);
+assert.equal(wr2.processingStatus, 'ready', 'translated_live_transcript must count as valid translated content when translated_transcript/transcript_zh are both absent');
+
+// The fallback is exercised only when the dedicated columns are truly empty —
+// a dedicated translated_transcript/transcript_zh value still wins outright.
+const dedicatedColumnStillWins = mergeProcessingSnapshot(
+  {},
+  { ...wr2Snapshot, transcript_zh: '专用列的翻译', translated_live_transcript: 'stale live capture' },
+);
+assert.equal(dedicatedColumnStillWins.processingStatus, 'ready');
+
+// The intentional race guard (frenchChineseRace, above) must still hold when
+// NONE of the three sources — translated_transcript, transcript_zh, or
+// translated_live_transcript — have landed yet.
+const genuineRaceStillBlocked = mergeProcessingSnapshot(
+  {},
+  { ...wr2Snapshot, translated_live_transcript: null },
+);
+assert.equal(genuineRaceStillBlocked.processingStatus, 'processing', 'with no translated content anywhere, done is still just a race, not readiness');
+
+// ---- Terminal-state monotonicity: READY must never regress to PROCESSING ----
+// A lecture already marked 'ready' locally must stay 'ready' even if a fresh
+// snapshot happens to look incomplete this pass (a stale/partial poll
+// response, a field temporarily missing) — the only ways out of 'ready' are
+// an authoritative backend failure, or a user-triggered retry that resets
+// processingStatus itself before requesting a new snapshot.
+const readyStaysReadyOnStaleSnapshot = mergeProcessingSnapshot(
+  { processingStatus: 'ready' },
+  { ai_status: 'processing', transcript: null, summary_en: null },
+);
+assert.equal(readyStaysReadyOnStaleSnapshot.processingStatus, 'ready', 'a stale/incomplete snapshot must not regress an already-ready lecture');
+
+const readyStaysReadyOnIncompleteDoneSnapshot = mergeProcessingSnapshot(
+  { processingStatus: 'ready' },
+  { ai_status: 'done', source_language: 'en', translation_language: 'zh-Hans', transcript: 'x', source_summary: 's' /* translated fields missing this pass */ },
+);
+assert.equal(readyStaysReadyOnIncompleteDoneSnapshot.processingStatus, 'ready');
+
+// An authoritative backend failure still surfaces even over an already-ready lecture.
+const readyCanStillReportABackendFailure = mergeProcessingSnapshot(
+  { processingStatus: 'ready' },
+  { ai_status: 'failed', ai_error: 'reprocess failed' },
+);
+assert.equal(readyCanStillReportABackendFailure.processingStatus, 'failed', 'a genuine backend failure must still be reportable, not masked by the monotonicity guard');
+
+// A lecture NOT already ready (e.g. reset by an intentional retry, which sets
+// processingStatus to 'not_started' before the next snapshot is requested)
+// is completely unaffected by the monotonicity guard — normal derivation proceeds.
+const retryResetLectureDerivesNormally = mergeProcessingSnapshot(
+  { processingStatus: 'not_started' },
+  { ai_status: 'queued' },
+);
+assert.equal(retryResetLectureDerivesNormally.processingStatus, 'processing');
+
 // ---- isLectureComplete: the single canonical routing/gating predicate ----
 // CASE 9 / CASE 15: only 'ready' is complete — never merely uploaded, never
 // merely a live draft, never a terminal failure.

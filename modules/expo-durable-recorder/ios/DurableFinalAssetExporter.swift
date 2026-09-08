@@ -34,57 +34,12 @@ final class DurableFinalAssetExporter {
     }
 
     try store.removeStaleFinalAssetTemporaryFile(plan)
-    let composition = AVMutableComposition()
-    guard let compositionTrack = composition.addMutableTrack(
-      withMediaType: .audio,
-      preferredTrackID: kCMPersistentTrackID_Invalid
-    ) else {
-      throw DurableRecorderCoreError.finalAssetExportFailed("Unable to allocate an audio composition track.")
-    }
-
-    var cursor = CMTime.zero
-    for sourceURL in plan.sourceURLs {
-      guard FileManager.default.fileExists(atPath: sourceURL.path) else {
-        throw DurableRecorderCoreError.finalAssetMissing
-      }
-      let asset = AVURLAsset(url: sourceURL)
-      let tracks = try await asset.loadTracks(withMediaType: .audio)
-      guard let sourceTrack = tracks.first else {
-        throw DurableRecorderCoreError.finalAssetExportFailed("A source segment has no audio track.")
-      }
-      let duration = try await asset.load(.duration)
-      guard duration.isValid, duration.seconds > 0 else {
-        throw DurableRecorderCoreError.finalAssetExportFailed("A source segment has no readable duration.")
-      }
-      try compositionTrack.insertTimeRange(
-        CMTimeRange(start: .zero, duration: duration),
-        of: sourceTrack,
-        at: cursor
-      )
-      cursor = CMTimeAdd(cursor, duration)
-    }
-
-    guard let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetAppleM4A) else {
-      throw DurableRecorderCoreError.finalAssetExportFailed("AVAssetExportSession could not be created.")
-    }
-    exporter.outputURL = plan.temporaryURL
-    exporter.outputFileType = .m4a
-    exporter.shouldOptimizeForNetworkUse = true
-    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-      exporter.exportAsynchronously {
-        switch exporter.status {
-        case .completed:
-          continuation.resume()
-        case .failed, .cancelled:
-          continuation.resume(throwing: DurableRecorderCoreError.finalAssetExportFailed(
-            exporter.error?.localizedDescription ?? "The export did not complete."
-          ))
-        default:
-          continuation.resume(throwing: DurableRecorderCoreError.finalAssetExportFailed(
-            "The export ended in state \(exporter.status.rawValue)."
-          ))
-        }
-      }
+    do {
+      try await AudioSegmentComposer.compose(orderedSources: plan.sourceURLs, outputURL: plan.temporaryURL)
+    } catch AudioSegmentComposerError.sourceMissing {
+      throw DurableRecorderCoreError.finalAssetMissing
+    } catch let error as AudioSegmentComposerError {
+      throw DurableRecorderCoreError.finalAssetExportFailed(error.message)
     }
     _ = try inspector.inspect(url: plan.temporaryURL)
     try store.promoteFinalAsset(plan)

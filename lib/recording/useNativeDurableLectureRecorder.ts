@@ -24,6 +24,7 @@ import {
 } from '@/modules/expo-durable-recorder';
 
 import { durationBucket, logRecordingEvent } from './diagnostics';
+import { finalizeAndExportDurableSession } from './durableSessionRecovery';
 import { finalizedDurationMillis, recoverableSessionsForLecture } from './policy.mjs';
 import { evaluateNativeStatusUpdate } from './statusSync.mjs';
 import type { LectureRecorder, RecorderPermission } from './types';
@@ -280,37 +281,20 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
 
   const finishSession = useCallback(async (session: DurableRecordingSession): Promise<string | null> => {
     finishingRef.current = true;
-    try {
-      let finalSession = session;
-      if (finalSession.state === 'paused' || finalSession.state === 'recording') {
-        try {
-          const stopped = await stopNative({ recordingSessionId: finalSession.recordingSessionId });
-          noteStatusSequence(stopped);
-          if (stopped.session) finalSession = stopped.session;
-        } catch {
-          const recovered = await recoverRecordingSession({ recordingSessionId: finalSession.recordingSessionId });
-          finalSession = recovered.session;
-          const stopped = await stopNative({ recordingSessionId: finalSession.recordingSessionId });
-          noteStatusSequence(stopped);
-          if (stopped.session) finalSession = stopped.session;
-        }
-      } else if (finalSession.state === 'finalizing') {
-        finalSession = await finalizeSession({ recordingSessionId: finalSession.recordingSessionId });
-      }
-      const output = await exportFinalizedAsset({ recordingSessionId: finalSession.recordingSessionId });
-      applySession(output.session); activeRef.current = false; setIsRecording(false); setIsPaused(false);
-      setRecordingUri(output.fileUri);
-      logRecordingEvent('native_recording_finalized', {
-        segmentCount: output.session.segments.length,
-        durationBucket: durationBucket(output.session.finalAsset?.durationMs ?? null),
-        sessionState: output.session.state,
-      });
-      return output.fileUri;
-    } catch (failure) {
+    const result = await finalizeAndExportDurableSession(session, noteStatusSequence);
+    if (!result.ok) {
       finishingRef.current = false;
-      fail('Could not finish the recording.', failure);
+      fail('Could not finish the recording.', result.error);
       return null;
     }
+    applySession(result.session); activeRef.current = false; setIsRecording(false); setIsPaused(false);
+    setRecordingUri(result.fileUri);
+    logRecordingEvent('native_recording_finalized', {
+      segmentCount: result.session.segments.length,
+      durationBucket: durationBucket(result.session.finalAsset?.durationMs ?? null),
+      sessionState: result.session.state,
+    });
+    return result.fileUri;
   }, [applySession, fail, noteStatusSequence]);
 
   const stopRecording = useCallback(async () => {

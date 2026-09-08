@@ -11,6 +11,7 @@ export const nativeSources = {
   core: 'modules/expo-durable-recorder/ios/DurableRecorderCore.swift',
   store: 'modules/expo-durable-recorder/ios/DurableRecorderStore.swift',
   recorder: 'modules/expo-durable-recorder/ios/DurableForegroundRecorder.swift',
+  composer: 'modules/expo-durable-recorder/ios/AudioSegmentComposer.swift',
   exporter: 'modules/expo-durable-recorder/ios/DurableFinalAssetExporter.swift',
 };
 

@@ -11,10 +11,12 @@
  * instead of red-screening.
  */
 import { Ionicons } from '@expo/vector-icons';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  AppState,
+  Alert,
   Animated,
   KeyboardAvoidingView,
   Modal,
@@ -32,22 +34,30 @@ import { FloatingMiniCaption } from '@/components/FloatingMiniCaption';
 import { MaterialFloatingToolbar } from '@/components/MaterialFloatingToolbar';
 import { PageIndicatorBadge } from '@/components/PageIndicatorBadge';
 import { useLiveCaptions } from '@/lib/liveCaptions';
+import { useRecordingNotes } from '@/lib/recordingNotes';
 import { useT, localizeSystemDefaultTitle } from '@/lib/i18n';
 import {
   MaterialAnnotationMode,
   MaterialAnnotationOverlay,
   type MaterialDrawingMode,
 } from '@/components/MaterialAnnotationOverlay';
-import { NativePdfAnnotationView } from '@/components/NativePdfAnnotationView';
+import { NativePdfAnnotationView, type NativePdfAnnotationViewRef } from '@/components/NativePdfAnnotationView';
 import { colors, fontSize, radius, spacing } from '@/constants/theme';
 import { resolveMaterialUri } from '@/lib/importMaterial';
-import type { MaterialAnnotationStroke } from '@/lib/models';
+import { clampedMaterialResumePage, compositePageCount, appendedPageCountAfterFinalPageContent } from '@/lib/materialWorkspace';
+import { materialViewportEqual, normalizeMaterialViewport } from '@/lib/materialViewport';
+import type { MaterialAnnotationStroke, MaterialTextAnnotation, MaterialViewport } from '@/lib/models';
 import type {
   NativePdfAnnotationMode,
   NativePdfAnnotationsByPage,
   NativePdfAnnotationsChangedEvent,
   NativePdfAnnotationStroke,
+  NativePdfTextAnnotationActionEvent,
+  NativePdfTextAnnotationsByPage,
+  NativePdfViewport,
 } from '@/modules/expo-pdf-annotation';
+import { exportAnnotatedPdfAsync } from '@/modules/expo-pdf-annotation';
+import * as Sharing from 'expo-sharing';
 import {
   addPencilDoubleTapListener,
   isPencilDoubleTapAvailable,
@@ -73,10 +83,15 @@ const HIGHLIGHTER_COLORS = [
 ];
 // `dot` is the preview-dot diameter shown inside each width/size nib (matches the
 // Notebook's nib visual language); `value` is the actual stroke width / radius.
+// PEN values are exactly Notebook's own PEN_WIDTHS (components/NotebookCanvas.tsx)
+// — they had drifted ~15-20% thicker at every tier, which is what made this pen
+// feel like a heavier marker than Notebook's despite every other part of the
+// drawing pipeline (gesture handling, point filtering, curve smoothing, opacity)
+// already being identical between the two.
 const PEN_WIDTHS = [
-  { key: 'Thin', value: 2.4, dot: 7 },
-  { key: 'Medium', value: 4, dot: 11 },
-  { key: 'Thick', value: 6.5, dot: 16 },
+  { key: 'Thin', value: 2, dot: 7 },
+  { key: 'Medium', value: 3.5, dot: 11 },
+  { key: 'Thick', value: 6, dot: 16 },
 ];
 const HIGHLIGHTER_WIDTHS = [
   { key: 'Narrow', value: 12, dot: 8 },
@@ -90,6 +105,10 @@ const ERASER_SIZES = [
 ];
 const MATERIAL_REVIEW_LECTURE_ID = '__material_review__';
 
+function debugMaterialViewport(event: string, values: Record<string, unknown>) {
+  if (__DEV__) console.log(`[material-viewport] ${event}`, values);
+}
+
 function materialScopeLectureId(materialId: string): string {
   return `material:${materialId}`;
 }
@@ -97,28 +116,62 @@ function materialScopeLectureId(materialId: string): string {
 export default function LectureMaterialWorkspaceScreen() {
   const t = useT();
   const router = useRouter();
+  const navigation = useNavigation();
   const insets = useSafeAreaInsets();
   const params = useLocalSearchParams<{ lectureId?: string; materialId?: string }>();
   const {
     getMaterial,
     updateMaterial,
     linkMaterialToLecture,
-    updateLectureMaterialLink,
-    materialLinksForLecture,
     annotationsForMaterialPage,
+    textAnnotationsForMaterialPage,
     addAnnotationStroke,
     replaceMaterialPageAnnotationStrokesForMaterial,
+    replaceMaterialPageTextAnnotationsForMaterial,
   } = useData();
 
   const lectureId = params.lectureId ?? '';
   const material = getMaterial(params.materialId);
   const materialReviewMode = lectureId === MATERIAL_REVIEW_LECTURE_ID;
-  const materialLink = !materialReviewMode
-    ? materialLinksForLecture(lectureId).find((link) => link.materialId === material?.id)
-    : undefined;
-  const initialLinkedPage = materialReviewMode
-    ? (material?.lastOpenedPage ?? 1)
-    : (materialLink?.lastOpenedPage ?? material?.lastOpenedPage ?? 1);
+  // A recording session can still be active in the background while the user
+  // browses materials through the standalone review route (materialReviewMode
+  // is purely a route-parameter check — it has no idea whether a session is
+  // actually running elsewhere). The Caption workspace must follow the
+  // RECORDING session, not the live-caption provider's network/API status —
+  // a live-caption backend outage (e.g. no DashScope key configured) must not
+  // make the classroom Caption workspace disappear while a lecture is still
+  // being recorded. isLectureSessionActive is the same authoritative,
+  // cross-screen "is the Recording screen currently running a session" signal
+  // app/lecture/[id].tsx already uses to know a recording is live elsewhere
+  // (see lib/recordingNotes.tsx) — registered true only while app/recording.tsx
+  // is mounted with an active pause/resume handler, false otherwise.
+  const { isLectureSessionActive: classroomSessionActive } = useRecordingNotes();
+  // Course Material is one user-scoped document per materialId. Its resume
+  // position must not vary according to the lecture route that happened to
+  // open it, so legacy link-local positions are deliberately not consulted.
+  const initialLinkedPage = clampedMaterialResumePage(
+    material?.lastOpenedPage,
+    compositePageCount(material?.sourcePageCount ?? material?.pageCount ?? 1, material?.appendedPageCount ?? 0),
+  );
+  // This value is intentionally captured once per reader mount. Passing a
+  // freshly persisted viewport back to native would replay restoration on
+  // every store update and turn ordinary reading into a feedback loop.
+  const [initialViewport] = useState<NativePdfViewport | undefined>(() =>
+    normalizeMaterialViewport(
+      material?.lastOpenedViewport,
+      compositePageCount(material?.sourcePageCount ?? material?.pageCount ?? 1, material?.appendedPageCount ?? 0),
+    ),
+  );
+  useEffect(() => {
+    debugMaterialViewport('mount-read', {
+      materialId: material?.id,
+      legacyPage: material?.lastOpenedPage,
+      viewport: initialViewport,
+      initialPage: initialViewport?.pageIndex ?? initialLinkedPage,
+    });
+  // Captured mount inputs are intentionally not live restore props.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const useNativePdfViewer = USE_NATIVE_PDF_VIEWER && Platform.OS === 'ios';
 
   // --- Native PDFKit annotation state (Phase 2) ---
@@ -142,7 +195,7 @@ export default function LectureMaterialWorkspaceScreen() {
   // churn the native prop and risk update-depth loops).
   const nativeLectureIdRef = useRef<string>(lectureId);
   const nativeMaterialIdRef = useRef<string | undefined>(material?.id);
-  const nativeCurrentPageRef = useRef<number>(initialLinkedPage);
+  const nativeCurrentPageRef = useRef<number>(initialViewport?.pageIndex ?? initialLinkedPage);
   useEffect(() => { nativeLectureIdRef.current = lectureId; }, [lectureId]);
   useEffect(() => { nativeMaterialIdRef.current = material?.id; }, [material?.id]);
 
@@ -167,8 +220,14 @@ export default function LectureMaterialWorkspaceScreen() {
     }
   }, [useNativePdfViewer]);
 
-  const [currentPage, setCurrentPage] = useState<number>(initialLinkedPage);
+  const [currentPage, setCurrentPage] = useState<number>(initialViewport?.pageIndex ?? initialLinkedPage);
   const [totalPages, setTotalPages] = useState<number>(material?.pageCount ?? 0);
+  const [sourcePageCount, setSourcePageCount] = useState<number>(material?.sourcePageCount ?? material?.pageCount ?? 0);
+  const [appendedPageCount, setAppendedPageCount] = useState<number>(material?.appendedPageCount ?? 0);
+  const [editingText, setEditingText] = useState<MaterialTextAnnotation | null>(null);
+  const [editingTextValue, setEditingTextValue] = useState('');
+  const [selectedTextAnnotationId, setSelectedTextAnnotationId] = useState<string | undefined>();
+  const [exporting, setExporting] = useState(false);
   const [loadingPdf, setLoadingPdf] = useState(true);
   const [pdfError, setPdfError] = useState<string | null>(null);
   const [annotationMode, setAnnotationMode] = useState<MaterialAnnotationMode>('scroll');
@@ -194,11 +253,15 @@ export default function LectureMaterialWorkspaceScreen() {
   // `material.lastOpenedPage` as the live `page` prop would cause the
   // viewer to jump every time we persist a new page, which itself fires
   // onPageChanged again and loops.
-  const [initialPage] = useState<number>(() => Math.max(1, initialLinkedPage));
+  const [initialPage] = useState<number>(() => Math.max(1, initialViewport?.pageIndex ?? initialLinkedPage));
   // Display scope is material-wide for every entry point. Recording mode still
   // writes new strokes to the current lecture id, but the viewer shows the
   // shared PDF history by default.
   const pageStrokes = annotationsForMaterialPage(material?.id ?? '', currentPage);
+  const sourcePageCountRef = useRef(sourcePageCount);
+  const appendedPageCountRef = useRef(appendedPageCount);
+  useEffect(() => { sourcePageCountRef.current = sourcePageCount; }, [sourcePageCount]);
+  useEffect(() => { appendedPageCountRef.current = appendedPageCount; }, [appendedPageCount]);
 
   // Redo only applies to the page it was undone on — drop it on any page change.
   useEffect(() => {
@@ -253,9 +316,91 @@ export default function LectureMaterialWorkspaceScreen() {
   const materialIdRef = useRef<string | undefined>(material?.id);
   const lectureIdRef = useRef<string | undefined>(lectureId || undefined);
   const savedPageCountRef = useRef<number | undefined>(material?.pageCount);
-  const savedLastPageRef = useRef<number | undefined>(materialLink?.lastOpenedPage ?? material?.lastOpenedPage);
-  const pendingPageRef = useRef<number | undefined>(materialLink?.lastOpenedPage ?? material?.lastOpenedPage);
+  const savedLastPageRef = useRef<number | undefined>(material?.lastOpenedPage);
+  const pendingPageRef = useRef<number | undefined>(material?.lastOpenedPage);
+  const savedViewportRef = useRef<MaterialViewport | undefined>(material?.lastOpenedViewport);
+  const pendingViewportRef = useRef<MaterialViewport | undefined>(undefined);
   const pageDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const totalPagesRef = useRef(totalPages);
+  useEffect(() => { totalPagesRef.current = totalPages; }, [totalPages]);
+
+  // The native iOS reader owns sampling scroll/zoom. JS merely retains its
+  // debounced, PDF-space snapshot and writes the latest complete value.
+  const flushViewportToStore = useCallback(() => {
+    const id = materialIdRef.current;
+    const viewport = pendingViewportRef.current;
+    if (!id || !viewport) {
+      debugMaterialViewport('persist-skip', { materialId: id, latestJsViewport: viewport });
+      return;
+    }
+    const pageChanged = viewport.pageIndex !== savedLastPageRef.current;
+    const viewportChanged = !materialViewportEqual(viewport, savedViewportRef.current);
+    if (!pageChanged && !viewportChanged) {
+      debugMaterialViewport('persist-skip-unchanged', { materialId: id, viewport });
+      return;
+    }
+    savedLastPageRef.current = viewport.pageIndex;
+    savedViewportRef.current = viewport;
+    debugMaterialViewport('persist-write', { materialId: id, viewport, pageChanged, viewportChanged });
+    updateMaterial(id, { lastOpenedPage: viewport.pageIndex, lastOpenedViewport: viewport });
+  }, [updateMaterial]);
+
+  const scheduleViewportPersist = useCallback(() => {
+    if (pageDebounceRef.current) clearTimeout(pageDebounceRef.current);
+    pageDebounceRef.current = setTimeout(() => {
+      pageDebounceRef.current = null;
+      flushViewportToStore();
+    }, 500);
+  }, [flushViewportToStore]);
+
+  // Authoritative flush for leave/background boundaries. The normal
+  // scroll/zoom path is debounced ~350ms natively + 500ms in JS — a fast
+  // "jump to page N, then immediately leave" beats both debounces, so
+  // `pendingViewportRef` can still hold an OLDER snapshot at the exact
+  // moment of leave. captureViewport() bypasses both debounces and reads
+  // PDFKit's current page/scale/anchor directly; awaiting its result (not
+  // just logging it) before persisting is what makes this authoritative
+  // rather than the previous fire-and-log pattern. Falls back to the latest
+  // JS snapshot (flushViewportToStore's existing behavior) if the native
+  // view is already gone or has nothing to report.
+  const persistAuthoritativeViewport = useCallback((nativePdf: NativePdfAnnotationViewRef | null) => {
+    if (!useNativePdfViewer || !nativePdf) {
+      flushViewportToStore();
+      return;
+    }
+    void nativePdf.captureViewport()
+      .then((nativeViewport) => {
+        const normalized = nativeViewport ? normalizeMaterialViewport(nativeViewport, totalPagesRef.current) : undefined;
+        debugMaterialViewport('authoritative-capture', {
+          materialId: materialIdRef.current,
+          nativeViewport,
+          normalized,
+          latestJsViewport: pendingViewportRef.current,
+        });
+        if (normalized) pendingViewportRef.current = normalized;
+      })
+      .catch((error) => {
+        debugMaterialViewport('authoritative-capture-failed', {
+          materialId: materialIdRef.current,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        flushViewportToStore();
+      });
+  }, [flushViewportToStore, useNativePdfViewer]);
+
+  // Imperative jump via the native reader / fallback viewer. Keeping the
+  // ref separate from the initial page prop prevents prop-driven page loops.
+  const pdfRef = useRef<NativePdfAnnotationViewRef | null>(null);
+
+  // True once the beforeRemove-driven authoritative capture has completed
+  // for this mount's leave attempt. Guards the classic beforeRemove
+  // recursion (preventDefault -> persist -> re-dispatch the original action
+  // -> beforeRemove fires again for that same removal) and tells the
+  // unmount-cleanup effect its own capture is now a redundant last resort,
+  // not the primary path.
+  const leavePersistenceCompletedRef = useRef(false);
 
   // Floating page indicator: purely local UI state. Auto-shows when the page
   // changes (or the PDF first loads), auto-hides after PAGE_NAV_HIDE_DELAY_MS
@@ -277,12 +422,6 @@ export default function LectureMaterialWorkspaceScreen() {
       navigatorHideTimerRef.current = null;
     }
   }, []);
-
-  // Imperative jump via react-native-pdf's setPage(n). Using the ref keeps
-  // the `page` prop locked at `initialPage` — that's what prevents the
-  // page-prop-drift loop class we fixed previously. Jumps fire onPageChanged
-  // exactly once per jump, which our existing handler safely picks up.
-  const pdfRef = useRef<{ setPage: (n: number) => void } | null>(null);
 
   // Go-to-page modal state. All local; never written to the store.
   const [jumpModalVisible, setJumpModalVisible] = useState(false);
@@ -321,10 +460,10 @@ export default function LectureMaterialWorkspaceScreen() {
     lectureIdRef.current = lectureId || undefined;
     materialIdRef.current = material.id;
     savedPageCountRef.current = material.pageCount;
-    savedLastPageRef.current = materialReviewMode
-      ? material.lastOpenedPage
-      : (materialLink?.lastOpenedPage ?? material.lastOpenedPage);
+    savedLastPageRef.current = material.lastOpenedPage;
+    savedViewportRef.current = material.lastOpenedViewport;
     pendingPageRef.current = savedLastPageRef.current;
+    pendingViewportRef.current = undefined;
   }, [lectureId, material?.id, materialReviewMode]);
 
   // On unmount, flush any pending page write that the debounce didn't run,
@@ -332,29 +471,118 @@ export default function LectureMaterialWorkspaceScreen() {
   // useCallback([]) in the store, so its reference is stable — this effect
   // mounts/unmounts exactly once.
   useEffect(() => {
+    const nativePdf = pdfRef.current;
     return () => {
       if (pageDebounceRef.current) {
         clearTimeout(pageDebounceRef.current);
         pageDebounceRef.current = null;
       }
+      // If beforeRemove already ran the authoritative capture for this leave
+      // (the normal Back/navigation path, while the native ref was still
+      // alive), this unmount cleanup is a redundant last-resort fallback —
+      // skip it entirely rather than risk a second, now-stale native call
+      // clobbering the value beforeRemove already persisted. It still runs
+      // for teardown paths that never fire beforeRemove.
+      if (leavePersistenceCompletedRef.current) {
+        debugMaterialViewport('leave-unmount-skip', {
+          materialId: materialIdRef.current,
+          reason: 'beforeRemove already persisted',
+        });
+        return;
+      }
+      debugMaterialViewport('leave-start', {
+        materialId: materialIdRef.current,
+        latestJsViewport: pendingViewportRef.current,
+        savedViewport: savedViewportRef.current,
+      });
+      persistAuthoritativeViewport(nativePdf);
       if (navigatorHideTimerRef.current) {
         clearTimeout(navigatorHideTimerRef.current);
         navigatorHideTimerRef.current = null;
       }
-      const lectureId = lectureIdRef.current;
       const id = materialIdRef.current;
       const pending = pendingPageRef.current;
       const saved = savedLastPageRef.current;
-      if (id && typeof pending === 'number' && pending !== saved) {
+      if (!useNativePdfViewer && id && typeof pending === 'number' && pending !== saved) {
         savedLastPageRef.current = pending;
-        if (materialReviewMode) {
-          updateMaterial(id, { lastOpenedPage: pending });
-        } else if (lectureId) {
-          updateLectureMaterialLink(lectureId, id, { lastOpenedPage: pending });
-        }
+        updateMaterial(id, { lastOpenedPage: pending });
       }
     };
-  }, [materialReviewMode, updateLectureMaterialLink, updateMaterial]);
+  }, [persistAuthoritativeViewport, updateMaterial, useNativePdfViewer]);
+
+  // A background transition can happen before route cleanup. Ask native for
+  // its current PDF-space anchor and immediately persist the latest snapshot.
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active' || !useNativePdfViewer) return;
+      debugMaterialViewport('background-start', {
+        materialId: materialIdRef.current,
+        latestJsViewport: pendingViewportRef.current,
+      });
+      persistAuthoritativeViewport(pdfRef.current);
+    });
+    return () => subscription.remove();
+  }, [persistAuthoritativeViewport, useNativePdfViewer]);
+
+  // PRIMARY authoritative-leave boundary for Back/navigation. Proven from a
+  // physical repro that the unmount-cleanup effect above runs too late for
+  // this path: React had already detached the native host ref
+  // (nativeRef.current === null inside NativePdfAnnotationView) by the time
+  // that cleanup executed, so captureViewport() silently short-circuited to
+  // a JS-only Promise.resolve(null) — the native bridge was never actually
+  // invoked, and JS fell back to whatever stale viewport it already had.
+  // beforeRemove fires while this screen (and its native ref) are still
+  // fully mounted, before React starts detaching anything for the removal —
+  // that is what makes it authoritative here, not the unmount cleanup.
+  useEffect(() => {
+    if (!useNativePdfViewer) return;
+    const unsubscribe = navigation.addListener('beforeRemove', (e) => {
+      // Already handled this removal (this is the re-dispatch of the same
+      // action after we called navigation.dispatch below) — let it through
+      // exactly once. Without this guard, preventDefault + dispatch would
+      // fire beforeRemove again for the very action we just re-issued,
+      // looping forever.
+      if (leavePersistenceCompletedRef.current) return;
+      e.preventDefault();
+      const nativePdf = pdfRef.current;
+      debugMaterialViewport('before-remove-start', {
+        materialId: materialIdRef.current,
+        latestJsViewport: pendingViewportRef.current,
+        savedViewport: savedViewportRef.current,
+      });
+      void (async () => {
+        if (nativePdf) {
+          try {
+            const nativeViewport = await nativePdf.captureViewport();
+            const normalized = nativeViewport
+              ? normalizeMaterialViewport(nativeViewport, totalPagesRef.current)
+              : undefined;
+            debugMaterialViewport('before-remove-capture', {
+              materialId: materialIdRef.current,
+              nativeViewport,
+              normalized,
+              latestJsViewport: pendingViewportRef.current,
+            });
+            if (normalized) pendingViewportRef.current = normalized;
+          } catch (error) {
+            debugMaterialViewport('before-remove-capture-failed', {
+              materialId: materialIdRef.current,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+        // Bounded, deterministic, and always runs regardless of whether the
+        // capture above succeeded — the user must never be trapped on this
+        // screen waiting for a native call. A failed/missing capture simply
+        // falls back to whatever JS already knew (flushViewportToStore's
+        // existing behavior), same as every other leave path.
+        flushViewportToStore();
+        leavePersistenceCompletedRef.current = true;
+        navigation.dispatch(e.data.action);
+      })();
+    });
+    return unsubscribe;
+  }, [flushViewportToStore, navigation, useNativePdfViewer]);
 
   const fileUri = material ? resolveMaterialUri(material.localPath) : '';
   // Memoize the source prop so react-native-pdf doesn't treat each render
@@ -365,7 +593,7 @@ export default function LectureMaterialWorkspaceScreen() {
   );
 
   const handlePdfLoadComplete = useCallback(
-    (numberOfPages: number) => {
+    (numberOfPages: number, loadedSourcePageCount?: number) => {
       setLoadingPdf(false);
       setPdfError(null);
       setTotalPages(numberOfPages);
@@ -375,12 +603,15 @@ export default function LectureMaterialWorkspaceScreen() {
       const id = materialIdRef.current;
       // Only persist if the stored pageCount actually differs. Combined with
       // updateMaterial being idempotent, two layers of guard against loops.
-      if (id && savedPageCountRef.current !== numberOfPages) {
+      const source = Math.max(1, loadedSourcePageCount ?? material?.sourcePageCount ?? numberOfPages);
+      sourcePageCountRef.current = source;
+      setSourcePageCount(source);
+      if (id && (savedPageCountRef.current !== numberOfPages || material?.sourcePageCount !== source)) {
         savedPageCountRef.current = numberOfPages;
-        updateMaterial(id, { pageCount: numberOfPages });
+        updateMaterial(id, { pageCount: numberOfPages, sourcePageCount: source });
       }
     },
-    [showNavigatorBriefly, updateMaterial],
+    [material?.sourcePageCount, showNavigatorBriefly, updateMaterial],
   );
 
   const handlePdfPageChanged = useCallback(
@@ -389,25 +620,36 @@ export default function LectureMaterialWorkspaceScreen() {
       nativeCurrentPageRef.current = page;
       // Show indicator + reset auto-hide timer on every page change.
       showNavigatorBriefly();
+      debugMaterialViewport('js-onPageChanged-received', { materialId: materialIdRef.current, page });
+      // Native snapshots are intentionally suppressed until restoration is
+      // complete. Do not turn a synthetic initial page callback into a write.
+      if (useNativePdfViewer) return;
       pendingPageRef.current = page;
       if (pageDebounceRef.current) clearTimeout(pageDebounceRef.current);
       pageDebounceRef.current = setTimeout(() => {
         pageDebounceRef.current = null;
-        const lectureId = lectureIdRef.current;
         const id = materialIdRef.current;
         const pending = pendingPageRef.current;
         if (id && typeof pending === 'number' && pending !== savedLastPageRef.current) {
           savedLastPageRef.current = pending;
-          if (materialReviewMode) {
-            updateMaterial(id, { lastOpenedPage: pending });
-          } else if (lectureId) {
-            updateLectureMaterialLink(lectureId, id, { lastOpenedPage: pending });
-          }
+          updateMaterial(id, { lastOpenedPage: pending });
         }
       }, 500);
     },
-    [materialReviewMode, showNavigatorBriefly, updateLectureMaterialLink, updateMaterial],
+    [showNavigatorBriefly, updateMaterial, useNativePdfViewer],
   );
+
+  const handleNativeViewportChanged = useCallback((snapshot: NativePdfViewport) => {
+    const viewport = normalizeMaterialViewport(snapshot, totalPagesRef.current);
+    if (!viewport) return;
+    nativeCurrentPageRef.current = viewport.pageIndex;
+    setCurrentPage(viewport.pageIndex);
+    showNavigatorBriefly();
+    pendingPageRef.current = viewport.pageIndex;
+    pendingViewportRef.current = viewport;
+    debugMaterialViewport('native-bridge-snapshot', { viewport });
+    scheduleViewportPersist();
+  }, [scheduleViewportPersist, showNavigatorBriefly]);
 
   const handlePdfError = useCallback((err: unknown) => {
     setLoadingPdf(false);
@@ -415,6 +657,21 @@ export default function LectureMaterialWorkspaceScreen() {
     console.warn('[material] PDF load error', err);
     setPdfError(t('material.loadFailed'));
   }, [t]);
+
+  /** Adds one stable synthetic page only when the current final page receives real work. */
+  const ensureTrailingBlankPageAfterContent = useCallback((pageNumber: number) => {
+    const id = materialIdRef.current;
+    const source = sourcePageCountRef.current;
+    if (!id || source < 1) return;
+    const next = appendedPageCountAfterFinalPageContent(source, appendedPageCountRef.current, pageNumber);
+    if (next === appendedPageCountRef.current) return;
+    appendedPageCountRef.current = next;
+    setAppendedPageCount(next);
+    const nextTotal = compositePageCount(source, next);
+    savedPageCountRef.current = nextTotal;
+    setTotalPages(nextTotal);
+    updateMaterial(id, { sourcePageCount: source, appendedPageCount: next, pageCount: nextTotal });
+  }, [updateMaterial]);
 
   // --- Native annotation bridge (Phase 2) ---
 
@@ -451,6 +708,73 @@ export default function LectureMaterialWorkspaceScreen() {
     }
     return grouped;
   }, [annotationsForMaterialPage, lectureId, material?.id, material?.pageCount, totalPages, useNativePdfViewer]);
+
+  const nativeTextAnnotationsByPage = useMemo<NativePdfTextAnnotationsByPage>(() => {
+    const grouped: NativePdfTextAnnotationsByPage = {};
+    if (!useNativePdfViewer || !material?.id) return grouped;
+    const pageCount = totalPages || material.pageCount || 0;
+    for (let page = 1; page <= pageCount; page += 1) {
+      const annotations = textAnnotationsForMaterialPage(material.id, page);
+      if (annotations.length > 0) grouped[String(page)] = annotations;
+    }
+    return grouped;
+  }, [material?.id, material?.pageCount, textAnnotationsForMaterialPage, totalPages, useNativePdfViewer]);
+
+  const saveTextAnnotations = useCallback((pageNumber: number, annotations: MaterialTextAnnotation[]) => {
+    const id = materialIdRef.current;
+    if (!id) return;
+    replaceMaterialPageTextAnnotationsForMaterial(id, pageNumber, annotations, materialScopeLectureId(id));
+  }, [replaceMaterialPageTextAnnotationsForMaterial]);
+
+  const handleNativeTextAnnotationAction = useCallback((event: NativePdfTextAnnotationActionEvent) => {
+    const id = materialIdRef.current;
+    if (!id || !event.pageNumber) return;
+    const current = textAnnotationsForMaterialPage(id, event.pageNumber);
+    if (event.action === 'select' && event.annotationId) {
+      setSelectedTextAnnotationId(event.annotationId);
+      return;
+    }
+    if (event.action === 'paste') {
+      const text = event.text?.trim();
+      if (!text || !Number.isFinite(event.x) || !Number.isFinite(event.y)) return;
+      const now = new Date().toISOString();
+      saveTextAnnotations(event.pageNumber, [...current, {
+        id: `material-text-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        text,
+        x: event.x!, y: event.y!, width: 180, fontSize: 16,
+        createdAt: now, updatedAt: now,
+      }]);
+      ensureTrailingBlankPageAfterContent(event.pageNumber);
+      return;
+    }
+    const selected = current.find((annotation) => annotation.id === event.annotationId);
+    if (!selected) return;
+    if (event.action === 'delete') {
+      saveTextAnnotations(event.pageNumber, current.filter((annotation) => annotation.id !== selected.id));
+      setSelectedTextAnnotationId(undefined);
+    } else if (event.action === 'edit') {
+      setEditingText(selected); setEditingTextValue(selected.text);
+    } else if (event.action === 'move' && Number.isFinite(event.x) && Number.isFinite(event.y)) {
+      saveTextAnnotations(event.pageNumber, current.map((annotation) => annotation.id === selected.id
+        ? { ...annotation, x: event.x!, y: event.y!, updatedAt: new Date().toISOString() }
+        : annotation));
+    } else if (event.action === 'move') {
+      Alert.alert('Move text', 'Long-press the new location on the page.');
+    }
+  }, [ensureTrailingBlankPageAfterContent, saveTextAnnotations, textAnnotationsForMaterialPage]);
+
+  const saveEditedText = useCallback(() => {
+    if (!editingText) return;
+    const text = editingTextValue.trim();
+    const id = materialIdRef.current;
+    if (!id) return;
+    const current = textAnnotationsForMaterialPage(id, currentPage);
+    saveTextAnnotations(currentPage, text
+      ? current.map((annotation) => annotation.id === editingText.id ? { ...annotation, text, updatedAt: new Date().toISOString() } : annotation)
+      : current.filter((annotation) => annotation.id !== editingText.id));
+    if (text) ensureTrailingBlankPageAfterContent(currentPage);
+    setEditingText(null);
+  }, [currentPage, editingText, editingTextValue, ensureTrailingBlankPageAfterContent, saveTextAnnotations, textAnnotationsForMaterialPage]);
 
   const handleNativeModeChange = useCallback((next: NativePdfAnnotationMode) => {
     nativeAnnotationModeRef.current = next;
@@ -551,8 +875,9 @@ export default function LectureMaterialWorkspaceScreen() {
         ...toStoreStroke(event.stroke),
       };
       addAnnotationStroke(materialReviewMode ? materialScopeLectureId(mid) : lid, mid, page, stroke);
+      ensureTrailingBlankPageAfterContent(page);
     },
-    [addAnnotationStroke, materialReviewMode, replaceMaterialPageAnnotationStrokesForMaterial],
+    [addAnnotationStroke, ensureTrailingBlankPageAfterContent, materialReviewMode, replaceMaterialPageAnnotationStrokesForMaterial],
   );
 
   const addPageStroke = useCallback(
@@ -561,8 +886,9 @@ export default function LectureMaterialWorkspaceScreen() {
       // A fresh user stroke invalidates the redo stack.
       setRedoStack([]);
       addAnnotationStroke(materialReviewMode ? materialScopeLectureId(material.id) : lectureId, material.id, currentPage, stroke);
+      ensureTrailingBlankPageAfterContent(currentPage);
     },
-    [addAnnotationStroke, currentPage, lectureId, material?.id, materialReviewMode],
+    [addAnnotationStroke, currentPage, ensureTrailingBlankPageAfterContent, lectureId, material?.id, materialReviewMode],
   );
 
   const erasePageStrokeIds = useCallback(
@@ -673,6 +999,7 @@ export default function LectureMaterialWorkspaceScreen() {
           ref={pdfRef}
           fileUri={fileUri}
           initialPage={initialPage}
+          initialViewport={initialViewport}
           style={styles.pdfFill}
           annotationMode={nativeAnnotationMode}
           penColor={nativePenColor}
@@ -681,11 +1008,16 @@ export default function LectureMaterialWorkspaceScreen() {
           highlighterWidth={nativeHighlighterWidth}
           eraserRadius={nativeEraserRadius}
           annotationsByPage={nativeAnnotationsByPage}
-          onLoadComplete={(event) => handlePdfLoadComplete(event.totalPages)}
+          appendedBlankPageCount={appendedPageCount}
+          textAnnotationsByPage={nativeTextAnnotationsByPage}
+          selectedTextAnnotationId={selectedTextAnnotationId}
+          onLoadComplete={(event) => handlePdfLoadComplete(event.totalPages, event.sourcePageCount)}
           onPageChanged={(event) => handlePdfPageChanged(event.pageNumber)}
+          onViewportChanged={handleNativeViewportChanged}
           onError={(event) => handlePdfError(new Error(event.message))}
           onAnnotationsChanged={handleNativeAnnotationCommitted}
           onEraserGestureEnded={restoreNativeTemporaryEraserIfNeeded}
+          onTextAnnotationAction={handleNativeTextAnnotationAction}
         />
       ) : Pdf ? (
         <View style={styles.legacyPdfWrap}>
@@ -770,6 +1102,40 @@ export default function LectureMaterialWorkspaceScreen() {
           </View>
         </View>
 
+        {useNativePdfViewer ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Export annotated PDF"
+            disabled={exporting || sourcePageCount < 1}
+            onPress={async () => {
+              if (!material?.id || exporting) return;
+              setExporting(true);
+              try {
+                const outputUri = await exportAnnotatedPdfAsync({
+                  fileUri,
+                  sourcePageCount,
+                  appendedBlankPageCount: appendedPageCount,
+                  annotationsByPage: nativeAnnotationsByPage,
+                  textAnnotationsByPage: nativeTextAnnotationsByPage,
+                });
+                if (await Sharing.isAvailableAsync()) {
+                  await Sharing.shareAsync(outputUri, { mimeType: 'application/pdf', dialogTitle: 'Export annotated PDF' });
+                } else {
+                  Alert.alert('Export ready', outputUri);
+                }
+              } catch (error) {
+                console.warn('[material] annotated PDF export failed', error);
+                Alert.alert('Export failed', 'The annotated PDF could not be created. Please try again.');
+              } finally {
+                setExporting(false);
+              }
+            }}
+            style={({ pressed }) => [styles.exportButton, { top: insets.top + spacing.md, right: spacing.md }, (pressed || exporting) && styles.pressed]}
+          >
+            {exporting ? <ActivityIndicator size="small" color={colors.deepNavy} /> : <Ionicons name="share-outline" size={20} color={colors.deepNavy} />}
+          </Pressable>
+        ) : null}
+
         {/* Page navigator — bottom-right, lifts over the captions strip
             when one is active. Tap the current-page number to open the
             Go-to-page modal. */}
@@ -779,12 +1145,10 @@ export default function LectureMaterialWorkspaceScreen() {
           visible={navigatorVisible}
           onTapCurrent={openJumpModal}
           bottomOffset={insets.bottom + spacing.lg}
-          captionsEnabled={!materialReviewMode}
+          captionsEnabled={classroomSessionActive}
         />
 
-        {!materialReviewMode ? (
-          <FloatingMiniCaption topOffset={insets.top + 80} />
-        ) : null}
+        <FloatingMiniCaption topOffset={insets.top + 80} enabled={classroomSessionActive} />
       </View>
 
       {/* Notebook-style draggable annotation toolbar — same board / drag / dock /
@@ -844,6 +1208,19 @@ export default function LectureMaterialWorkspaceScreen() {
         onCancel={closeJumpModal}
         onGo={handleJumpGo}
       />
+
+      <Modal transparent visible={Boolean(editingText)} animationType="fade" onRequestClose={() => setEditingText(null)}>
+        <KeyboardAvoidingView style={styles.textEditorBackdrop} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <View style={styles.textEditorCard}>
+            <Text style={styles.textEditorTitle}>Edit pasted text</Text>
+            <TextInput value={editingTextValue} onChangeText={setEditingTextValue} multiline autoFocus style={styles.textEditorInput} />
+            <View style={styles.textEditorActions}>
+              <Pressable onPress={() => setEditingText(null)} style={styles.softButton}><Text style={styles.softButtonLabel}>Cancel</Text></Pressable>
+              <Pressable onPress={saveEditedText} style={styles.primaryButton}><Text style={styles.primaryButtonLabel}>Save</Text></Pressable>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </View>
   );
 }
@@ -1112,6 +1489,18 @@ const styles = StyleSheet.create({
   // background and the PDFKit surround blend seamlessly — no visible
   // rectangle between them when the page floats inside the canvas.
   root: { flex: 1, backgroundColor: colors.background },
+  exportButton: {
+    position: 'absolute', width: 44, height: 44, borderRadius: 22,
+    backgroundColor: 'rgba(255,255,255,0.94)', borderWidth: 1, borderColor: colors.border,
+    alignItems: 'center', justifyContent: 'center', zIndex: 12,
+  },
+  textEditorBackdrop: { flex: 1, backgroundColor: 'rgba(6,27,52,0.35)', alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
+  textEditorCard: { width: '100%', maxWidth: 480, backgroundColor: colors.surface, borderRadius: radius.lg, padding: spacing.lg, gap: spacing.md },
+  textEditorTitle: { fontSize: fontSize.lg, fontWeight: '700', color: colors.textPrimary },
+  textEditorInput: { minHeight: 130, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, color: colors.textPrimary, padding: spacing.md, textAlignVertical: 'top' },
+  textEditorActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: spacing.sm },
+  primaryButton: { backgroundColor: colors.deepNavy, borderRadius: radius.md, paddingHorizontal: spacing.lg, paddingVertical: spacing.sm, justifyContent: 'center' },
+  primaryButtonLabel: { color: colors.surface, fontWeight: '700' },
   // PDF view fills the entire screen (no card, no margins).
   pdfFill: { ...StyleSheet.absoluteFillObject, backgroundColor: colors.background },
   // Legacy JS fallback wrap (only rendered when native isn't available — on

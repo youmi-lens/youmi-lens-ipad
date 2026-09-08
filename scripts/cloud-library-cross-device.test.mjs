@@ -50,8 +50,11 @@ check('a remote-only row (no local counterpart) is ingested as a full lecture', 
   const title = resolveMergedLectureTitle({ localTitle: undefined, remoteTitle: 'Week 3 — Neural Nets', remoteTitleUpdatedAt: T1 });
   assert.equal(title.title, 'Week 3 — Neural Nets');
   assert.equal(title.source, 'remote');
-  // storage_path present → B classifies it uploaded (store merge line ~526).
-  assert.match(store, /uploadStatus: row\.storage_path \? 'uploaded' : local\?\.uploadStatus/);
+  // storage_path present → B classifies it uploaded, for the ordinary case
+  // where B has no pending local media revision of its own (mergedUploadStatus's
+  // remote-authoritative branch — see media-revision-freshness.test.mjs for
+  // the revision-aware gate added around this).
+  assert.match(store, /: \(row\.storage_path \? 'uploaded' : local\?\.uploadStatus \?\? 'not_uploaded'\);/);
 });
 
 // ── D. Lecture rename → Client B sees new title (+ §5 stale title) ──────────

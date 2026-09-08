@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { Gesture, GestureDetector, PointerType } from 'react-native-gesture-handler';
 import Svg, { Circle, Path } from 'react-native-svg';
@@ -114,6 +114,78 @@ function StrokeShape({ stroke }: { stroke: MaterialAnnotationStroke }) {
   );
 }
 
+type ActiveAnnotationInkHandle = {
+  begin: (point: MaterialAnnotationPoint) => void;
+  append: (point: MaterialAnnotationPoint) => void;
+  clear: () => void;
+  getPoints: () => MaterialAnnotationPoint[];
+};
+
+type ActiveAnnotationInkHostProps = {
+  tool: MaterialAnnotationTool;
+  color: string;
+  width: number;
+  opacity: number;
+};
+
+/**
+ * Live ink only — mirrors NotebookCanvas's ActiveInkHost (components/
+ * NotebookCanvas.tsx). Owns its own local React state so each Pencil sample
+ * updates only this small overlay, never the parent MaterialAnnotationOverlay
+ * (which also holds every already-committed stroke on the page and the
+ * embedded PDF `children`). Before this, the in-progress stroke's points
+ * lived in the PARENT's state, so every sampled point re-rendered the whole
+ * overlay AND re-ran the highlighterStrokes/penStrokes filters over the
+ * full per-page stroke history — cost that grew with how much was already
+ * annotated on that page. That mismatch (not sampling/smoothing/pressure,
+ * which are identical to Notebook here) is what made this pen feel less
+ * crisp than Notebook's.
+ */
+const ActiveAnnotationInkHost = memo(
+  forwardRef<ActiveAnnotationInkHandle, ActiveAnnotationInkHostProps>(function ActiveAnnotationInkHost(
+    { tool, color, width, opacity },
+    ref,
+  ) {
+    const pointsRef = useRef<MaterialAnnotationPoint[]>([]);
+    const [livePoints, setLivePoints] = useState<MaterialAnnotationPoint[]>([]);
+
+    useImperativeHandle(
+      ref,
+      () => ({
+        begin(point) {
+          pointsRef.current = [point];
+          setLivePoints([point]);
+        },
+        append(point) {
+          const points = pointsRef.current;
+          const last = points[points.length - 1];
+          if (last && Math.hypot(last.x - point.x, last.y - point.y) < MIN_POINT_DISTANCE) return;
+          const next = [...points, point];
+          pointsRef.current = next;
+          setLivePoints(next);
+        },
+        clear() {
+          if (pointsRef.current.length === 0) return;
+          pointsRef.current = [];
+          setLivePoints([]);
+        },
+        getPoints() {
+          return pointsRef.current;
+        },
+      }),
+      [],
+    );
+
+    if (livePoints.length === 0) return null;
+
+    return (
+      <Svg style={StyleSheet.absoluteFill} pointerEvents="none">
+        <StrokeShape stroke={{ id: 'current_annotation_stroke', tool, color, width, opacity, points: livePoints, createdAt: '' }} />
+      </Svg>
+    );
+  }),
+);
+
 export function MaterialAnnotationOverlay({
   mode,
   previousDrawingTool,
@@ -129,8 +201,9 @@ export function MaterialAnnotationOverlay({
   onStylusStrokeActiveChange,
   children,
 }: MaterialAnnotationOverlayProps) {
-  const [currentPoints, setCurrentPoints] = useState<MaterialAnnotationPoint[]>([]);
-  const currentPointsRef = useRef<MaterialAnnotationPoint[]>([]);
+  // Live points now live entirely inside ActiveAnnotationInkHost's own local
+  // state (see its doc comment) — this component never re-renders per point.
+  const activeInkRef = useRef<ActiveAnnotationInkHandle>(null);
   const erasedIdsRef = useRef<string[]>([]);
   const strokesRef = useRef(strokes);
   strokesRef.current = strokes;
@@ -147,8 +220,7 @@ export function MaterialAnnotationOverlay({
   const erasingRef = useRef(false);
 
   useEffect(() => {
-    currentPointsRef.current = [];
-    setCurrentPoints([]);
+    activeInkRef.current?.clear();
     erasedIdsRef.current = [];
     activeTouchIdRef.current = null;
     drawingRef.current = false;
@@ -157,12 +229,7 @@ export function MaterialAnnotationOverlay({
   }, [mode]);
 
   const addPoint = useCallback((x: number, y: number) => {
-    const points = currentPointsRef.current;
-    const last = points[points.length - 1];
-    if (last && Math.hypot(last.x - x, last.y - y) < MIN_POINT_DISTANCE) return;
-    const next = [...points, { x, y }];
-    currentPointsRef.current = next;
-    setCurrentPoints(next);
+    activeInkRef.current?.append({ x, y });
   }, []);
 
   const eraseAt = useCallback((x: number, y: number) => {
@@ -178,7 +245,7 @@ export function MaterialAnnotationOverlay({
   }, [onEraseStrokeIds]);
 
   const commitStroke = useCallback(() => {
-    const points = currentPointsRef.current;
+    const points = activeInkRef.current?.getPoints() ?? [];
     if (points.length > 0) {
       const tool: MaterialAnnotationTool = modeRef.current === 'highlighter' ? 'highlighter' : 'pen';
       onAddStroke({
@@ -191,8 +258,7 @@ export function MaterialAnnotationOverlay({
         createdAt: new Date().toISOString(),
       });
     }
-    currentPointsRef.current = [];
-    setCurrentPoints([]);
+    activeInkRef.current?.clear();
   }, [color, highlighterColor, highlighterWidth, onAddStroke, width]);
 
   const finishStylusGesture = useCallback(() => {
@@ -267,9 +333,7 @@ export function MaterialAnnotationOverlay({
           } else {
             drawingRef.current = true;
             erasingRef.current = false;
-            currentPointsRef.current = [];
-            setCurrentPoints([]);
-            addPoint(touch.x, touch.y);
+            activeInkRef.current?.begin({ x: touch.x, y: touch.y });
           }
         })
         .onTouchesMove((event) => {
@@ -304,19 +368,13 @@ export function MaterialAnnotationOverlay({
     return Gesture.Simultaneous(nativePdfGesture, stylusAnnotationGesture);
   }, [addPoint, eraseAt, finishStylusGesture, mode]);
 
-  const highlighterStrokes = strokes.filter((stroke) => stroke.tool === 'highlighter');
-  const penStrokes = strokes.filter((stroke) => stroke.tool !== 'highlighter');
-  const currentStroke = currentPoints.length > 0 && mode !== 'eraser' && mode !== 'scroll'
-    ? {
-        id: 'current_annotation_stroke',
-        tool: mode === 'highlighter' ? 'highlighter' : 'pen',
-        color: mode === 'highlighter' ? highlighterColor : color,
-        width: mode === 'highlighter' ? highlighterWidth : width,
-        opacity: mode === 'highlighter' ? 0.34 : 1,
-        points: currentPoints,
-        createdAt: new Date().toISOString(),
-      } satisfies MaterialAnnotationStroke
-    : null;
+  // Memoized so a re-render for an unrelated reason (e.g. a mode/tool change)
+  // never re-filters the full per-page stroke history — only an actual
+  // change to `strokes` does. The live/in-progress stroke never touches
+  // these; it renders entirely inside ActiveAnnotationInkHost below.
+  const highlighterStrokes = useMemo(() => strokes.filter((stroke) => stroke.tool === 'highlighter'), [strokes]);
+  const penStrokes = useMemo(() => strokes.filter((stroke) => stroke.tool !== 'highlighter'), [strokes]);
+  const showActiveInk = mode !== 'eraser' && mode !== 'scroll';
 
   const content = (
     <View style={styles.container}>
@@ -325,8 +383,16 @@ export function MaterialAnnotationOverlay({
         <Svg style={StyleSheet.absoluteFill} pointerEvents="none">
           {highlighterStrokes.map((stroke) => <StrokeShape key={stroke.id} stroke={stroke} />)}
           {penStrokes.map((stroke) => <StrokeShape key={stroke.id} stroke={stroke} />)}
-          {currentStroke ? <StrokeShape stroke={currentStroke} /> : null}
         </Svg>
+        {showActiveInk ? (
+          <ActiveAnnotationInkHost
+            ref={activeInkRef}
+            tool={mode === 'highlighter' ? 'highlighter' : 'pen'}
+            color={mode === 'highlighter' ? highlighterColor : color}
+            width={mode === 'highlighter' ? highlighterWidth : width}
+            opacity={mode === 'highlighter' ? 0.34 : 1}
+          />
+        ) : null}
       </View>
     </View>
   );

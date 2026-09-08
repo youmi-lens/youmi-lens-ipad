@@ -1,6 +1,7 @@
 import {
   RECORDING_FALLBACK_REASONS,
   resolveRecordingEngineDecision,
+  resolveRecordingEngineOwnershipDecision,
 } from './policy.mjs';
 
 export type RecordingEngine = 'legacy' | 'nativeDurable';
@@ -9,7 +10,10 @@ export type RecordingEngineSource =
   | 'default'
   | 'test_override'
   | 'developer_override'
-  | 'internal_dogfood';
+  | 'internal_dogfood'
+  | 'durable_ownership'
+  | 'frozen_session'
+  | 'remote_rollout';
 
 export type RecordingFallbackReason = (typeof RECORDING_FALLBACK_REASONS)[number];
 
@@ -100,6 +104,41 @@ export function resolveRecordingEngineDecisionForRuntime(options: {
     isDevelopment: __DEV__,
     // No test context exists at runtime; the override path is exercised by the
     // pure policy tests, which is what keeps it inert in every shipped build.
+    isTestContext: false,
+    developerOverride: getDeveloperRecordingEngineOverride(),
+    dogfoodEnabled: INTERNAL_DOGFOOD_ENABLED && CONFIGURED_RECORDING_ENGINE === 'legacy',
+    eligibilityResolved: options.eligibilityResolved !== false,
+    capability: options.capability ?? {},
+    hasDurableEvidence: options.hasDurableEvidence === true,
+  }) as RecordingEngineDecision;
+}
+
+/**
+ * THE single runtime engine decision useLectureRecorder must call. Recoverable
+ * durable media for this lectureId always wins, regardless of rollout/dogfood
+ * state; only when no durable evidence exists does rollout policy apply.
+ * Prefer this over resolveRecordingEngineDecisionForRuntime — that function
+ * has no awareness of per-lecture media ownership at all.
+ */
+export function resolveRecordingEngineOwnershipDecisionForRuntime(options: {
+  forceLegacy?: boolean;
+  hasDurableEvidence?: boolean;
+  capability?: NativeCapability;
+  eligibilityResolved?: boolean;
+  rollout?: {
+    eligible: boolean;
+    resolved: boolean;
+    reason: string | null;
+    cohort: string | null;
+    revision: number | null;
+  } | null;
+  frozenEngine?: RecordingEngine | null;
+} = {}): RecordingEngineDecision {
+  return resolveRecordingEngineOwnershipDecision({
+    forceLegacy: options.forceLegacy === true,
+    rollout: options.rollout ?? null,
+    frozenEngine: options.frozenEngine ?? null,
+    isDevelopment: __DEV__,
     isTestContext: false,
     developerOverride: getDeveloperRecordingEngineOverride(),
     dogfoodEnabled: INTERNAL_DOGFOOD_ENABLED && CONFIGURED_RECORDING_ENGINE === 'legacy',

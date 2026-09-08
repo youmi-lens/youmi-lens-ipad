@@ -6,6 +6,7 @@ await runSwiftHarness({
     nativeSources.core,
     nativeSources.store,
     nativeSources.recorder,
+    nativeSources.composer,
     nativeSources.exporter,
     'scripts/durable-recorder-recovery-core.test.swift',
   ],

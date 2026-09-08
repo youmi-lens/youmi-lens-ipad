@@ -69,6 +69,7 @@ import Svg, {
   Rect,
   Stop,
 } from 'react-native-svg';
+import Reanimated, { runOnJS, useAnimatedScrollHandler, useAnimatedStyle, useSharedValue } from 'react-native-reanimated';
 
 import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
 import type { NoteImage, NotePoint, NoteStroke } from '@/lib/models';
@@ -84,7 +85,6 @@ import {
   NOTEBOOK_DEFAULT_SCALE,
   NOTEBOOK_PALM_GRACE_MS,
   applyPinchZoomFromStart,
-  clampNotebookTranslateX,
   screenToCanvasPoint,
   shouldLockNotebookScroll,
 } from '@/lib/notebookViewport';
@@ -238,6 +238,7 @@ type NotebookSnapshot = { strokes: NoteStroke[]; images: NoteImage[]; text: stri
 /** Max in-memory history depth (per session) to bound memory. */
 const HISTORY_MAX = 60;
 const TEXT_HISTORY_DEBOUNCE_MS = 900;
+const AnimatedNotebookScrollView = Reanimated.createAnimatedComponent(GestureScrollView);
 
 export type CanvasMode = 'write' | 'highlight' | 'type' | 'erase' | 'scroll' | 'select' | 'insert';
 
@@ -300,21 +301,26 @@ function makeImageId(): string {
   return `img_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
 
-function cloneStroke(stroke: NoteStroke): NoteStroke {
-  return {
-    ...stroke,
-    points: stroke.points.map((point) => ({ ...point })),
-  };
-}
-
+/** Used only for the single image being actively transformed (gesture-start baseline) — not the undo/redo path. */
 function cloneImage(image: NoteImage): NoteImage {
   return { ...image };
 }
 
+/**
+ * Undo/redo snapshots do NOT deep-clone stroke/image data. Every commit path
+ * (commitStroke, commitErase, commitMove, image transforms) already replaces
+ * arrays/objects wholesale via spread/map/filter and never mutates an existing
+ * NoteStroke's `points` (or a NoteImage) in place, so a shallow array copy is
+ * enough to isolate a snapshot from later mutation. A prior version deep-cloned
+ * every point of every stroke on every commit (recordHistory before each
+ * commitStroke/commitErase/commitMove) — O(total points so far) per stroke,
+ * i.e. quadratic over a session — which was the dominant cause of handwriting
+ * commits getting progressively slower, then freezing, in Notes-heavy classes.
+ */
 function cloneSnapshot(snapshot: NotebookSnapshot): NotebookSnapshot {
   return {
-    strokes: snapshot.strokes.map(cloneStroke),
-    images: snapshot.images.map(cloneImage),
+    strokes: snapshot.strokes.slice(),
+    images: snapshot.images.slice(),
     text: snapshot.text,
   };
 }
@@ -1307,7 +1313,24 @@ export const NotebookCanvas = memo(function NotebookCanvas({
   /** Page pinch-zoom scale (session-local; does not rewrite stored stroke points). */
   const [canvasScale, setCanvasScale] = useState(NOTEBOOK_DEFAULT_SCALE);
   /** Horizontal pan paired with scale for focal-point zoom (Notability-style). */
-  const [canvasTranslateX, setCanvasTranslateX] = useState(0);
+  const zoomScale = useSharedValue(NOTEBOOK_DEFAULT_SCALE);
+  const zoomX = useSharedValue(0);
+  const zoomY = useSharedValue(0);
+  const nativeScrollY = useSharedValue(0);
+  const zoomHolding = useSharedValue(false);
+  const zoomActive = useSharedValue(false);
+  const zoomBlocked = useSharedValue(false);
+  const zoomStart = useSharedValue({ scale: 1, x: 0, y: 0, focalX: 0, focalY: 0 });
+  const zoomGeometry = useSharedValue({ width: 0, height: 0, contentHeight: 0 });
+  const pendingZoomScroll = useRef<number | null>(null);
+  const paperTransform = useAnimatedStyle(() => ({
+    transform: [
+      { translateX: zoomX.value },
+      // Compensate actual native offset until the final scroll position lands.
+      { translateY: zoomHolding.value ? nativeScrollY.value - zoomY.value : 0 },
+      { scale: zoomScale.value },
+    ],
+  }));
 
   // Latest-value refs so the memoized gesture never sees a stale closure.
   const penColorRef = useRef(penColor);
@@ -1354,21 +1377,16 @@ export const NotebookCanvas = memo(function NotebookCanvas({
   const palmGraceActiveRef = useRef(false);
   const palmGraceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pinchActiveRef = useRef(false);
-  const pinchStartScaleRef = useRef(NOTEBOOK_DEFAULT_SCALE);
-  const pinchStartTranslateXRef = useRef(0);
-  const pinchStartScrollYRef = useRef(0);
-  const pinchStartFocalXRef = useRef(0);
-  const pinchStartFocalYRef = useRef(0);
   const canvasScaleRef = useRef(NOTEBOOK_DEFAULT_SCALE);
   canvasScaleRef.current = canvasScale;
   const canvasTranslateXRef = useRef(0);
-  canvasTranslateXRef.current = canvasTranslateX;
   const imageManipulationActiveRef = useRef(false);
   imageManipulationActiveRef.current = imageManipulationActive;
   /** Live page geometry (set each render) so stable callbacks can read it without re-creating. */
   const pageGeomRef = useRef({ pageHeight: PAGE_HEIGHT, pageStride: PAGE_HEIGHT + PAGE_GAP, totalPages: 1, canvasHeight: PAGE_HEIGHT });
 
   const applyNotebookScrollEnabled = useCallback(() => {
+    zoomBlocked.value = stylusStrokeLockRef.current || palmGraceActiveRef.current || imageManipulationActiveRef.current;
     const locked = shouldLockNotebookScroll({
       strokeActive: stylusStrokeLockRef.current,
       palmGrace: palmGraceActiveRef.current,
@@ -1376,7 +1394,7 @@ export const NotebookCanvas = memo(function NotebookCanvas({
       imageManipulation: imageManipulationActiveRef.current,
     });
     scrollViewRef.current?.setNativeProps({ scrollEnabled: !locked });
-  }, []);
+  }, [zoomBlocked]);
 
   const clearPalmGraceTimer = useCallback(() => {
     if (palmGraceTimerRef.current) {
@@ -2686,74 +2704,72 @@ export const NotebookCanvas = memo(function NotebookCanvas({
     [beginStylusScrollLock, endStroke, eraseAt, findImageAtPoint, touchToCanvasPoint],
   );
 
-  /** Two-finger page zoom around the pinch midpoint. Stylus / palm-grace reject pinch. */
+  const beginPageZoom = useCallback(() => {
+    pinchActiveRef.current = true;
+    applyNotebookScrollEnabled();
+  }, [applyNotebookScrollEnabled]);
+
+  const settlePageZoom = useCallback(() => {
+    const y = pendingZoomScroll.current;
+    if (y === null) return;
+    pendingZoomScroll.current = null;
+    scrollOffsetYRef.current = y;
+    scrollViewRef.current?.scrollTo({ y, animated: false });
+    if (Math.abs(nativeScrollY.value - y) < 0.5) zoomHolding.value = false;
+    pinchActiveRef.current = false;
+    applyNotebookScrollEnabled();
+  }, [applyNotebookScrollEnabled, nativeScrollY, zoomHolding]);
+
+  const commitPageZoom = useCallback((scale: number, x: number, y: number) => {
+    canvasTranslateXRef.current = x;
+    pendingZoomScroll.current = y;
+    if (scale === canvasScaleRef.current) {
+      settlePageZoom();
+    } else {
+      canvasScaleRef.current = scale;
+      setCanvasScale(scale);
+      // The paper's onLayout settles the native offset after the height commits.
+    }
+  }, [settlePageZoom]);
+
+  /** Active pinch changes only a UI-thread transform; document geometry stays fixed. */
   const pinchGesture = useMemo(
     () =>
       Gesture.Pinch()
-        .runOnJS(true)
-        .onBegin((event) => {
-          if (stylusStrokeLockRef.current || palmGraceActiveRef.current || drawingRef.current) {
-            return;
-          }
-          pinchActiveRef.current = true;
-          pinchStartScaleRef.current = canvasScaleRef.current;
-          pinchStartTranslateXRef.current = canvasTranslateXRef.current;
-          pinchStartScrollYRef.current = scrollOffsetYRef.current;
-          pinchStartFocalXRef.current = event.focalX;
-          pinchStartFocalYRef.current = event.focalY;
-          applyNotebookScrollEnabled();
+        .onStart((event) => {
+          if (zoomBlocked.value) return;
+          zoomActive.value = true;
+          zoomStart.value = {
+            scale: zoomScale.value, x: zoomX.value,
+            y: zoomHolding.value ? zoomY.value : nativeScrollY.value,
+            focalX: event.focalX, focalY: event.focalY,
+          };
+          zoomY.value = zoomStart.value.y;
+          zoomHolding.value = true;
+          runOnJS(beginPageZoom)();
         })
         .onUpdate((event) => {
-          if (!pinchActiveRef.current) return;
-          if (stylusStrokeLockRef.current || drawingRef.current) return;
-          const viewportW = containerSizeRef.current.width || 0;
-          const viewportH = containerSizeRef.current.height || 0;
-          const contentH = pageGeomRef.current.canvasHeight || 0;
-          const contentW = viewportW;
+          if (!zoomActive.value || zoomBlocked.value) return;
+          const start = zoomStart.value;
+          const geometry = zoomGeometry.value;
           const next = applyPinchZoomFromStart({
-            startScale: pinchStartScaleRef.current,
-            startTranslateX: pinchStartTranslateXRef.current,
-            startScrollY: pinchStartScrollYRef.current,
-            startFocalX: pinchStartFocalXRef.current,
-            startFocalY: pinchStartFocalYRef.current,
-            focalX: event.focalX,
-            focalY: event.focalY,
-            gestureScale: event.scale,
-            viewportWidth: viewportW,
-            viewportHeight: viewportH,
-            contentWidth: contentW,
-            contentHeight: contentH,
+            startScale: start.scale, startTranslateX: start.x,
+            startScrollY: start.y, startFocalX: start.focalX,
+            startFocalY: start.focalY, focalX: event.focalX,
+            focalY: event.focalY, gestureScale: event.scale,
+            viewportWidth: geometry.width, viewportHeight: geometry.height,
+            contentWidth: geometry.width, contentHeight: geometry.contentHeight,
           });
-          canvasScaleRef.current = next.scale;
-          canvasTranslateXRef.current = next.translateX;
-          setCanvasScale(next.scale);
-          setCanvasTranslateX(next.translateX);
-          scrollOffsetYRef.current = next.scrollY;
-          scrollViewRef.current?.scrollTo({ y: next.scrollY, animated: false });
-        })
-        .onEnd(() => {
-          // Snap small pages to horizontal center when the gesture settles.
-          const viewportW = containerSizeRef.current.width || 0;
-          if (viewportW > 0) {
-            const centered = clampNotebookTranslateX({
-              translateX: canvasTranslateXRef.current,
-              scale: canvasScaleRef.current,
-              viewportWidth: viewportW,
-              contentWidth: viewportW,
-            });
-            if (centered !== canvasTranslateXRef.current) {
-              canvasTranslateXRef.current = centered;
-              setCanvasTranslateX(centered);
-            }
-          }
-          pinchActiveRef.current = false;
-          applyNotebookScrollEnabled();
+          zoomScale.value = next.scale;
+          zoomX.value = next.translateX;
+          zoomY.value = next.scrollY;
         })
         .onFinalize(() => {
-          pinchActiveRef.current = false;
-          applyNotebookScrollEnabled();
+          if (!zoomActive.value) return;
+          zoomActive.value = false;
+          runOnJS(commitPageZoom)(zoomScale.value, zoomX.value, zoomY.value);
         }),
-    [applyNotebookScrollEnabled],
+    [beginPageZoom, commitPageZoom, nativeScrollY, zoomActive, zoomBlocked, zoomGeometry, zoomHolding, zoomScale, zoomStart, zoomX, zoomY],
   );
 
   const notebookGestures = useMemo(
@@ -3088,6 +3104,9 @@ export const NotebookCanvas = memo(function NotebookCanvas({
   const totalPages = Math.min(contentPages === 0 ? 1 : contentPages + 1, MAX_NOTEBOOK_PAGES);
   const canvasHeight = totalPages * pageHeight + (totalPages - 1) * PAGE_GAP;
   pageGeomRef.current = { pageHeight, pageStride, totalPages, canvasHeight };
+  useEffect(() => {
+    zoomGeometry.value = { width: containerSize.width, height: containerSize.height, contentHeight: canvasHeight };
+  }, [canvasHeight, containerSize.width, containerSize.height, zoomGeometry]);
 
   const sheetLineCount = pageHeight > 52 ? Math.floor((pageHeight - 52) / LINE_GAP) : 0;
   const pageSheets = useMemo(
@@ -3462,6 +3481,22 @@ export const NotebookCanvas = memo(function NotebookCanvas({
     </View>
   );
 
+  const reportNotebookScroll = useCallback((y: number) => {
+    scrollOffsetYRef.current = y;
+    showPageBadge(pageForScroll(y));
+  }, [pageForScroll, showPageBadge]);
+  const notebookScrollHandler = useAnimatedScrollHandler({
+    onScroll: (event) => {
+      const y = event.contentOffset.y;
+      nativeScrollY.value = y;
+      if (zoomHolding.value) {
+        if (!zoomActive.value && Math.abs(y - zoomY.value) < 0.5) zoomHolding.value = false;
+        return;
+      }
+      runOnJS(reportNotebookScroll)(y);
+    },
+  });
+
   return (
     <View ref={containerRef} style={[styles.container, style]} onLayout={handleContainerLayout}>
       {/* ---- Long scrollable paper ----
@@ -3469,29 +3504,24 @@ export const NotebookCanvas = memo(function NotebookCanvas({
           above it. That keeps finger touches in the scroll view's hit-test path
           from the beginning; only confirmed stylus input activates drawing. */}
       <GestureDetector gesture={notebookGestures}>
-        <GestureScrollView
+        <AnimatedNotebookScrollView
           ref={scrollViewRef}
           style={styles.scroll}
           keyboardShouldPersistTaps="handled"
           scrollEnabled={!stylusStrokeActive && !imageManipulationActive}
           scrollEventThrottle={16}
           onScrollBeginDrag={() => showPageBadge(pageForScroll(scrollOffsetYRef.current))}
-          onScroll={(event) => {
-            const y = event.nativeEvent.contentOffset.y;
-            scrollOffsetYRef.current = y;
-            showPageBadge(pageForScroll(y));
-          }}
+          onScroll={notebookScrollHandler}
         >
-          <View style={[styles.paper, { height: canvasHeight * canvasScale }]}>
-          <View
-            style={{
+          <View onLayout={settlePageZoom} style={[styles.paper, { height: canvasHeight * canvasScale }]}>
+          <Reanimated.View
+            style={[{
               height: canvasHeight,
               width: '100%',
               // RN applies right-to-left: scale about top-left, then translateX
               // → screen = content * scale + translateX (focal-point zoom).
-              transform: [{ translateX: canvasTranslateX }, { scale: canvasScale }],
               transformOrigin: 'top left',
-            }}
+            }, paperTransform]}
           >
           {/* Stacked A4-like paper sheets (each its own ruled lines + margin),
               separated by a gap so the notebook reads as paper, not one canvas. */}
@@ -3603,9 +3633,9 @@ export const NotebookCanvas = memo(function NotebookCanvas({
               </Text>
             </View>
           ) : null}
+          </Reanimated.View>
           </View>
-          </View>
-        </GestureScrollView>
+        </AnimatedNotebookScrollView>
       </GestureDetector>
 
       {/* Scroll-time page indicator — bottom-right, compact, auto-hides. */}

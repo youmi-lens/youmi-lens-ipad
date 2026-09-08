@@ -66,13 +66,6 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
   const [autoFollowFeed, setAutoFollowFeed] = useState(true);
   const [panelSize, setPanelSize] = useState({ width: DEFAULT_PANEL_WIDTH, height: DEFAULT_PANEL_HEIGHT });
 
-  const showForCaptionState =
-    status === 'active' ||
-    status === 'listening' ||
-    status === 'connecting' ||
-    status === 'error' ||
-    Boolean(latestCaption || partialCaption || latestFinalLine);
-
   const initial = useRef({
     x: Math.max(EDGE_MARGIN, width - DEFAULT_PANEL_WIDTH - 16),
     y: insets.top + topOffset,
@@ -84,6 +77,22 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
   panelSizeRef.current = panelSize;
   const resizeStartSizeRef = useRef(panelSize);
   const isResizingRef = useRef(false);
+  // Ghost-preview resize architecture — mirrors app/mini-caption.tsx exactly
+  // (the owner-approved Notes Caption resize behavior). Real width/height
+  // changing on every drag frame forces a native layout pass of the whole
+  // caption subtree (Yoga layout properties can't use the native driver, and
+  // NativeLookupText renders one nested Text per English word) — that's what
+  // made resize feel heavy before. During an active drag only this
+  // content-free ghost box tracks the finger; the real panel stays frozen at
+  // its committed `panelSize` and gets exactly one real layout pass, on
+  // release.
+  const resizeLiveSizeRef = useRef(panelSize);
+  const panelSizeAnim = useRef(new Animated.ValueXY({ x: panelSize.width, y: panelSize.height })).current;
+  useEffect(() => {
+    if (isResizingRef.current) return;
+    panelSizeAnim.setValue({ x: panelSize.width, y: panelSize.height });
+  }, [panelSize, panelSizeAnim]);
+  const [isResizeGhostVisible, setIsResizeGhostVisible] = useState(false);
   const feedScrollRef = useRef<ScrollView | null>(null);
   const feedMetricsRef = useRef({ contentHeight: 0, layoutHeight: 0 });
   const feedUserScrollingRef = useRef(false);
@@ -139,26 +148,40 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
       onPanResponderGrant: () => {
         isResizingRef.current = true;
         resizeStartSizeRef.current = panelSizeRef.current;
+        resizeLiveSizeRef.current = panelSizeRef.current;
+        panelSizeAnim.setValue({ x: resizeStartSizeRef.current.width, y: resizeStartSizeRef.current.height });
+        setIsResizeGhostVisible(true);
       },
+      // High-frequency path — deliberately does NOT call setPanelSize (React
+      // state) and does NOT touch the real panel's width/height at all; only
+      // panelSizeAnim, which drives the content-free ghost preview. See the
+      // ghost-preview comment above.
       onPanResponderMove: (_e, g) => {
-        setPanelSize({
+        const next = {
           width: Math.min(Math.max(resizeStartSizeRef.current.width + g.dx, MIN_PANEL_WIDTH), maxWidth),
           height: Math.min(Math.max(resizeStartSizeRef.current.height + g.dy, MIN_PANEL_HEIGHT), maxHeight),
-        });
+        };
+        resizeLiveSizeRef.current = next;
+        panelSizeAnim.setValue({ x: next.width, y: next.height });
       },
       onPanResponderRelease: () => {
         isResizingRef.current = false;
-        const maxX = Math.max(EDGE_MARGIN, width - panelSizeRef.current.width - EDGE_MARGIN);
-        const maxY = Math.max(EDGE_MARGIN, height - panelSizeRef.current.height - EDGE_MARGIN);
+        const finalSize = resizeLiveSizeRef.current;
+        setPanelSize(finalSize);
+        setIsResizeGhostVisible(false);
+        const maxX = Math.max(EDGE_MARGIN, width - finalSize.width - EDGE_MARGIN);
+        const maxY = Math.max(EDGE_MARGIN, height - finalSize.height - EDGE_MARGIN);
         const nextPos = { x: Math.min(posRef.current.x, maxX), y: Math.min(posRef.current.y, maxY) };
         posRef.current = nextPos;
         Animated.spring(pan, { toValue: nextPos, useNativeDriver: true, friction: 9, tension: 80 }).start();
       },
       onPanResponderTerminate: () => {
         isResizingRef.current = false;
+        setIsResizeGhostVisible(false);
+        panelSizeAnim.setValue({ x: panelSizeRef.current.width, y: panelSizeRef.current.height });
       },
     });
-  }, [height, pan, width]);
+  }, [height, pan, panelSizeAnim, width]);
 
   const listeningPillResponder = useMemo(() => {
     const settle = (dx: number, dy: number) => {
@@ -326,7 +349,15 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
     setMarkFlash(true);
   };
 
-  if (!enabled || !showForCaptionState) return null;
+  // `enabled` (caller-controlled — see FloatingMiniCaptionProps) is the sole
+  // mount gate. It must reflect whether a classroom recording session is
+  // active, not the live-caption provider's own network/API status — a
+  // backend outage (e.g. no ASR key configured) must not make this panel
+  // disappear while a lecture is still being recorded. Once mounted, the
+  // caption text/translation rendering below already degrades gracefully on
+  // its own (connecting / listening / unavailable copy) — it never needed a
+  // second full-panel gate on top of `enabled`.
+  if (!enabled) return null;
 
   if (!panelVisible) {
     return (
@@ -352,6 +383,7 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
   }
 
   return (
+    <>
     <Animated.View
       style={[
         styles.panel,
@@ -627,6 +659,35 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
         </View>
       </View>
     </Animated.View>
+
+    {/* Resize preview — a content-free ghost outline shown only while
+        actively dragging the resize handle. Same architecture as
+        app/mini-caption.tsx: split into two nested Animated.Views because
+        `pan`'s native-driven transform must not share a style array with
+        panelSizeAnim's width/height (not native-driver-eligible — RN throws
+        "Style property 'width'/'height' is not supported by native animated
+        module" if they're mixed on one view). */}
+    {isResizeGhostVisible ? (
+      <Animated.View
+        pointerEvents="none"
+        style={[
+          styles.resizeGhostPositioner,
+          { transform: pan.getTranslateTransform() },
+        ]}
+      >
+        <Animated.View
+          style={[
+            styles.resizeGhost,
+            {
+              width: panelSizeAnim.x,
+              height: panelSizeAnim.y,
+              borderRadius: scaled.panelRadius,
+            },
+          ]}
+        />
+      </Animated.View>
+    ) : null}
+    </>
   );
 }
 
@@ -713,6 +774,23 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.14)',
     ...shadows.float,
+  },
+  /**
+   * Position-only wrapper for the resize ghost — carries `pan`'s
+   * native-driven transform and nothing else, so it never shares a style
+   * array with the ghost's (non-native-driver-eligible) width/height.
+   */
+  resizeGhostPositioner: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    zIndex: 13,
+  },
+  /** Content-free resize preview — see the render-time comment above. */
+  resizeGhost: {
+    backgroundColor: 'rgba(30, 41, 59, 0.35)',
+    borderWidth: 2,
+    borderColor: 'rgba(255, 255, 255, 0.55)',
   },
   grip: {
     backgroundColor: 'rgba(255, 255, 255, 0.22)',

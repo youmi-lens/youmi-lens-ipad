@@ -22,6 +22,7 @@
 import { useEffect, useRef } from 'react';
 
 import { useAuth } from './auth';
+import { resolvePlayableLocalAudioUri } from './lectureLocalAudio';
 import { ProcessingUnrecoverableError, startRemoteProcessing } from './processRecording';
 import { nextProcessingAction, mergeProcessingSnapshot } from './processingResume.mjs';
 import { useData } from './store';
@@ -62,11 +63,38 @@ export function useProcessingOrchestrator(): void {
     const startUpload = (lectureId: string, remoteRecordingId: string) => {
       if (uploadingRef.current.has(lectureId)) return;
       const lecture = lectures.find((l) => l.id === lectureId);
-      if (!lecture || !lecture.localAudioUri) return;
+      if (!lecture || !lecture.localAudioUri || lecture.audioAssemblyStatus === 'required') return;
+      // The persisted localAudioUri carries an absolute sandbox path rooted
+      // at whatever container UUID existed when it was last written — a
+      // reinstall (or a fresh restore-and-relaunch) rotates that UUID, and
+      // the raw path then points nowhere even though the identical file is
+      // still present at the same path under the CURRENT container.
+      // Playback already resolves through this same function (see
+      // lib/lectureLocalAudio.ts / app/lecture/[id].tsx's stale-URI heal
+      // effect); upload was reading the raw, possibly-stale value directly
+      // and handing it straight to RN's multipart file part, which is what
+      // produced "lecture.m4a couldn't be opened" from RCTHTTPFormDataHelper.
+      const resolvedLocalUri = resolvePlayableLocalAudioUri(lecture.localAudioUri, lecture.id);
+      if (!resolvedLocalUri) {
+        // Genuinely missing under every known location — not a stale-path
+        // problem. Fail safely and visibly rather than upload nothing or
+        // silently retry forever; never delete or regenerate local state.
+        updateLecture(lectureId, {
+          uploadStatus: 'upload_failed',
+          uploadError: 'The local recording could not be found on this device.',
+        });
+        return;
+      }
+      if (resolvedLocalUri !== lecture.localAudioUri) {
+        // Self-heal the store the same way the playback screen already does,
+        // so subsequent operations (including a future upload attempt) don't
+        // repeatedly re-resolve the same stale path.
+        updateLecture(lectureId, { localAudioUri: resolvedLocalUri });
+      }
       uploadingRef.current.add(lectureId);
       updateLecture(lectureId, { uploadStatus: 'uploading', uploadError: undefined });
       void uploadLectureAudio({
-        localUri: lecture.localAudioUri,
+        localUri: resolvedLocalUri,
         lectureId: lecture.id,
         recordingId: remoteRecordingId,
         mimeType: 'audio/m4a',

@@ -43,3 +43,6 @@ app-example
 # generated native folders
 /ios
 /android
+
+# stale native-project backup — never a build input, never committed
+/ios.stale-production-native-backup

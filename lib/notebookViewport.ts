@@ -10,6 +10,7 @@ export const NOTEBOOK_DEFAULT_SCALE = 1;
 export const NOTEBOOK_PALM_GRACE_MS = 300;
 
 export function clampNotebookScale(scale: number): number {
+  'worklet';
   if (!Number.isFinite(scale)) return NOTEBOOK_DEFAULT_SCALE;
   return Math.min(NOTEBOOK_MAX_SCALE, Math.max(NOTEBOOK_MIN_SCALE, scale));
 }
@@ -74,6 +75,7 @@ export function clampNotebookTranslateX(args: {
   viewportWidth: number;
   contentWidth: number;
 }): number {
+  'worklet';
   const scale = clampNotebookScale(args.scale);
   const vw = args.viewportWidth > 0 && Number.isFinite(args.viewportWidth) ? args.viewportWidth : 0;
   const cw = args.contentWidth > 0 && Number.isFinite(args.contentWidth) ? args.contentWidth : vw;
@@ -96,6 +98,7 @@ export function clampNotebookScrollY(args: {
   viewportHeight: number;
   contentHeight: number;
 }): number {
+  'worklet';
   const scale = clampNotebookScale(args.scale);
   const vh = args.viewportHeight > 0 && Number.isFinite(args.viewportHeight) ? args.viewportHeight : 0;
   const ch = args.contentHeight > 0 && Number.isFinite(args.contentHeight) ? args.contentHeight : 0;
@@ -129,6 +132,7 @@ export function applyPinchZoomFromStart(args: {
   contentWidth: number;
   contentHeight: number;
 }): { scale: number; translateX: number; scrollY: number } {
+  'worklet';
   const startScale =
     args.startScale > 0 && Number.isFinite(args.startScale)
       ? args.startScale

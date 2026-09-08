@@ -1,16 +1,24 @@
 import ExpoModulesCore
+import PDFKit
+import UIKit
 
 public final class ExpoPdfAnnotationModule: Module {
   public func definition() -> ModuleDefinition {
     Name("ExpoPdfAnnotation")
 
+    AsyncFunction("exportAnnotatedPdfAsync") { (options: [String: Any]) throws -> String in
+      try PdfAnnotatedExporter.export(options: options)
+    }
+
     View(PdfAnnotationView.self) {
       Events(
         "onPageChanged",
         "onLoadComplete",
+        "onViewportChanged",
         "onError",
         "onAnnotationsChanged",
         "onEraserGestureEnded"
+        ,"onTextAnnotationAction"
       )
 
       Prop("fileUri") { (view: PdfAnnotationView, fileUri: String?) in
@@ -19,6 +27,9 @@ public final class ExpoPdfAnnotationModule: Module {
 
       Prop("initialPage") { (view: PdfAnnotationView, initialPage: Int?) in
         view.initialPage = initialPage ?? 1
+      }
+      Prop("initialViewport") { (view: PdfAnnotationView, value: [String: Any]?) in
+        view.initialViewport = value
       }
 
       Prop("annotationMode") { (view: PdfAnnotationView, mode: String?) in
@@ -49,9 +60,91 @@ public final class ExpoPdfAnnotationModule: Module {
         view.annotationsByPage = value
       }
 
+      Prop("appendedBlankPageCount") { (view: PdfAnnotationView, value: Int?) in
+        view.appendedBlankPageCount = max(0, value ?? 0)
+      }
+
+      Prop("textAnnotationsByPage") { (view: PdfAnnotationView, value: [String: Any]?) in
+        view.textAnnotationsByPage = value
+      }
+
+      Prop("selectedTextAnnotationId") { (view: PdfAnnotationView, value: String?) in
+        view.selectedTextAnnotationId = value
+      }
+
       AsyncFunction("setPageAsync") { (view: PdfAnnotationView, pageNumber: Int) in
         view.setPage(pageNumber)
       }
+      AsyncFunction("flushViewportAsync") { (view: PdfAnnotationView) in
+        view.flushViewport()
+      }
+      AsyncFunction("captureViewportAsync") { (view: PdfAnnotationView) -> [String: Any] in
+        view.captureViewportPayload()
+      }
     }
   }
+}
+
+/** Sequential, vector-first copy of the immutable source PDF plus Youmi layers. */
+enum PdfAnnotatedExporter {
+  static func export(options: [String: Any]) throws -> String {
+    guard let fileUri = options["fileUri"] as? String,
+          let url = fileUri.hasPrefix("file://") ? URL(string: fileUri) : URL(fileURLWithPath: fileUri),
+          let document = PDFDocument(url: url) else {
+      throw NSError(domain: "ExpoPdfAnnotation", code: 1, userInfo: [NSLocalizedDescriptionKey: "Source PDF could not be opened."])
+    }
+    let sourcePages = min(document.pageCount, max(1, options["sourcePageCount"] as? Int ?? document.pageCount))
+    let appended = max(0, options["appendedBlankPageCount"] as? Int ?? 0)
+    let exportPages = sourcePages + max(0, appended - 1)
+    let strokes = options["annotationsByPage"] as? [String: Any] ?? [:]
+    let texts = options["textAnnotationsByPage"] as? [String: Any] ?? [:]
+    let finalBounds = document.page(at: max(0, sourcePages - 1))?.bounds(for: .mediaBox) ?? CGRect(x: 0, y: 0, width: 612, height: 792)
+    let destination = FileManager.default.temporaryDirectory.appendingPathComponent("Youmi-Lens-Annotated-\(UUID().uuidString).pdf")
+    let renderer = UIGraphicsPDFRenderer(bounds: finalBounds)
+    try renderer.writePDF(to: destination) { rendererContext in
+      for index in 0..<exportPages {
+        let page = index < sourcePages ? document.page(at: index) : nil
+        let bounds = page?.bounds(for: .mediaBox) ?? finalBounds
+        rendererContext.beginPage(withBounds: bounds, pageInfo: [:])
+        let context = rendererContext.cgContext
+        if let page { page.draw(with: .mediaBox, to: context) }
+        drawStrokes(strokes[String(index + 1)] as? [[String: Any]] ?? [], context: context)
+        drawText(texts[String(index + 1)] as? [[String: Any]] ?? [], context: context, pageHeight: bounds.height)
+      }
+    }
+    return destination.absoluteString
+  }
+
+  private static func drawStrokes(_ strokes: [[String: Any]], context: CGContext) {
+    for stroke in strokes {
+      guard let raw = stroke["points"] as? [[Double]], let first = raw.first, first.count >= 2 else { continue }
+      context.saveGState()
+      if (stroke["tool"] as? String) == "highlighter" { context.setBlendMode(.multiply) }
+      context.setStrokeColor(PdfExporterColor(hex: stroke["color"] as? String ?? "#061B34").withAlphaComponent(CGFloat(stroke["opacity"] as? Double ?? ((stroke["tool"] as? String) == "highlighter" ? 0.34 : 1))).cgColor)
+      context.setLineWidth(CGFloat(stroke["width"] as? Double ?? 2.4)); context.setLineCap(.round); context.setLineJoin(.round)
+      context.move(to: CGPoint(x: first[0], y: first[1]))
+      for point in raw.dropFirst() where point.count >= 2 { context.addLine(to: CGPoint(x: point[0], y: point[1])) }
+      context.strokePath()
+      context.restoreGState()
+    }
+  }
+
+  private static func drawText(_ annotations: [[String: Any]], context: CGContext, pageHeight: CGFloat) {
+    for annotation in annotations {
+      guard let text = annotation["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+      let x = CGFloat(annotation["x"] as? Double ?? 0), y = CGFloat(annotation["y"] as? Double ?? 0), width = max(40, CGFloat(annotation["width"] as? Double ?? 180))
+      let font = UIFont.systemFont(ofSize: max(8, CGFloat(annotation["fontSize"] as? Double ?? 16)))
+      let paragraph = NSMutableParagraphStyle(); paragraph.lineBreakMode = .byWordWrapping
+      let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.label, .paragraphStyle: paragraph]
+      let size = (text as NSString).boundingRect(with: CGSize(width: width, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: attributes, context: nil).size
+      UIGraphicsPushContext(context)
+      (text as NSString).draw(in: CGRect(x: x, y: pageHeight - y - size.height, width: width, height: size.height + 2), withAttributes: attributes)
+      UIGraphicsPopContext()
+    }
+  }
+}
+
+private func PdfExporterColor(hex: String) -> UIColor {
+  let value = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#")); var raw: UInt64 = 0; Scanner(string: value).scanHexInt64(&raw)
+  return UIColor(red: CGFloat((raw >> 16) & 0xff) / 255, green: CGFloat((raw >> 8) & 0xff) / 255, blue: CGFloat(raw & 0xff) / 255, alpha: 1)
 }

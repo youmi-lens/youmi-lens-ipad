@@ -376,18 +376,31 @@ export function LiveCaptionsProvider({ children }: { children: ReactNode }) {
             clearTimeout(readyTimerRef.current);
             readyTimerRef.current = null;
           }
-          reconnectAttemptsRef.current = 0; // healthy connection — reset the budget
+          // NOTE: the reconnect budget is deliberately NOT reset here. stream_ready
+          // only means the upstream ASR connection opened — it is not evidence any
+          // microphone audio is actually reaching it. Resetting the budget on this
+          // event let a session that opens fine but never delivers audio (upstream
+          // closes on its own no-audio timeout, e.g. Deepgram code 1011) reconnect
+          // forever: each new attempt reopened cleanly, re-armed a fresh 2-attempt
+          // budget, and failed again ~10-12s later without ever giving up — a
+          // confirmed production incident (upstreamPcmCount stayed 0 across dozens
+          // of consecutive attempts). The budget now only resets on stream_interim /
+          // stream_final below, i.e. on proof captions are actually working, so a
+          // pipeline that truly cannot deliver audio still fails bounded and
+          // degrades to the calm "unavailable" message instead of looping forever.
           pendingReasonRef.current = null;
           lastWsEventRef.current = 'stream_ready';
           logLiveCaptionEvent('stream_ready');
           setStatus('listening');
           setError(null);
         } else if (message.type === 'stream_interim' && rawCaptionText) {
+          reconnectAttemptsRef.current = 0; // real caption output — the pipeline is proven working
           lastWsEventRef.current = 'stream_interim';
           setStatus('active');
           setPartialCaption(rawCaptionText);
           setLatestCaption(rawCaptionText);
         } else if (message.type === 'stream_final' && rawCaptionText) {
+          reconnectAttemptsRef.current = 0; // real caption output — the pipeline is proven working
           lastWsEventRef.current = 'stream_final';
           setStatus('active');
           setPartialCaption('');
@@ -581,29 +594,41 @@ export function LiveCaptionsProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const value = useMemo<LiveCaptionsContextValue>(() => {
-    const latestFinalLine = captionLines[captionLines.length - 1] ?? null;
-    return {
-      isConnected: status === 'active' || status === 'listening',
-      isConnecting: status === 'connecting',
-      status,
-      error,
-      latestCaption,
-      partialCaption,
-      partialTranslationZh,
-      partialTranslatedText,
-      captionLines,
-      latestFinalLine,
-      finalCaptions: captionLines.map((line) => line.text),
-      startLiveCaptions,
-      stopLiveCaptions,
-      sendAudioChunk,
-      resetCaptions,
-      canStreamMicrophoneAudio: isLiveMicAvailable(),
-    };
-  }, [
+  // Recording-time performance: finalCaptions/latestFinalLine must depend
+  // ONLY on captionLines. Every live token updates partialCaption (often
+  // multiple times per second), and captionLines only grows through a whole
+  // lecture — if this derivation lived inside the value memo below (whose
+  // deps include partialCaption), captionLines.map() would re-copy the
+  // ENTIRE growing history array on every single token, and the resulting
+  // new array reference would defeat any prop-memoization downstream (e.g.
+  // CaptionHistoryFeed's history FlatList) even though the history content
+  // hadn't actually changed. Scoping this memo to captionLines alone keeps
+  // both derived values reference-stable across partial-token updates.
+  const finalCaptions = useMemo(() => captionLines.map((line) => line.text), [captionLines]);
+  const latestFinalLine = useMemo(() => captionLines[captionLines.length - 1] ?? null, [captionLines]);
+
+  const value = useMemo<LiveCaptionsContextValue>(() => ({
+    isConnected: status === 'active' || status === 'listening',
+    isConnecting: status === 'connecting',
+    status,
+    error,
+    latestCaption,
+    partialCaption,
+    partialTranslationZh,
+    partialTranslatedText,
+    captionLines,
+    latestFinalLine,
+    finalCaptions,
+    startLiveCaptions,
+    stopLiveCaptions,
+    sendAudioChunk,
+    resetCaptions,
+    canStreamMicrophoneAudio: isLiveMicAvailable(),
+  }), [
     error,
     captionLines,
+    latestFinalLine,
+    finalCaptions,
     latestCaption,
     partialCaption,
     partialTranslationZh,

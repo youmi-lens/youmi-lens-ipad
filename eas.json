@@ -6,6 +6,9 @@
     "development": {
       "developmentClient": true,
       "distribution": "internal",
+      "env": {
+        "APP_VARIANT": "development"
+      },
       "ios": {
         "simulator": false
       }
@@ -14,6 +17,9 @@
       "developmentClient": true,
       "distribution": "internal",
       "environment": "development",
+      "env": {
+        "APP_VARIANT": "development"
+      },
       "ios": {
         "simulator": true
       }
@@ -24,6 +30,13 @@
     "production": {
       "env": {
         "EXPO_PUBLIC_USE_REAL_IAP": "true"
+      }
+    },
+    "production-dev-container": {
+      "distribution": "internal",
+      "environment": "production",
+      "env": {
+        "APP_VARIANT": "development"
       }
     }
   },

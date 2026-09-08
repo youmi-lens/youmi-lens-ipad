@@ -448,13 +448,33 @@ check('NotebookCanvas wires focal zoom + sync scroll lock + no debug overlay', (
   assert.match(source, /screenToCanvasPoint/);
   assert.match(source, /applyPinchZoomFromStart/);
   assert.match(source, /canvasTranslateX/);
-  assert.match(source, /pinchStartFocalXRef/);
-  assert.match(source, /translateX:\s*canvasTranslateX/);
+  assert.match(source, /focalX: event.focalX, focalY: event.focalY/);
+  assert.match(source, /translateX: zoomX.value/);
+  const pinch = source.slice(source.indexOf('const pinchGesture ='), source.indexOf('const notebookGestures ='));
+  const update = pinch.slice(pinch.indexOf('.onUpdate('), pinch.indexOf('.onFinalize('));
+  assert.doesNotMatch(update, /runOnJS|setCanvas|scrollTo|Ref\.current/);
+  assert.doesNotMatch(pinch, /\.runOnJS\(true\)/);
+  assert.match(pinch, /runOnJS\(commitPageZoom\)/);
   assert.equal(source.includes('pointerDebug'), false);
   assert.equal(source.includes('WRITE ·'), false);
   assert.equal(source.includes('void revision'), false);
   assert.match(source, /setLivePoints/);
   assert.equal(NOTEBOOK_PALM_GRACE_MS, 300);
+});
+
+check('release compensation preserves visual Y while native scroll catches up', () => {
+  for (const logicalY of [0, 100, 1800]) {
+    for (const scale of [0.5, 1, 2, 3.5]) {
+      const targetScroll = 700;
+      const desired = logicalY * scale - targetScroll;
+      for (const nativeScroll of [0, 250, 700]) {
+        const compensation = nativeScroll - targetScroll;
+        assert.equal(logicalY * scale + compensation - nativeScroll, desired);
+      }
+      // At the acknowledged target, dropping compensation cannot produce a jump.
+      assert.equal(logicalY * scale - targetScroll, desired);
+    }
+  }
 });
 
 console.log(`\nnotebook-viewport: ${passed} checks passed`);

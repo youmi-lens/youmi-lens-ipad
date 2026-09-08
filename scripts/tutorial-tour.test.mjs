@@ -615,10 +615,26 @@ console.log('E1-E5 — first-run auto-show, completion persistence, scoping');
 
 check('E1. the tutorial auto-shows only on a first eligible entry that has NOT completed it', () => {
   assert.match(provider, /if \(loading \|\| !canUseApp \|\| !scopeId\) return;/);
-  const effect = provider.slice(provider.indexOf('autoCheckedScopeRef.current = scopeId'), provider.indexOf('const currentMoment'));
+  const effect = provider.slice(provider.indexOf('if (autoCheckedScopeRef.current === scopeId) return;'), provider.indexOf('const currentMoment'));
   // The completion flag is what gates the auto-show.
-  assert.match(effect, /loadTutorialCompleted\(scopeId\)\.then\(\(completed\) => \{[\s\S]{0,120}if \(cancelled \|\| completed\) return;/);
+  assert.match(effect, /loadTutorialCompleted\(scopeId\)\.then\(\(completed\) => \{[\s\S]{0,120}if \(completed\) return;/);
   assert.match(effect, /setVisible\(true\);/);
+});
+
+check('E1b (race fix). the scope is marked checked ONLY inside the completion callback, after the cancelled check — never before the async read even starts', () => {
+  const effect = provider.slice(provider.indexOf('if (autoCheckedScopeRef.current === scopeId) return;'), provider.indexOf('const currentMoment'));
+  const beforeTheRead = effect.slice(0, effect.indexOf('void loadTutorialCompleted'));
+  assert.doesNotMatch(
+    beforeTheRead,
+    /autoCheckedScopeRef\.current = scopeId/,
+    'the scope must not be marked checked before loadTutorialCompleted is even called — a stale, earlier-issued auth promise (e.g. getSession()) can still flip scopeId back to null and cancel this check before it resolves, and if the ref were already written the scope would be permanently unretryable',
+  );
+  const thenBlock = effect.slice(effect.indexOf('.then((completed) => {'));
+  const cancelledGuardIndex = thenBlock.indexOf('if (cancelled) return;');
+  const refWriteIndex = thenBlock.indexOf('autoCheckedScopeRef.current = scopeId;');
+  assert.ok(cancelledGuardIndex >= 0, 'the cancelled guard must exist inside the completion callback');
+  assert.ok(refWriteIndex >= 0, 'the ref write must exist inside the completion callback');
+  assert.ok(cancelledGuardIndex < refWriteIndex, 'cancelled must be checked BEFORE the scope is marked, so a cancelled check never poisons the ref');
 });
 
 check('E2. completion is user/guest scoped, and the scope comes from the session', () => {

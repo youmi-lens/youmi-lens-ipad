@@ -167,8 +167,10 @@ assert.match(facade, /frozenEngineRef/, 'the facade holds a frozen engine ref');
 assert.match(facade, /frozenEngine: frozenEngineRef\.current/, 'the frozen engine feeds the policy');
 assert.match(
   facade,
-  /if \(frozenEngineRef\.current === null\) frozenEngineRef\.current = decision\.engine/,
-  'the engine is frozen on first resolution and never reassigned afterwards',
+  /if \(decision && frozenEngineRef\.current === null\) frozenEngineRef\.current = decision\.engine/,
+  'the engine is frozen on first resolution and never reassigned afterwards ' +
+    '(decision can be null only while the durable-ownership lookup has not resolved yet, ' +
+    'in which case nothing freezes)',
 );
 
 // --- Stale results and deduplication ----------------------------------------

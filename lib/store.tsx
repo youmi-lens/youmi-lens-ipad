@@ -45,6 +45,7 @@ import {
   type LectureStatus,
   type MaterialAnnotationStroke,
   type MaterialPageAnnotation,
+  type MaterialTextAnnotation,
   type NoteImage,
   type NoteStroke,
   type PersistedCaptionLine,
@@ -204,6 +205,7 @@ export type DataContextValue = {
     materialId: string,
     pageNumber: number,
   ) => MaterialAnnotationStroke[];
+  textAnnotationsForMaterialPage: (materialId: string, pageNumber: number) => MaterialTextAnnotation[];
   countAnnotationsForMaterial: (materialId: string) => number;
   saveAnnotationStrokes: (
     lectureId: string,
@@ -221,6 +223,12 @@ export type DataContextValue = {
     materialId: string,
     pageNumber: number,
     strokes: MaterialAnnotationStroke[],
+    materialScopeLectureId: string,
+  ) => void;
+  replaceMaterialPageTextAnnotationsForMaterial: (
+    materialId: string,
+    pageNumber: number,
+    annotations: MaterialTextAnnotation[],
     materialScopeLectureId: string,
   ) => void;
   addAnnotationStroke: (
@@ -763,20 +771,53 @@ function mergeRemoteRecordingsIntoStore(
     const mergedMarks = preferRemoteMarks ? remoteMarks! : (local?.markedTimestamps ?? remoteMarks ?? []);
     const mergedMarksUpdatedAt = (preferRemoteMarks ? row.marks_updated_at : (localMarksUpdatedAt ?? row.marks_updated_at)) ?? undefined;
 
+    // Media (audio asset) freshness: same freshness-clock pattern as
+    // transcript/summary/notes/marks/title above, applied to the audio
+    // triad (durationMillis/uploadStatus/processingStatus) for the first
+    // time. Without this, a locally-produced media revision (legacy-resume
+    // assembly or general reconciliation producing a NEW canonical asset
+    // for an ALREADY-uploaded lecture) has no way to hold its ground against
+    // the next remote-merge cycle — which fires on nearly every screen
+    // focus/navigation and, until now, unconditionally trusted row.duration_sec
+    // / row.storage_path / row.ai_status. If the new asset's upload hasn't
+    // succeeded yet (e.g. exceeds the backend's max object size), the cloud
+    // row still describes the OLD asset, and every merge cycle reasserted
+    // that old uploaded/ready state over the freshly-reconciled local one —
+    // a stale read fighting the upload/reconciliation pipeline for the same
+    // fields, which is exactly the observed "Ready -> Uploading -> Retry
+    // Processing" oscillation on a lecture whose corrected audio cannot
+    // finish uploading. Once the upload/processing genuinely completes and
+    // the cloud row's own updated_at catches up, normal remote-authoritative
+    // merging resumes automatically — this only holds the line during the
+    // window where local knows about a revision the cloud does not yet.
+    const localMediaRevisionAt = local?.mediaReconciliationCompletedAt ?? local?.audioAssemblyCompletedAt;
+    const preferLocalMediaState =
+      Boolean(localMediaRevisionAt) &&
+      (!row.updated_at || localMediaRevisionAt! > row.updated_at);
+    const mergedDurationMillis = preferLocalMediaState
+      ? (local?.durationMillis ?? 0)
+      : (parseDurationMillis(row.duration_sec) || local?.durationMillis || 0);
+    const mergedUploadStatus = preferLocalMediaState
+      ? (local?.uploadStatus ?? 'not_uploaded')
+      : (row.storage_path ? 'uploaded' : local?.uploadStatus ?? 'not_uploaded');
+    const mergedProcessingStatus = preferLocalMediaState
+      ? (local?.processingStatus ?? 'not_started')
+      : processingStatus;
+
     return {
       id: local?.id ?? makeRemoteLectureId(row.id),
       courseId: course?.id ?? stableIdFromName('cloud_course', UNFILED_COURSE_NAME),
       title: finalTitle,
       titleUpdatedAt: localTitleUpdatedAt,
       date,
-      durationMillis: parseDurationMillis(row.duration_sec) || local?.durationMillis || 0,
+      durationMillis: mergedDurationMillis,
       localAudioUri: local?.localAudioUri ?? null,
       remoteRecordingId: row.id,
-      uploadStatus: row.storage_path ? 'uploaded' : local?.uploadStatus ?? 'not_uploaded',
-      storagePath: row.storage_path ?? local?.storagePath,
+      uploadStatus: mergedUploadStatus,
+      storagePath: preferLocalMediaState ? local?.storagePath : (row.storage_path ?? local?.storagePath),
       uploadError: local?.uploadError,
       uploadedAt: row.updated_at ?? local?.uploadedAt,
-      processingStatus,
+      processingStatus: mergedProcessingStatus,
       processingError: row.ai_error ?? local?.processingError,
       remoteAiStatus: row.ai_status ?? local?.remoteAiStatus,
       remoteAiError: row.ai_error ?? local?.remoteAiError,
@@ -805,6 +846,26 @@ function mergeRemoteRecordingsIntoStore(
       deletedAt: resolvedDeletion.deletedAt,
       deletionUpdatedAt: resolvedDeletion.deletionUpdatedAt,
       deletedReason: resolvedDeletion.deletedAt ? (local?.deletedReason ?? 'manual') : null,
+      // Recording-engine/recovery provenance is LOCAL-ONLY — there is no
+      // cloud column for any of these, so they must be explicitly carried
+      // forward from `local` on every merge or they silently vanish the
+      // moment a lecture gets its first remoteRecordingId (this was a real
+      // Build 50 P0: audioSegments disappearing on every remote-merge cycle
+      // made general media reconciliation discover zero legacy sources for
+      // an already-uploaded lecture, even though they were never actually
+      // lost from the original local record).
+      recordingEngine: local?.recordingEngine,
+      audioSegments: local?.audioSegments,
+      audioAssemblyStatus: local?.audioAssemblyStatus,
+      audioAssemblyReason: local?.audioAssemblyReason,
+      audioAssemblyCompletedAt: local?.audioAssemblyCompletedAt,
+      mediaIntegrityStatus: local?.mediaIntegrityStatus,
+      mediaIntegrityDetail: local?.mediaIntegrityDetail,
+      mediaIntegrityCheckedAt: local?.mediaIntegrityCheckedAt,
+      mediaReconciliationStatus: local?.mediaReconciliationStatus,
+      mediaReconciliationSourceIds: local?.mediaReconciliationSourceIds,
+      mediaReconciliationDetail: local?.mediaReconciliationDetail,
+      mediaReconciliationCompletedAt: local?.mediaReconciliationCompletedAt,
     } satisfies Lecture;
   });
 
@@ -1951,6 +2012,52 @@ export function DataProvider({ children }: { children: ReactNode }) {
     });
   }, [upsertAnnotationPage]);
 
+  /**
+   * Material-wide text layer. Unlike legacy lecture-scoped ink, text always
+   * belongs to the shared material scope so opening the same PDF from another
+   * lecture shows one canonical annotation document.
+   */
+  const replaceMaterialPageTextAnnotationsForMaterial = useCallback((
+    materialId: string,
+    pageNumber: number,
+    annotations: MaterialTextAnnotation[],
+    materialScopeLectureId: string,
+  ) => {
+    if (!materialId || pageNumber < 1 || !materialScopeLectureId) return;
+    const normalizedPage = Math.max(1, Math.round(pageNumber));
+    const sanitized = annotations.filter((annotation) =>
+      Boolean(annotation?.id) && typeof annotation.text === 'string' && annotation.text.trim().length > 0,
+    );
+    const now = new Date().toISOString();
+    setMaterialAnnotations((prev) => {
+      const index = prev.findIndex((annotation) =>
+        annotation.lectureId === materialScopeLectureId &&
+        annotation.materialId === materialId &&
+        annotation.pageNumber === normalizedPage &&
+        !annotation.deletedAt,
+      );
+      if (index >= 0) {
+        const existing = prev[index];
+        const current = existing.textAnnotations ?? [];
+        if (current.length === sanitized.length && current.every((item, i) => item === sanitized[i])) return prev;
+        const next = [...prev];
+        next[index] = { ...existing, textAnnotations: sanitized, updatedAt: now };
+        return next;
+      }
+      if (sanitized.length === 0) return prev;
+      return [...prev, {
+        id: makeMaterialAnnotationId(materialScopeLectureId, materialId, normalizedPage),
+        lectureId: materialScopeLectureId,
+        materialId,
+        pageNumber: normalizedPage,
+        strokes: [],
+        textAnnotations: sanitized,
+        createdAt: now,
+        updatedAt: now,
+      }];
+    });
+  }, []);
+
   const undoLastAnnotationStroke = useCallback((lectureId: string, materialId: string, pageNumber: number) => {
     upsertAnnotationPage(lectureId, materialId, pageNumber, (prev) => (prev.length > 0 ? prev.slice(0, -1) : prev));
   }, [upsertAnnotationPage]);
@@ -2095,6 +2202,13 @@ export function DataProvider({ children }: { children: ReactNode }) {
               annotation.pageNumber === Math.max(1, Math.round(pageNumber)),
           )
           .flatMap((annotation) => annotation.strokes),
+      textAnnotationsForMaterialPage: (materialId, pageNumber) =>
+        activeMaterialAnnotations
+          .filter((annotation) =>
+            annotation.materialId === materialId &&
+            annotation.pageNumber === Math.max(1, Math.round(pageNumber)),
+          )
+          .flatMap((annotation) => annotation.textAnnotations ?? []),
       countAnnotationsForMaterial: (materialId) =>
         activeMaterialAnnotations
           .filter((annotation) => annotation.materialId === materialId)
@@ -2102,12 +2216,13 @@ export function DataProvider({ children }: { children: ReactNode }) {
       saveAnnotationStrokes,
       replaceMaterialPageAnnotationStrokes: saveAnnotationStrokes,
       replaceMaterialPageAnnotationStrokesForMaterial,
+      replaceMaterialPageTextAnnotationsForMaterial,
       addAnnotationStroke,
       undoLastAnnotationStroke,
       clearAnnotationsForPage,
       clearAll,
     }),
-    [visibleStoreReady, currentUserId, activeCourses, activeLectures, refreshCloudLibrary, deletedCourses, deletedLectures, selectedCourseId, createCourse, createLecture, saveInProgressLecture, updateLecture, moveLectureToCourse, deleteLecture, deleteLectures, deleteCourse, restoreCourse, restoreLecture, permanentlyDeleteCourse, permanentlyDeleteLecture, renameCourse, renameLecture, activeMaterials, addMaterial, renameMaterial, updateMaterial, deleteMaterial, activeMaterialLinks, reserveLectureId, linkMaterialToLecture, updateLectureMaterialLink, removeLectureMaterialLink, cleanupOrphanMaterialLinks, activeMaterialAnnotations, saveAnnotationStrokes, replaceMaterialPageAnnotationStrokesForMaterial, addAnnotationStroke, undoLastAnnotationStroke, clearAnnotationsForPage, clearAll],
+    [visibleStoreReady, currentUserId, activeCourses, activeLectures, refreshCloudLibrary, deletedCourses, deletedLectures, selectedCourseId, createCourse, createLecture, saveInProgressLecture, updateLecture, moveLectureToCourse, deleteLecture, deleteLectures, deleteCourse, restoreCourse, restoreLecture, permanentlyDeleteCourse, permanentlyDeleteLecture, renameCourse, renameLecture, activeMaterials, addMaterial, renameMaterial, updateMaterial, deleteMaterial, activeMaterialLinks, reserveLectureId, linkMaterialToLecture, updateLectureMaterialLink, removeLectureMaterialLink, cleanupOrphanMaterialLinks, activeMaterialAnnotations, saveAnnotationStrokes, replaceMaterialPageAnnotationStrokesForMaterial, replaceMaterialPageTextAnnotationsForMaterial, addAnnotationStroke, undoLastAnnotationStroke, clearAnnotationsForPage, clearAll],
   );
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;

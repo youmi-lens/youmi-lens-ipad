@@ -44,7 +44,12 @@ import {
   captionsToTranscript,
   hasMeaningfulRecordingContent,
 } from '@/lib/recordingPersistence.mjs';
-import { persistLectureLocalAudio } from '@/lib/lectureLocalAudio';
+import { persistLectureLocalAudio, persistLectureResumeSegment } from '@/lib/lectureLocalAudio';
+import {
+  LEGACY_RESUME_ASSEMBLY_REQUIRED,
+  planLegacyResumeFinalization,
+} from '@/lib/recording/resumeAudioIntegrity.mjs';
+import { preserveLegacyAudioSourcesEarly } from '@/lib/recording/legacyAudioAssembly';
 import { isPad } from '@/constants/deviceClass';
 import { useIsCompactWidth } from '@/constants/responsive';
 
@@ -165,6 +170,17 @@ export default function RecordingScreen() {
   const priorCaptionLinesRef = useRef<PersistedCaptionLine[]>(resumeLecture?.liveCaptionLines ?? []);
   const priorMarksRef = useRef<number[]>(resumeLecture?.markedTimestamps ?? []);
   const priorAudioUriRef = useRef<string | null>(resumeLecture?.localAudioUri ?? null);
+  // Snapshotted once at mount, like the other prior* refs above. `resumeLecture`
+  // itself is a LIVE read from the store (getLecture), and this screen's own
+  // autosave (persistProgress) periodically writes the combined session
+  // duration back into that same store record. Reading resumeLecture.durationMillis
+  // directly on every render — instead of this frozen snapshot — created a
+  // feedback loop: each autosave baked the running total into the store, the
+  // next render added the still-live recorder duration on top of that already-
+  // inflated baseline, and the error compounded roughly every 5s for the rest
+  // of the resumed session (quadratic runaway, e.g. a real ~60min class
+  // displaying ~345min after a single mid-class resume).
+  const priorDurationMillisRef = useRef<number>(resumeLecture?.durationMillis ?? 0);
   const resumeDraftRef = useRef({
     notes: resumeLecture?.notes,
     strokes: resumeLecture?.noteStrokes,
@@ -190,8 +206,11 @@ export default function RecordingScreen() {
   const sessionDurationMillis = recordingEngine === 'nativeDurable'
     ? durationMillis
     : isResume
-    ? (resumeLecture?.durationMillis ?? 0) + (isReviewingResume ? 0 : durationMillis)
+    ? priorDurationMillisRef.current + (isReviewingResume ? 0 : durationMillis)
     : durationMillis;
+  const legacyResumeHasPriorAudio = isResume
+    && recordingEngine === 'legacy'
+    && Boolean(priorAudioUriRef.current);
   const seconds = Math.floor(sessionDurationMillis / 1000);
   const recordingSessionActive = isRecording || isPaused || durationMillis > 0;
   // Reliable "audio is genuinely capturing" signal — the recorder's own state,
@@ -567,6 +586,20 @@ export default function RecordingScreen() {
 
   const togglePause = async () => {
     if (isReviewingResume) {
+      if (resumeLecture?.audioAssemblyStatus === 'required') {
+        // This used to be a dead-end Alert with no connection to recovery.
+        // A Back-triggered assembly-required save leaves the lecture's
+        // status as 'in_progress' (handleBack intentionally preserves an
+        // in-progress lecture), so reopening it always re-enters this exact
+        // review screen — Resume is the natural first thing a user presses,
+        // and it hit this guard every time with no way out. Route into
+        // /processing instead: it is the ONE place that actually runs
+        // recovery (see its own runAssembly effect), so this is a redirect
+        // into the existing pipeline, not a second copy of it.
+        if (__DEV__) console.info('[AudioAssembly] redirect-to-processing', { lectureId: pendingLectureId, from: 'togglePause' });
+        router.replace({ pathname: '/processing', params: { lectureId: pendingLectureId } });
+        return;
+      }
       setContinueRequested(true);
       return;
     }
@@ -612,7 +645,39 @@ export default function RecordingScreen() {
       } catch {
         uri = null;
       }
-      persistProgress(uri);
+      if (legacyResumeHasPriorAudio && uri) {
+        const segmentUri = await persistLectureResumeSegment(uri, pendingLectureId);
+        const plan = planLegacyResumeFinalization({
+          priorCanonicalUri: priorAudioUriRef.current,
+          resumedSegmentUri: segmentUri,
+          existingSegments: resumeLecture?.audioSegments,
+          priorCreatedAt: resumeLecture?.date,
+          now: new Date().toISOString(),
+        });
+        if (plan.kind === 'assembly_required') {
+          persistProgress();
+          updateLecture(pendingLectureId, {
+            recordingEngine,
+            localAudioUri: plan.canonicalUri,
+            audioAssemblyStatus: 'required',
+            audioAssemblyReason: plan.reason,
+            audioSegments: plan.segments,
+            uploadStatus: 'upload_failed',
+            uploadError: 'Audio segments were preserved. Final assembly is required before upload.',
+          });
+          // Best-effort: copy the sources into durable storage NOW, before
+          // the user can leave — the legacy recorder's Cache file is not a
+          // durable identity (eviction, or a reinstall that rotates the
+          // container UUID, both invalidate it later). Never blocks Back:
+          // /processing's eventual recovery retries persistence anyway.
+          const preserved = await preserveLegacyAudioSourcesEarly(pendingLectureId, plan.segments);
+          if (__DEV__ && !preserved.ok) {
+            console.warn('[AudioAssembly] early-preservation-failed', { lectureId: pendingLectureId, error: preserved.error });
+          }
+        }
+      } else {
+        persistProgress(uri);
+      }
     }
     router.back();
   };
@@ -629,6 +694,19 @@ export default function RecordingScreen() {
 
   const finish = async (options?: { recoverable?: boolean }) => {
     if (finishing) return;
+    // A lecture already blocked behind audioAssemblyStatus === 'required'
+    // (e.g. reopened after a prior Back-triggered assembly-required save)
+    // must not run the mic-stop / stopRecording sequence below at all — no
+    // new audio was necessarily captured this session (uri could be falsy),
+    // which previously fell through into the normal finish path using only
+    // priorAudioUriRef.current and silently ignoring the resumed segment.
+    // Route into the same recovery pipeline /processing already runs,
+    // instead of duplicating that logic here.
+    if (getLecture(pendingLectureId)?.audioAssemblyStatus === 'required') {
+      if (__DEV__) console.info('[AudioAssembly] redirect-to-processing', { lectureId: pendingLectureId, from: 'finish' });
+      router.replace({ pathname: '/processing', params: { lectureId: pendingLectureId } });
+      return;
+    }
     if (options?.recoverable) autoStarted.current = true;
     if (__DEV__) {
       console.info('[recording] finish pressed', {
@@ -716,6 +794,66 @@ export default function RecordingScreen() {
       ...marks.map((mark) => mark.timestampMillis),
     ];
     const existing = getLecture(pendingLectureId);
+    // A legacy recorder starts a new file after a recovered recording is
+    // reopened. Preserve that file separately and stop here: assigning it to
+    // localAudioUri would replace the original canonical audio and recreate
+    // the CS111 truncation incident.
+    if (legacyResumeHasPriorAudio && uri) {
+      const segmentUri = await persistLectureResumeSegment(uri, pendingLectureId);
+      const plan = planLegacyResumeFinalization({
+        priorCanonicalUri: priorAudioUriRef.current,
+        resumedSegmentUri: segmentUri,
+        existingSegments: resumeLecture?.audioSegments,
+        priorCreatedAt: resumeLecture?.date,
+        now: new Date().toISOString(),
+      });
+      if (plan.kind !== 'assembly_required') {
+        finishedRef.current = false;
+        setFinishing(false);
+        Alert.alert(
+          'Recording preserved',
+          'The resumed audio could not be safely preserved as a separate segment. Upload has been blocked; please keep this app open and contact support before retrying.',
+        );
+        return;
+      }
+      updateLecture(pendingLectureId, {
+        status: 'local_recorded',
+        recordingEngine,
+        durationMillis: Math.max(existing?.durationMillis ?? 0, finalDuration),
+        // Keep the previous canonical file untouched. It remains the first
+        // source segment rather than becoming an upload authority.
+        localAudioUri: plan.canonicalUri,
+        audioAssemblyStatus: 'required',
+        audioAssemblyReason: LEGACY_RESUME_ASSEMBLY_REQUIRED,
+        audioSegments: plan.segments,
+        uploadStatus: 'upload_failed',
+        uploadError: 'Audio segments were preserved. Final assembly is required before upload.',
+        processingStatus: 'not_started',
+        markedTimestamps: mergedMarks,
+        liveTranscript: en,
+        liveTranscriptZh: zh,
+        translatedLiveTranscript: translated,
+        sourceLanguage,
+        translationLanguage,
+        liveCaptionLines: lines,
+        notes: draftNotes,
+        noteStrokes: draftStrokes,
+        noteImages: draftImages,
+      });
+      // Best-effort: copy the sources into durable storage NOW, before
+      // resetDraft/navigation — the legacy recorder's Cache file is not a
+      // durable identity (eviction, or a reinstall that rotates the
+      // container UUID, both invalidate it later). Never blocks Finish:
+      // /processing's eventual recovery retries persistence anyway.
+      const preserved = await preserveLegacyAudioSourcesEarly(pendingLectureId, plan.segments);
+      if (__DEV__ && !preserved.ok) {
+        console.warn('[AudioAssembly] early-preservation-failed', { lectureId: pendingLectureId, error: preserved.error });
+      }
+      resetDraft();
+      router.replace({ pathname: '/processing', params: { lectureId: pendingLectureId } });
+      return;
+    }
+
     const rawFinalAudio = uri ?? priorAudioUriRef.current;
     const finalAudio = rawFinalAudio
       ? (await persistLectureLocalAudio(rawFinalAudio, pendingLectureId)) ?? rawFinalAudio

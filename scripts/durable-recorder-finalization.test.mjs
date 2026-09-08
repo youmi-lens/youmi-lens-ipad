@@ -7,6 +7,7 @@ await runSwiftHarness({
     nativeSources.core,
     nativeSources.store,
     nativeSources.recorder,
+    nativeSources.composer,
     nativeSources.exporter,
     'scripts/durable-recorder-finalization-core.test.swift',
   ],
@@ -18,6 +19,7 @@ const source = await readSources(
   nativeSources.core,
   nativeSources.store,
   nativeSources.recorder,
+  nativeSources.composer,
   nativeSources.exporter,
 );
 assert.match(source, /AVMutableComposition/);

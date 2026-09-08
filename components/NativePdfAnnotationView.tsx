@@ -10,7 +10,10 @@ import {
   type NativePdfEraserGestureEndedEvent,
   type NativePdfErrorEvent,
   type NativePdfLoadCompleteEvent,
+  type NativePdfViewport,
   type NativePdfPageChangedEvent,
+  type NativePdfTextAnnotationsByPage,
+  type NativePdfTextAnnotationActionEvent,
 } from '@/modules/expo-pdf-annotation';
 
 const NativePdfViewComponent = ExpoPdfAnnotationView as React.ComponentType<
@@ -21,11 +24,15 @@ const NativePdfViewComponent = ExpoPdfAnnotationView as React.ComponentType<
 
 export type NativePdfAnnotationViewRef = {
   setPage: (pageNumber: number) => void;
+  flushViewport: () => void;
+  /** Reads PDFKit's current page/zoom/page-space anchor without waiting for its normal debounce. */
+  captureViewport: () => Promise<NativePdfViewport | null>;
 };
 
 export type NativePdfAnnotationViewProps = {
   fileUri: string;
   initialPage?: number;
+  initialViewport?: NativePdfViewport;
   style?: StyleProp<ViewStyle>;
   /** "scroll" lets PDFKit own all touches; "pen" turns the Apple-Pencil overlay on. */
   annotationMode?: NativePdfAnnotationMode;
@@ -35,11 +42,16 @@ export type NativePdfAnnotationViewProps = {
   highlighterWidth?: number;
   eraserRadius?: number;
   annotationsByPage?: NativePdfAnnotationsByPage;
+  appendedBlankPageCount?: number;
+  textAnnotationsByPage?: NativePdfTextAnnotationsByPage;
+  selectedTextAnnotationId?: string;
   onPageChanged?: (event: NativePdfPageChangedEvent) => void;
   onLoadComplete?: (event: NativePdfLoadCompleteEvent) => void;
+  onViewportChanged?: (event: NativePdfViewport) => void;
   onError?: (event: NativePdfErrorEvent) => void;
   onAnnotationsChanged?: (event: NativePdfAnnotationsChangedEvent) => void;
   onEraserGestureEnded?: (event: NativePdfEraserGestureEndedEvent) => void;
+  onTextAnnotationAction?: (event: NativePdfTextAnnotationActionEvent) => void;
 };
 
 export const NATIVE_PDF_ANNOTATION_AVAILABLE = Platform.OS === 'ios';
@@ -49,6 +61,7 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
     {
       fileUri,
       initialPage = 1,
+      initialViewport,
       style,
       annotationMode,
       penColor,
@@ -57,11 +70,16 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
       highlighterWidth,
       eraserRadius,
       annotationsByPage,
+      appendedBlankPageCount,
+      textAnnotationsByPage,
+      selectedTextAnnotationId,
       onPageChanged,
       onLoadComplete,
+      onViewportChanged,
       onError,
       onAnnotationsChanged,
       onEraserGestureEnded,
+      onTextAnnotationAction,
     },
     ref,
   ) {
@@ -73,6 +91,14 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
           if (__DEV__) console.warn('[native-pdf] setPageAsync failed', error);
         });
       },
+      flushViewport() {
+        nativeRef.current?.flushViewportAsync?.().catch((error) => {
+          if (__DEV__) console.warn('[native-pdf] flushViewportAsync failed', error);
+        });
+      },
+      captureViewport() {
+        return nativeRef.current?.captureViewportAsync?.() ?? Promise.resolve(null);
+      },
     }), []);
 
     return (
@@ -81,6 +107,7 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
         style={style}
         fileUri={fileUri}
         initialPage={initialPage}
+        initialViewport={initialViewport}
         annotationMode={annotationMode}
         penColor={penColor}
         penWidth={penWidth}
@@ -88,11 +115,16 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
         highlighterWidth={highlighterWidth}
         eraserRadius={eraserRadius}
         annotationsByPage={annotationsByPage}
+        appendedBlankPageCount={appendedBlankPageCount}
+        textAnnotationsByPage={textAnnotationsByPage}
+        selectedTextAnnotationId={selectedTextAnnotationId}
         onPageChanged={(event) => onPageChanged?.(event.nativeEvent)}
         onLoadComplete={(event) => onLoadComplete?.(event.nativeEvent)}
+        onViewportChanged={(event) => onViewportChanged?.(event.nativeEvent)}
         onError={(event) => onError?.(event.nativeEvent)}
         onAnnotationsChanged={(event) => onAnnotationsChanged?.(event.nativeEvent)}
         onEraserGestureEnded={(event) => onEraserGestureEnded?.(event.nativeEvent)}
+        onTextAnnotationAction={(event) => onTextAnnotationAction?.(event.nativeEvent)}
       />
     );
   },

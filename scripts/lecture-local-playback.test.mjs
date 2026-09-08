@@ -177,6 +177,83 @@ assert.match(persist, /resolvePlayableLocalAudioUri/);
 assert.match(persist, /resolveLectureAudioPlaybackState/);
 assert.match(persist, /'cloud'/);
 
+// --- Stale-container playback resolution: Application Support case ---------
+// Root cause (Build 50 P0): legacy audio assembly / durable-recovery final
+// assets live under Application Support (modules/expo-durable-recorder),
+// but rewriteSandboxUri only rewrote /Library/Caches/ and /Documents/ — a
+// stale container UUID in a persisted localAudioUri pointing at
+// Application Support could never be resolved back to the current
+// container, even though the file was verifiably still on disk. This
+// surfaced physically as "Audio could not be loaded" on a lecture whose
+// audio had just been durably composed and correctly persisted.
+{
+  const fn = persist.slice(persist.indexOf('function rewriteSandboxUri('), persist.indexOf('function rewriteSandboxUri(') + 2000);
+
+  assert.match(fn, /applicationSupportDirUri\(\)/, 'rewriteSandboxUri has an Application Support case');
+  // Native Swift persists this as URL.absoluteString, which always
+  // percent-encodes the space — the resolver must not assume one encoding.
+  assert.match(fn, /Application%20Support/, 'checks the percent-encoded form (how it is actually persisted)');
+  assert.match(fn, /Application Support/, 'also checks the literal-space form, defensively');
+
+  // Application Support must be checked before the generic /Documents/
+  // case — not because of a substring collision today, but so a future
+  // path shape cannot silently fall through to the wrong branch.
+  const appSupportIdx = fn.indexOf('appSupportMarker');
+  const docsIdx = fn.indexOf("path.indexOf('/Documents/')");
+  assert.ok(appSupportIdx >= 0 && docsIdx > appSupportIdx, 'Application Support is checked before the generic Documents case');
+}
+
+{
+  const fn = persist.slice(
+    persist.indexOf('function applicationSupportDirUri('),
+    persist.indexOf('function rewriteSandboxUri('),
+  );
+  assert.match(fn, /FileSystemNS\?\.Paths\?\.document\?\.uri/, 'derived from the document root, never a hardcoded container path');
+  assert.doesNotMatch(fn, /var\/mobile\/Containers|[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}/i, 'no hardcoded container UUID');
+  assert.match(fn, /Library\/Application%20Support/, 'produces the percent-encoded form so it stays a well-formed file:// URI');
+}
+
+{
+  // Behavioral parity: the same algorithm, re-derived here (expo-file-system
+  // is RN-only and cannot load under plain Node — see every other
+  // native-facing test this session), fed the ACTUAL stale URI captured
+  // from the device during the physical failure, against a DIFFERENT
+  // (current) mocked container UUID. Proves the rewrite actually resolves
+  // to the current container, not just that the code text exists.
+  function applicationSupportDirUri(documentUri) {
+    const trimmed = documentUri.replace(/\/+$/, '');
+    if (!trimmed.endsWith('/Documents')) return null;
+    return `${trimmed.slice(0, -'/Documents'.length)}/Library/Application%20Support`;
+  }
+  function rewriteSandboxUri(uri, documentUri) {
+    const path = uri.replace(/^file:\/\//, '');
+    const marker = path.includes('/Library/Application%20Support/')
+      ? '/Library/Application%20Support/'
+      : path.includes('/Library/Application Support/')
+        ? '/Library/Application Support/'
+        : null;
+    if (!marker) return null;
+    const after = path.slice(path.indexOf(marker) + marker.length);
+    const root = applicationSupportDirUri(documentUri);
+    if (!root) return null;
+    const normalizedRoot = root.startsWith('file://') ? root : `file://${root}`;
+    return `${normalizedRoot}/${after}`;
+  }
+
+  // The real, device-captured stale URI (container 459309EC — the one
+  // active when this lecture's audio was assembled) vs the CURRENT
+  // container (a different UUID after a subsequent reinstall).
+  const staleUri = 'file:///var/mobile/Containers/Data/Application/459309EC-B173-4E1A-91AE-B85251B4494E/Library/Application%20Support/YoumiLens/AudioAssembly/lecture_mtotna2taficn/final/lecture.m4a';
+  const currentDocumentUri = 'file:///var/mobile/Containers/Data/Application/FCA9B459-0707-4D74-B6F7-8B11A5B17F35/Documents';
+  const resolved = rewriteSandboxUri(staleUri, currentDocumentUri);
+  assert.equal(
+    resolved,
+    'file:///var/mobile/Containers/Data/Application/FCA9B459-0707-4D74-B6F7-8B11A5B17F35/Library/Application%20Support/YoumiLens/AudioAssembly/lecture_mtotna2taficn/final/lecture.m4a',
+    'rewrites the stale container UUID to the CURRENT one while preserving the exact relative path',
+  );
+  assert.doesNotMatch(resolved, /459309EC/, 'the stale UUID must not survive the rewrite');
+}
+
 const notes = read('lib/recordingNotes.tsx');
 assert.match(notes, /isLectureSessionActive/);
 

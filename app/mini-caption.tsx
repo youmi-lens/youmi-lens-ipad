@@ -120,6 +120,36 @@ export default function MiniCaptionScreen() {
   panelSizeRef.current = panelSize;
   const resizeStartSizeRef = useRef(panelSize);
   const isResizingRef = useRef(false);
+  // Live panel box size during an active resize drag. Driven directly by the
+  // resize gesture and applied to the panel's width/height via panelSizeAnim
+  // (below) WITHOUT going through React state — see panelSizeAnim's comment.
+  // Deliberately separate from panelSizeRef, which is re-synced to the
+  // (currently frozen, during a resize) `panelSize` state on every render and
+  // would otherwise clobber this mid-gesture.
+  const resizeLiveSizeRef = useRef(panelSize);
+  // Drives ONLY the lightweight resize-preview ghost box's width/height during
+  // an active drag — never the real panel. Physical-device testing proved
+  // that animating the real panel's width/height (even via a plain
+  // Animated.Value, with zero React re-renders) still doesn't track the
+  // finger smoothly: width/height are Yoga layout properties (RN's own
+  // NativeAnimatedAllowlist.js excludes them from native-driver support —
+  // "all non-layout properties" only), so every setValue() still forced a
+  // full native layout pass of the panel's subtree, including the
+  // unvirtualized caption ScrollView and NativeLookupText's many nested
+  // per-word Text fragments. The real panel's content now stays completely
+  // frozen at its committed `panelSize` for the whole gesture — see the
+  // ghost box below for what actually tracks the finger.
+  // Kept in sync with `panelSize` state whenever it changes from a
+  // non-gesture source (mount, orientation change).
+  const panelSizeAnim = useRef(new Animated.ValueXY({ x: panelSize.width, y: panelSize.height })).current;
+  useEffect(() => {
+    if (isResizingRef.current) return; // a live gesture owns the value; don't fight it
+    panelSizeAnim.setValue({ x: panelSize.width, y: panelSize.height });
+  }, [panelSize, panelSizeAnim]);
+  // Content-free resize preview, shown only while actively dragging the
+  // resize handle. A rare, low-frequency state change (once per gesture
+  // start/end) — not touched on every move frame, so it costs nothing extra.
+  const [isResizeGhostVisible, setIsResizeGhostVisible] = useState(false);
   const feedScrollRef = useRef<ScrollView | null>(null);
   const feedMetricsRef = useRef({ contentHeight: 0, layoutHeight: 0 });
   const feedUserScrollingRef = useRef(false);
@@ -260,19 +290,36 @@ export default function MiniCaptionScreen() {
       onPanResponderGrant: () => {
         isResizingRef.current = true;
         resizeStartSizeRef.current = panelSizeRef.current;
+        resizeLiveSizeRef.current = panelSizeRef.current;
+        panelSizeAnim.setValue({ x: resizeStartSizeRef.current.width, y: resizeStartSizeRef.current.height });
+        setIsResizeGhostVisible(true);
       },
+      // High-frequency path (fires on every touch-move sample). Deliberately
+      // does NOT call setPanelSize/setCaptionOverlayRect (React state), does
+      // NOT touch the real panel's width/height, and does NOT re-layout the
+      // caption feed at all — only panelSizeAnim, which drives the
+      // content-free ghost preview box below. The real panel (padding,
+      // border radius, font scale, the caption feed, NativeLookupText's
+      // per-word fragments) stays completely frozen at its pre-drag values
+      // for the whole gesture and gets exactly one real layout pass, on
+      // release, once the final size is known — the ghost box visibly and
+      // continuously tracks the finger in the meantime.
       onPanResponderMove: (_e, g) => {
         const next = {
           width: Math.min(Math.max(resizeStartSizeRef.current.width + g.dx, MIN_PANEL_WIDTH), maxWidth),
           height: Math.min(Math.max(resizeStartSizeRef.current.height + g.dy, MIN_PANEL_HEIGHT), maxHeight),
         };
-        setPanelSize(next);
-        updateCaptionOverlayRect(posRef.current, next);
+        resizeLiveSizeRef.current = next;
+        panelSizeAnim.setValue({ x: next.width, y: next.height });
       },
       onPanResponderRelease: () => {
         isResizingRef.current = false;
-        const maxX = Math.max(EDGE_MARGIN + insetLeft, width - panelSizeRef.current.width - EDGE_MARGIN - insetRight);
-        const maxY = Math.max(EDGE_MARGIN + insetTop, height - panelSizeRef.current.height - EDGE_MARGIN - insetBottom);
+        const finalSize = resizeLiveSizeRef.current;
+        setPanelSize(finalSize);
+        updateCaptionOverlayRect(posRef.current, finalSize);
+        setIsResizeGhostVisible(false);
+        const maxX = Math.max(EDGE_MARGIN + insetLeft, width - finalSize.width - EDGE_MARGIN - insetRight);
+        const maxY = Math.max(EDGE_MARGIN + insetTop, height - finalSize.height - EDGE_MARGIN - insetBottom);
         const nextPos = {
           x: Math.min(posRef.current.x, maxX),
           y: Math.min(posRef.current.y, maxY),
@@ -287,9 +334,13 @@ export default function MiniCaptionScreen() {
       },
       onPanResponderTerminate: () => {
         isResizingRef.current = false;
+        setIsResizeGhostVisible(false);
+        // A cancelled gesture must not leave the visual box out of sync with
+        // committed state — snap the preview back to the last committed size.
+        panelSizeAnim.setValue({ x: panelSizeRef.current.width, y: panelSizeRef.current.height });
       },
     });
-  }, [height, insetTop, insetBottom, insetLeft, insetRight, pan, updateCaptionOverlayRect, width]);
+  }, [height, insetTop, insetBottom, insetLeft, insetRight, pan, panelSizeAnim, updateCaptionOverlayRect, width]);
 
   useEffect(() => {
     const minX = EDGE_MARGIN + insetLeft;
@@ -473,6 +524,23 @@ export default function MiniCaptionScreen() {
     ...(activeFeedLine ? [activeFeedLine] : []),
   ];
   const hasAnyCaption = Boolean(visibleEnglishCaption || translationLine);
+
+  // The caption panel (including its ScrollView) is conditionally rendered —
+  // `setPanelVisible(false)` (minimize to the listening pill) fully unmounts
+  // it, and `setPanelVisible(true)` mounts a brand-new one. A fresh mount
+  // naturally starts scrolled to the top of history. `autoFollowFeed` is
+  // parent-level state that survives that unmount, so if the user had
+  // scrolled up to read history before minimizing, reopening kept
+  // autoFollowFeed=false and the new ScrollView was never told to catch up —
+  // it just sat at the top. Every reopen must reset to the live edge
+  // regardless of where the user was reading before closing.
+  const wasPanelVisibleRef = useRef(panelVisible);
+  useEffect(() => {
+    if (panelVisible && !wasPanelVisibleRef.current) {
+      setAutoFollowFeed(true);
+    }
+    wasPanelVisibleRef.current = panelVisible;
+  }, [panelVisible]);
 
   useEffect(() => {
     if (!showCaptionFeed) {
@@ -897,6 +965,42 @@ export default function MiniCaptionScreen() {
         </View>
       </Animated.View>
       ) : null}
+
+      {/* Resize preview — a content-free ghost outline shown only while
+          actively dragging the resize handle. Tracks the finger via
+          panelSizeAnim/pan; carries no caption text, no ScrollView, no
+          NativeLookupText, so it costs essentially nothing to lay out on
+          every gesture frame. The real panel above stays frozen at its
+          committed size the whole time; see resizeResponder's comments.
+          Split into two nested Animated.Views deliberately: `pan`'s
+          transform (native-driver-eligible, used with useNativeDriver:true
+          elsewhere for the drag/settle springs) must not share a style
+          array with panelSizeAnim's width/height (NOT native-driver-
+          eligible — RN's own Animated system throws "Style property
+          'width'/'height' is not supported by native animated module" if a
+          native-driven transform and a JS-driven width/height are mixed on
+          the same view). The outer view carries ONLY the transform; the
+          inner view carries ONLY the size. */}
+      {panelVisible && isResizeGhostVisible ? (
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            styles.resizeGhostPositioner,
+            { transform: pan.getTranslateTransform() },
+          ]}
+        >
+          <Animated.View
+            style={[
+              styles.resizeGhost,
+              {
+                width: panelSizeAnim.x,
+                height: panelSizeAnim.y,
+                borderRadius: scaled.panelRadius,
+              },
+            ]}
+          />
+        </Animated.View>
+      ) : null}
     </View>
   );
 }
@@ -981,6 +1085,22 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.14)',
     ...shadows.float,
+  },
+  /**
+   * Position-only wrapper for the resize ghost — carries `pan`'s
+   * native-driven transform and nothing else, so it never shares a style
+   * array with the ghost's (non-native-driver-eligible) width/height.
+   */
+  resizeGhostPositioner: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+  },
+  /** Content-free resize preview — see the render-time comment above. */
+  resizeGhost: {
+    backgroundColor: 'rgba(30, 41, 59, 0.35)',
+    borderWidth: 2,
+    borderColor: 'rgba(255, 255, 255, 0.55)',
   },
   grip: {
     width: 34,

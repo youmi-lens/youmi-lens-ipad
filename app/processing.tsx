@@ -1,5 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -12,6 +13,8 @@ import { colors, fontSize, radius, spacing } from '@/constants/theme';
 import { formatDateTime, formatDuration } from '@/lib/format';
 import { useI18n, localizeSystemDefaultTitle } from '@/lib/i18n';
 import { isLectureComplete } from '@/lib/processingResume.mjs';
+import { runMediaReconciliation } from '@/lib/recording/mediaReconciliation';
+import { useMediaReconciliation } from '@/lib/recording/useMediaReconciliation';
 import { useData } from '@/lib/store';
 
 type IndicatorState = 'done' | 'active' | 'pending' | 'failed';
@@ -54,11 +57,95 @@ export default function ProcessingScreen() {
   const lecture = getLecture(params.lectureId);
   const course = getCourse(lecture?.courseId);
 
+  // Reopening Processing (or landing here after an app relaunch mid-flow)
+  // is also a safe re-entry point for general media reconciliation — same
+  // shared hook as Lecture Detail, see lib/recording/useMediaReconciliation.ts.
+  useMediaReconciliation(lecture, updateLecture);
+
   const uploadStatus = lecture?.uploadStatus ?? 'not_uploaded';
+  const assemblyRequired = lecture?.audioAssemblyStatus === 'required';
   const processingStatus = lecture?.processingStatus ?? 'not_started';
   const processingDone = processingStatus === 'ready';
   const remoteStepState: IndicatorState =
     processingStatus === 'ready' ? 'done' : processingStatus === 'processing' ? 'active' : processingStatus === 'failed' ? 'failed' : 'pending';
+
+  // The safety guard (audioAssemblyStatus === 'required') was always
+  // correct — it never lost or overwrote a source. This is the missing
+  // recovery operation that satisfies it: whenever a lecture arrives here
+  // still needing assembly, automatically compose its preserved sources
+  // into one verified file (native AVFoundation composition, never a
+  // bypass) and only then let the normal upload/processing pipeline
+  // proceed. A genuine failure leaves the guard up and offers a manual
+  // retry — it never auto-loops.
+  const [assembling, setAssembling] = useState(false);
+  const [assemblyError, setAssemblyError] = useState<string | null>(null);
+  const assemblyAttemptedForRef = useRef<string | null>(null);
+
+  const runAssembly = useCallback(async () => {
+    if (!lecture) return;
+    if (__DEV__) console.info('[AudioAssembly] recovery-start', { lectureId: lecture.id, sourceCount: lecture.audioSegments?.length ?? 0 });
+    setAssembling(true);
+    setAssemblyError(null);
+
+    // Complete media discovery + composition, shared with the general
+    // media-reconciliation re-entry path (lib/recording/
+    // mediaReconciliation.ts) so this orchestration exists in exactly one
+    // place. recordingEngine/audioSegments alone is not a complete
+    // manifest — this also finds recoverable native-durable media the
+    // lecture may have accumulated before a later legacy resume, and
+    // proves a safe non-overlapping order before anything is composed.
+    const result = await runMediaReconciliation(lecture.id, lecture.audioSegments);
+    if (!result.ok) {
+      if (__DEV__) console.info('[AudioAssembly] discovery-failure', { lectureId: lecture.id, reason: result.reason, error: result.detail });
+      updateLecture(lecture.id, {
+        mediaIntegrityStatus: result.reason === 'composition_failed' ? undefined : result.reason,
+        mediaIntegrityDetail: result.detail,
+        mediaIntegrityCheckedAt: new Date().toISOString(),
+      });
+      setAssembling(false);
+      setAssemblyError(result.detail);
+      return;
+    }
+
+    if (__DEV__) console.info('[AudioAssembly] native-success', { lectureId: lecture.id, durationMillis: result.durationMillis, sourceCount: result.sourceIds.length });
+    updateLecture(lecture.id, {
+      // A Back-triggered assembly-required save leaves status
+      // 'in_progress' (handleBack intentionally preserves an in-progress
+      // lecture) — without correcting it here, a future re-open would
+      // route straight back to /recording's review mode instead of here
+      // or the lecture detail screen, even though assembly is now done.
+      status: 'local_recorded',
+      localAudioUri: result.localAudioUri,
+      durationMillis: result.durationMillis,
+      audioAssemblyStatus: undefined,
+      audioAssemblyCompletedAt: new Date().toISOString(),
+      mediaIntegrityStatus: undefined,
+      mediaIntegrityDetail: undefined,
+      mediaReconciliationStatus: 'complete',
+      mediaReconciliationSourceIds: result.sourceIds,
+      mediaReconciliationCompletedAt: new Date().toISOString(),
+      uploadStatus: 'not_uploaded',
+      uploadError: undefined,
+    });
+    if (__DEV__) console.info('[AudioAssembly] state-reconciled', { lectureId: lecture.id });
+    setAssembling(false);
+  }, [lecture, updateLecture]);
+
+  useEffect(() => {
+    if (!lecture || !assemblyRequired) return;
+    if (assemblyAttemptedForRef.current === lecture.id) return;
+    assemblyAttemptedForRef.current = lecture.id;
+    if (__DEV__) console.info('[AudioAssembly] detected-required', { lectureId: lecture.id });
+    void runAssembly();
+    // Only re-run automatically when a DIFFERENT lecture needs it — a
+    // failure on this one waits for the manual Retry button below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lecture?.id, assemblyRequired]);
+
+  const retryAssembly = () => {
+    assemblyAttemptedForRef.current = null;
+    void runAssembly();
+  };
 
   const backToLectures = () => router.replace('/');
   // This screen is the canonical gate for any incomplete lecture — View
@@ -106,11 +193,12 @@ export default function ProcessingScreen() {
             </View>
             <View style={styles.stepDivider} />
             <View style={styles.stepRow}>
-              <StepIndicator state={uploadStatus === 'uploaded' ? 'done' : uploadStatus === 'uploading' ? 'active' : uploadStatus === 'upload_failed' ? 'failed' : 'pending'} />
+              <StepIndicator state={assembling ? 'active' : assemblyRequired || uploadStatus === 'upload_failed' ? 'failed' : uploadStatus === 'uploaded' ? 'done' : uploadStatus === 'uploading' ? 'active' : 'pending'} />
               <View style={styles.stepText}>
-                <Text style={styles.stepTitle}>{uploadStatus === 'uploaded' ? t('processing.step.audioUploaded') : uploadStatus === 'uploading' ? t('processing.step.uploadingAudio') : uploadStatus === 'upload_failed' ? t('processing.step.uploadFailed') : t('processing.step.waitingUpload')}</Text>
-                <Text style={styles.stepSubtitle}>{uploadStatus === 'uploaded' ? t('processing.step.sentSecure') : uploadStatus === 'upload_failed' ? lecture?.uploadError ?? t('processing.step.tryAgain') : t('processing.step.sendingSecure')}</Text>
-                {uploadStatus === 'upload_failed' ? <SecondaryButton label={t('processing.step.retryUpload')} icon="refresh-outline" onPress={() => { if (lecture) updateLecture(lecture.id, { uploadStatus: 'not_uploaded', uploadError: undefined }); }} style={styles.retryButton} /> : null}
+                <Text style={styles.stepTitle}>{assembling ? t('recording.assemblingAudio') : assemblyRequired ? 'Audio assembly required' : uploadStatus === 'uploaded' ? t('processing.step.audioUploaded') : uploadStatus === 'uploading' ? t('processing.step.uploadingAudio') : uploadStatus === 'upload_failed' ? t('processing.step.uploadFailed') : t('processing.step.waitingUpload')}</Text>
+                <Text style={styles.stepSubtitle}>{assembling ? 'Your original audio and resumed segment are preserved. Composing them into one verified file…' : assemblyRequired ? (assemblyError ? t('processing.step.assemblyFailed') : 'Your original audio and resumed segment are preserved. Upload is blocked until a complete audio file is verified.') : uploadStatus === 'uploaded' ? t('processing.step.sentSecure') : uploadStatus === 'upload_failed' ? lecture?.uploadError ?? t('processing.step.tryAgain') : t('processing.step.sendingSecure')}</Text>
+                {assemblyRequired && !assembling ? <SecondaryButton label={t('processing.step.retryRecovery')} icon="refresh-outline" onPress={retryAssembly} style={styles.retryButton} /> : null}
+                {uploadStatus === 'upload_failed' && !assemblyRequired ? <SecondaryButton label={t('processing.step.retryUpload')} icon="refresh-outline" onPress={() => { if (lecture) updateLecture(lecture.id, { uploadStatus: 'not_uploaded', uploadError: undefined }); }} style={styles.retryButton} /> : null}
               </View>
             </View>
             <View style={styles.stepDivider} />

@@ -81,6 +81,28 @@ function cacheExpoAudioDirUri(): string | null {
   return `${String(cache.uri).replace(/\/+$/, '')}/ExpoAudio`;
 }
 
+/**
+ * expo-file-system's Paths API exposes `document`/`cache` but no
+ * Application Support constant. Legacy audio assembly and durable-recovery
+ * exports both live under Application Support (see
+ * modules/expo-durable-recorder), so a persisted `localAudioUri` pointing
+ * there needs a way back to the CURRENT container too. Documents and
+ * Application Support are always siblings under the same container root,
+ * so this derives it from the (Expo-provided) document root rather than
+ * hardcoding a container path.
+ */
+function applicationSupportDirUri(): string | null {
+  const FileSystemNS = loadFileSystem();
+  const docs = FileSystemNS?.Paths?.document?.uri;
+  if (!docs) return null;
+  const trimmed = String(docs).replace(/\/+$/, '');
+  if (!trimmed.endsWith('/Documents')) return null;
+  // Percent-encoded to match how native Swift persists this path
+  // (URL.absoluteString always encodes the space) and to stay a
+  // well-formed file:// URI for the native file APIs on the JS side.
+  return `${trimmed.slice(0, -'/Documents'.length)}/Library/Application%20Support`;
+}
+
 function isAlreadyDurableUri(uri: string): boolean {
   return uri.includes(`/${LECTURE_RECORDINGS_SUBDIR}/`);
 }
@@ -154,6 +176,43 @@ export async function persistLectureLocalAudio(
 }
 
 /**
+ * Preserve a legacy recovered segment under a unique path. Unlike the
+ * canonical-file helper above, this function never deletes or replaces an
+ * existing file. It is used only when assembly is still required.
+ */
+export async function persistLectureResumeSegment(
+  sourceUri: string | null | undefined,
+  lectureId: string,
+): Promise<string | null> {
+  const src = typeof sourceUri === 'string' ? sourceUri.trim() : '';
+  if (!src || !localAudioFileExists(src)) return null;
+  const FileSystemNS = loadFileSystem();
+  // The recorder's source URI is still unique and readable. Preserve its
+  // reference rather than dropping it if the durable-copy API is unavailable;
+  // Finish remains blocked either way, so this cannot become a partial upload.
+  if (!FileSystemNS?.File || !FileSystemNS?.Directory || !FileSystemNS?.Paths?.document) return src;
+  try {
+    const segmentsDir = new FileSystemNS.Directory(
+      FileSystemNS.Paths.document,
+      'YoumiLens',
+      'Recordings',
+      lectureId,
+      'segments',
+    );
+    if (!segmentsDir.exists) segmentsDir.create({ intermediates: true, idempotent: true });
+    const extension = extensionForUri(src);
+    const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const target = new FileSystemNS.File(segmentsDir, `resume-${nonce}${extension.startsWith('.') ? extension : `.${extension}`}`);
+    if (target.exists) return null;
+    new FileSystemNS.File(src).copy(target);
+    return target.exists && typeof target.size === 'number' && target.size > 0 ? target.uri : null;
+  } catch (err) {
+    if (__DEV__) console.warn('[lectureLocalAudio] resume segment preservation failed', err);
+    return localAudioFileExists(src) ? src : null;
+  }
+}
+
+/**
  * Resolve a stored localAudioUri to a currently readable file URI.
  * Rewrites stale sandbox container UUIDs and looks under durable + ExpoAudio dirs.
  */
@@ -205,6 +264,28 @@ function rewriteSandboxUri(uri: string): string | null {
     const after = path.slice(cachesIdx + '/Library/Caches/'.length);
     const root = String(FileSystemNS.Paths.cache.uri).replace(/\/+$/, '');
     return `${root.startsWith('file://') ? root : `file://${root}`}/${after}`;
+  }
+
+  // Application Support is where durably-composed assets live (legacy
+  // audio assembly, durable-recovery exports — see
+  // modules/expo-durable-recorder). Native Swift persists this as an
+  // absolute URL.absoluteString, which percent-encodes the space in
+  // "Application Support" as %20 — check both forms rather than assuming
+  // one encoding. Checked before the generic /Documents/ case below since
+  // it is the more specific prefix.
+  const appSupportMarker = path.includes('/Library/Application%20Support/')
+    ? '/Library/Application%20Support/'
+    : path.includes('/Library/Application Support/')
+      ? '/Library/Application Support/'
+      : null;
+  if (appSupportMarker) {
+    const appSupportIdx = path.indexOf(appSupportMarker);
+    const after = path.slice(appSupportIdx + appSupportMarker.length);
+    const root = applicationSupportDirUri();
+    if (root) {
+      const normalizedRoot = root.startsWith('file://') ? root : `file://${root}`;
+      return `${normalizedRoot}/${after}`;
+    }
   }
 
   const docsIdx = path.indexOf('/Documents/');

@@ -172,6 +172,71 @@ export class DurableRecorderError extends Error {
   }
 }
 
+/**
+ * Legacy-resume audio recovery — a separate error domain from
+ * DurableRecorderError because it is not part of the durable recorder's own
+ * session state machine (see native LegacyAudioAssembly.swift's doc
+ * comment); it just reuses this module's already-registered native bridge.
+ */
+export type LegacyAudioAssemblyErrorCode =
+  | 'ERR_LEGACY_AUDIO_ASSEMBLY_UNAVAILABLE'
+  | 'ERR_LEGACY_AUDIO_ASSEMBLY_INVALID_NATIVE_RESULT'
+  | 'ERR_LEGACY_AUDIO_ASSEMBLY_INVALID_LECTURE_ID'
+  | 'ERR_LEGACY_AUDIO_ASSEMBLY_INVALID_SOURCE_LIST'
+  | 'ERR_LEGACY_AUDIO_ASSEMBLY_NO_SOURCES'
+  | 'ERR_LEGACY_AUDIO_ASSEMBLY_SOURCE_MISSING'
+  | 'ERR_LEGACY_AUDIO_ASSEMBLY_SOURCE_COPY_FAILED'
+  | 'ERR_LEGACY_AUDIO_ASSEMBLY_SOURCE_VALIDATION_FAILED'
+  | 'ERR_LEGACY_AUDIO_ASSEMBLY_COMPOSITION_FAILED'
+  | 'ERR_LEGACY_AUDIO_ASSEMBLY_VERIFICATION_FAILED'
+  | 'ERR_LEGACY_AUDIO_ASSEMBLY_STORAGE';
+
+export class LegacyAudioAssemblyError extends Error {
+  readonly code: LegacyAudioAssemblyErrorCode;
+
+  constructor(code: LegacyAudioAssemblyErrorCode, message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'LegacyAudioAssemblyError';
+    this.code = code;
+  }
+}
+
+export type LegacyAudioAssemblySourceInput = {
+  /** Semantic role, e.g. 'prior_canonical' | 'resumed_segment'. Determines
+   *  assembly order — callers must pass sources already in the intended
+   *  final order; this module never reorders by timestamp or file layout. */
+  role: string;
+  uri: string;
+};
+
+export type LegacyAudioAssemblyResult = {
+  fileUri: string;
+  durationMs: number;
+  byteLength: number;
+  sourceCount: number;
+  /** The fingerprint of the ordered (role, uri) source list this result was
+   *  actually built from — always equal to the caller's own requested
+   *  fingerprint on the current native implementation (every native return
+   *  site only returns after proving a match), included so a caller can
+   *  independently verify it received an answer to the request it actually
+   *  made rather than trusting a bare success. */
+  sourceFingerprint: string;
+};
+
+export type LegacyAudioAssemblyPersistedSource = {
+  role: string;
+  durableRelativePath: string;
+  byteLength: number;
+  durationMs: number;
+  /** Epoch ms; 0 means unreadable/unknown — never treat 0 as a real time. */
+  sourceModifiedAtMs: number;
+};
+
+export type LegacyAudioAssemblyPersistResult = {
+  sourceCount: number;
+  sources: LegacyAudioAssemblyPersistedSource[];
+};
+
 type EventSubscription = { remove: () => void };
 
 type NativeDurableRecorderModule = {
@@ -193,6 +258,14 @@ type NativeDurableRecorderModule = {
   recoverRecordingSession: (input: DurableSessionIdentifierInput) => Promise<unknown>;
   exportFinalizedAsset: (input: DurableSessionIdentifierInput) => Promise<unknown>;
   acknowledgeFinalAssetHandoff: (input: DurableSessionIdentifierInput) => Promise<unknown>;
+  persistLegacyAudioSources: (input: {
+    lectureId: string;
+    sources: { role: string; uri: string }[];
+  }) => Promise<unknown>;
+  assembleLegacyAudio: (input: {
+    lectureId: string;
+    sources: { role: string; uri: string }[];
+  }) => Promise<unknown>;
   /** DEBUG builds only. */
   performCheckpointForTesting?: (input: DurableSessionIdentifierInput) => Promise<unknown>;
   simulateInterruptionBeganForTesting?: () => Promise<unknown>;
@@ -829,4 +902,147 @@ export async function simulateRouteLossForTesting(): Promise<DurableRecordingSta
     }
     return mod.simulateRouteLossForTesting();
   });
+}
+
+function validateLegacyAudioInput(lectureId: string, sources: LegacyAudioAssemblySourceInput[]): void {
+  if (!nativeModule) {
+    throw new LegacyAudioAssemblyError(
+      'ERR_LEGACY_AUDIO_ASSEMBLY_UNAVAILABLE',
+      'The native durable recorder module is unavailable on this platform.',
+    );
+  }
+  if (typeof lectureId !== 'string' || !lectureId.trim()) {
+    throw new LegacyAudioAssemblyError(
+      'ERR_LEGACY_AUDIO_ASSEMBLY_INVALID_LECTURE_ID',
+      'The lecture identifier is invalid.',
+    );
+  }
+  if (!Array.isArray(sources) || sources.length === 0) {
+    throw new LegacyAudioAssemblyError(
+      'ERR_LEGACY_AUDIO_ASSEMBLY_NO_SOURCES',
+      'No audio sources were provided to assemble.',
+    );
+  }
+  for (const source of sources) {
+    if (!isRecord(source) || typeof source.role !== 'string' || !source.role ||
+        typeof source.uri !== 'string' || !source.uri) {
+      throw new LegacyAudioAssemblyError(
+        'ERR_LEGACY_AUDIO_ASSEMBLY_INVALID_SOURCE_LIST',
+        'Each audio source must have a non-empty role and uri.',
+      );
+    }
+  }
+}
+
+function normalizeLegacyAudioError(error: unknown): LegacyAudioAssemblyError {
+  if (error instanceof LegacyAudioAssemblyError) return error;
+  if (isRecord(error) && typeof error.code === 'string' && typeof error.message === 'string') {
+    return new LegacyAudioAssemblyError(error.code as LegacyAudioAssemblyErrorCode, error.message, { cause: error });
+  }
+  return new LegacyAudioAssemblyError(
+    'ERR_LEGACY_AUDIO_ASSEMBLY_STORAGE',
+    'The native legacy audio assembly operation failed.',
+    { cause: error },
+  );
+}
+
+/**
+ * Copies the given ordered sources into durable app storage (native
+ * AVFoundation-adjacent file copy, never a move) and records them, without
+ * composing anything yet. Meant to be called as early as the moment the app
+ * first detects a legacy resume requiring assembly — before the user can
+ * leave the recording flow — so the durable copies exist independently of
+ * whatever later happens to the original Cache/Documents files (eviction,
+ * or a reinstall that rotates the app's container UUID and invalidates
+ * every absolute URI persisted before it). Idempotent — safe to call again
+ * later (composeAndVerify's own eventual full run reuses whatever this
+ * already copied).
+ */
+export async function persistLegacyAudioSources(
+  lectureId: string,
+  sources: LegacyAudioAssemblySourceInput[],
+): Promise<LegacyAudioAssemblyPersistResult> {
+  validateLegacyAudioInput(lectureId, sources);
+  try {
+    const result = await nativeModule!.persistLegacyAudioSources({
+      lectureId,
+      sources: sources.map((source) => ({ role: source.role, uri: source.uri })),
+    });
+    if (
+      !isRecord(result) ||
+      !Number.isFinite(result.sourceCount) || (result.sourceCount as number) <= 0 ||
+      !Array.isArray(result.sources)
+    ) {
+      throw new LegacyAudioAssemblyError(
+        'ERR_LEGACY_AUDIO_ASSEMBLY_INVALID_NATIVE_RESULT',
+        'The native legacy audio source preservation returned an invalid result.',
+      );
+    }
+    return {
+      sourceCount: result.sourceCount as number,
+      sources: (result.sources as unknown[]).map((entry) => {
+        if (!isRecord(entry) || typeof entry.role !== 'string' || typeof entry.durableRelativePath !== 'string' ||
+            !Number.isFinite(entry.byteLength) || !Number.isFinite(entry.durationMs) ||
+            !Number.isFinite(entry.sourceModifiedAtMs)) {
+          throw new LegacyAudioAssemblyError(
+            'ERR_LEGACY_AUDIO_ASSEMBLY_INVALID_NATIVE_RESULT',
+            'The native legacy audio source preservation returned an invalid source entry.',
+          );
+        }
+        return {
+          role: entry.role,
+          durableRelativePath: entry.durableRelativePath,
+          byteLength: entry.byteLength as number,
+          durationMs: entry.durationMs as number,
+          sourceModifiedAtMs: entry.sourceModifiedAtMs as number,
+        };
+      }),
+    };
+  } catch (error) {
+    throw normalizeLegacyAudioError(error);
+  }
+}
+
+/**
+ * Recovers a legacy-resume lecture blocked behind `audioAssemblyStatus ===
+ * 'required'`: composes the given ordered audio sources (native
+ * AVFoundation composition, not byte concatenation) into one verified M4A
+ * asset. Never touches the original source files. Idempotent and
+ * restart-safe — safe to call again after any interruption, including one
+ * that happened after a previous call's native work fully succeeded (it
+ * returns the same already-assembled asset again, cheaply).
+ */
+export async function assembleLegacyAudio(
+  lectureId: string,
+  sources: LegacyAudioAssemblySourceInput[],
+): Promise<LegacyAudioAssemblyResult> {
+  validateLegacyAudioInput(lectureId, sources);
+  try {
+    const result = await nativeModule!.assembleLegacyAudio({
+      lectureId,
+      sources: sources.map((source) => ({ role: source.role, uri: source.uri })),
+    });
+    if (
+      !isRecord(result) ||
+      typeof result.fileUri !== 'string' || !result.fileUri.startsWith('file://') ||
+      !Number.isFinite(result.durationMs) || (result.durationMs as number) <= 0 ||
+      !Number.isFinite(result.byteLength) || (result.byteLength as number) <= 0 ||
+      !Number.isFinite(result.sourceCount) || (result.sourceCount as number) <= 0 ||
+      typeof result.sourceFingerprint !== 'string' || result.sourceFingerprint.length === 0
+    ) {
+      throw new LegacyAudioAssemblyError(
+        'ERR_LEGACY_AUDIO_ASSEMBLY_INVALID_NATIVE_RESULT',
+        'The native legacy audio assembly returned an invalid result.',
+      );
+    }
+    return {
+      fileUri: result.fileUri,
+      durationMs: result.durationMs as number,
+      byteLength: result.byteLength as number,
+      sourceCount: result.sourceCount as number,
+      sourceFingerprint: result.sourceFingerprint,
+    };
+  } catch (error) {
+    throw normalizeLegacyAudioError(error);
+  }
 }
