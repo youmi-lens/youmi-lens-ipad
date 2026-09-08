@@ -75,6 +75,7 @@ import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
 import type { NoteImage, NotePoint, NoteStroke } from '@/lib/models';
 import { useT } from '@/lib/i18n';
 import { PressableScale } from '@/components/PressableScale';
+import { persistNotebookImage } from '@/lib/notebookImageStorage';
 import { shouldStartToolbarTransition } from '@/lib/notebookToolbarTransition.mjs';
 import {
   appendStrokePoint,
@@ -1002,6 +1003,7 @@ function NotebookImageObjectBase({
   const pinchScaleRef = useRef(1);
   const panStartedRef = useRef(false);
   const pinchStartedRef = useRef(false);
+  const startedCornersRef = useRef(new Set<ImageCorner>());
   // Live values read by the gestures. The gesture objects are built ONCE (empty deps)
   // and read everything through refs, so a re-render mid-drag (the image geometry or
   // scroll-lock state changing) never rebuilds them.
@@ -1010,71 +1012,155 @@ function NotebookImageObjectBase({
   const handlersRef = useRef({ onSelect, onTransform, onCornerResize, onGestureStart, onGestureEnd });
   handlersRef.current = { onSelect, onTransform, onCornerResize, onGestureStart, onGestureEnd };
 
+  // Image gestures must decide stylus eligibility on RNGH's UI thread, because
+  // GestureStateManager.fail() is synchronous-only. The image edit callbacks
+  // deliberately remain on JS (they update React state), reached explicitly
+  // through runOnJS after that early decision.
+  const resetImageGesture = useCallback(() => {
+    panTranslationRef.current = { x: 0, y: 0 };
+    pinchScaleRef.current = 1;
+  }, []);
+  const beginImageGesture = useCallback(() => {
+    if (activeRef.current === 0) {
+      resetImageGesture();
+      handlersRef.current.onGestureStart(imageIdRef.current);
+    }
+    activeRef.current += 1;
+  }, [resetImageGesture]);
+  const settleImageGesture = useCallback(() => {
+    activeRef.current = Math.max(0, activeRef.current - 1);
+    if (activeRef.current === 0) {
+      handlersRef.current.onGestureEnd();
+      resetImageGesture();
+    }
+  }, [resetImageGesture]);
+  const pushImageTransform = useCallback(() => {
+    handlersRef.current.onTransform(
+      imageIdRef.current,
+      panTranslationRef.current.x,
+      panTranslationRef.current.y,
+      pinchScaleRef.current,
+    );
+  }, []);
+  const selectImageFromGesture = useCallback(() => {
+    handlersRef.current.onSelect(imageIdRef.current);
+  }, []);
+  const beginPanFromGesture = useCallback(() => {
+    panStartedRef.current = true;
+    if (__DEV__) console.info('[NotebookImageAction] image-pan-activated', { imageId: imageIdRef.current });
+    beginImageGesture();
+  }, [beginImageGesture]);
+  const updatePanFromGesture = useCallback((translationX: number, translationY: number, numberOfPointers: number) => {
+    if (numberOfPointers > 1) return;
+    panTranslationRef.current = { x: translationX, y: translationY };
+    pushImageTransform();
+  }, [pushImageTransform]);
+  const finishPanFromGesture = useCallback(() => {
+    if (!panStartedRef.current) return;
+    panStartedRef.current = false;
+    settleImageGesture();
+  }, [settleImageGesture]);
+  const beginPinchFromGesture = useCallback(() => {
+    pinchStartedRef.current = true;
+    beginImageGesture();
+  }, [beginImageGesture]);
+  const updatePinchFromGesture = useCallback((scale: number) => {
+    pinchScaleRef.current = scale;
+    pushImageTransform();
+  }, [pushImageTransform]);
+  const finishPinchFromGesture = useCallback(() => {
+    if (!pinchStartedRef.current) return;
+    pinchStartedRef.current = false;
+    settleImageGesture();
+  }, [settleImageGesture]);
+  const beginCornerFromGesture = useCallback((corner: ImageCorner) => {
+    startedCornersRef.current.add(corner);
+    if (__DEV__) console.info('[NotebookImageAction] image-corner-activated', { corner, imageId: imageIdRef.current });
+    handlersRef.current.onGestureStart(imageIdRef.current);
+  }, []);
+  const updateCornerFromGesture = useCallback((corner: ImageCorner, translationX: number, translationY: number) => {
+    handlersRef.current.onCornerResize(imageIdRef.current, corner, translationX, translationY);
+  }, []);
+  const finishCornerFromGesture = useCallback((corner: ImageCorner) => {
+    if (!startedCornersRef.current.delete(corner)) return;
+    handlersRef.current.onGestureEnd();
+  }, []);
+  const traceImageGestureTouch = useCallback((source: string, pointerType: PointerType, rejected: boolean) => {
+    if (__DEV__) {
+      console.info('[NotebookImageAction] image-gesture-touches-down', {
+        source,
+        imageId: imageIdRef.current,
+        pointerType,
+        rejected,
+      });
+    }
+  }, []);
+
   // body gesture (tap = select, pan = move, pinch = resize) + one Pan per corner handle.
   // The corner handles are separate fixed-size views (below), so resizing the image never
   // changes the view a corner gesture is attached to — the drag is never cancelled and so
   // never restarts as a stray move. Each corner is hardcoded, so there is no misclassification.
   const { bodyGesture, cornerGestures } = useMemo(() => {
-    const reset = () => {
-      panTranslationRef.current = { x: 0, y: 0 };
-      pinchScaleRef.current = 1;
+    // Apple Pencil must draw ink through an image, never select/move/resize
+    // it — the paper model is image-below, ink-above, but finger owns image
+    // manipulation and Pencil owns the ink canvas regardless of z-order.
+    // onTouchesDown fires (and can fail the gesture) for ANY gesture type,
+    // not only manual-activation ones, so this works on tap/pan the same as
+    // drawGesture's own manual check below.
+    //
+    // Pencil-starts-inside-image investigation: this is now the single
+    // source of truth for "did this image's own gesture even SEE the
+    // touch-down, and what did it decide" — logged for every touch-down
+    // (not just stylus rejections), tagged by which of tap/pan/corner
+    // observed it, so a physical capture can directly answer whether the
+    // image-side gestures are correctly rejecting the stylus (in which case
+    // the missing continuous ink must be a drawGesture-side/native
+    // touch-ownership issue) or not rejecting it at all.
+    const makeFailIfStylus = (source: string) => (event: { pointerType: PointerType }, manager: { fail: () => void }) => {
+      'worklet';
+      const isStylus = event.pointerType === PointerType.STYLUS;
+      runOnJS(traceImageGestureTouch)(source, event.pointerType, isStylus);
+      if (isStylus) manager.fail();
     };
-    // First sub-gesture to activate opens the interaction (one baseline / undo);
-    // the last to finalize closes it.
-    const begin = () => {
-      if (activeRef.current === 0) {
-        reset();
-        handlersRef.current.onGestureStart(imageIdRef.current);
-      }
-      activeRef.current += 1;
-    };
-    const settle = () => {
-      activeRef.current = Math.max(0, activeRef.current - 1);
-      if (activeRef.current === 0) {
-        handlersRef.current.onGestureEnd();
-        reset();
-      }
-    };
-    const pushTransform = () =>
-      handlersRef.current.onTransform(
-        imageIdRef.current,
-        panTranslationRef.current.x,
-        panTranslationRef.current.y,
-        pinchScaleRef.current,
-      );
 
     const tap = Gesture.Tap()
-      .runOnJS(true)
       .maxDuration(260)
       .maxDistance(IMAGE_TAP_MAX_DISTANCE)
       .hitSlop(IMAGE_HIT_SLOP)
-      .onEnd(() => handlersRef.current.onSelect(imageIdRef.current));
+      .onTouchesDown(makeFailIfStylus('tap'))
+      .onEnd(() => {
+        'worklet';
+        runOnJS(selectImageFromGesture)();
+      });
 
     // A corner drag is a single, self-contained gesture (one finger, one handle),
     // so it opens/commits the interaction DIRECTLY rather than through the shared
     // active-count used by the simultaneous body-pan + pinch. This guarantees one
     // onGestureStart and one onGestureEnd — i.e. exactly one undo entry per drag.
+    //
+    // A manualActivation attempt (explicit distance-based manager.activate()
+    // instead of the built-in .minDistance() auto-activation) was tried here
+    // to close a suspected native-thread activation race, and reverted: it
+    // physically broke normal finger dragging without fixing the Pencil-
+    // starts-inside-image case it targeted — proof the real mechanism is
+    // something else (under investigation; see drawGesture's touch-on-image
+    // trace). Back to plain auto-activation, exactly as it worked before
+    // that attempt, plus the onTouchesDown-based stylus rejection.
     const makeCornerGesture = (corner: ImageCorner) => {
-      let started = false;
       return Gesture.Pan()
-        .runOnJS(true)
         .minDistance(IMAGE_DRAG_MIN_DISTANCE)
+        .onTouchesDown(makeFailIfStylus(`corner-${corner}`))
         .onStart(() => {
-          started = true;
-          handlersRef.current.onGestureStart(imageIdRef.current);
+          'worklet';
+          runOnJS(beginCornerFromGesture)(corner);
         })
         .onUpdate((event) => {
-          handlersRef.current.onCornerResize(
-            imageIdRef.current,
-            corner,
-            event.translationX,
-            event.translationY,
-          );
+          'worklet';
+          runOnJS(updateCornerFromGesture)(corner, event.translationX, event.translationY);
         })
         .onFinalize(() => {
-          if (!started) return;
-          started = false;
-          handlersRef.current.onGestureEnd();
+          'worklet';
+          runOnJS(finishCornerFromGesture)(corner);
         });
     };
     const corners: Record<ImageCorner, ReturnType<typeof makeCornerGesture>> = {
@@ -1084,11 +1170,14 @@ function NotebookImageObjectBase({
       bottomRight: makeCornerGesture('bottomRight'),
     };
 
+    // Reverted to plain auto-activation — see makeCornerGesture's comment
+    // above for why (the manualActivation attempt broke finger dragging
+    // without fixing the case it targeted).
     const pan = Gesture.Pan()
-      .runOnJS(true)
       .minDistance(IMAGE_DRAG_MIN_DISTANCE)
       .averageTouches(true)
       .hitSlop(IMAGE_HIT_SLOP)
+      .onTouchesDown(makeFailIfStylus('pan'))
       // A touch that belongs to a corner handle must not also move the body.
       .requireExternalGestureToFail(
         corners.topLeft,
@@ -1097,43 +1186,37 @@ function NotebookImageObjectBase({
         corners.bottomRight,
       )
       .onStart(() => {
-        panStartedRef.current = true;
-        begin();
+        'worklet';
+        runOnJS(beginPanFromGesture)();
       })
       .onUpdate((event) => {
-        // Only the one-finger translation drives movement; while a two-finger pinch is
-        // active the centroid pan is ignored.
-        if (event.numberOfPointers > 1) return;
-        panTranslationRef.current = { x: event.translationX, y: event.translationY };
-        pushTransform();
+        'worklet';
+        runOnJS(updatePanFromGesture)(event.translationX, event.translationY, event.numberOfPointers);
       })
       .onFinalize(() => {
-        if (!panStartedRef.current) return;
-        panStartedRef.current = false;
-        settle();
+        'worklet';
+        runOnJS(finishPanFromGesture)();
       });
 
     const pinch = Gesture.Pinch()
-      .runOnJS(true)
       .onStart(() => {
-        pinchStartedRef.current = true;
-        begin();
+        'worklet';
+        runOnJS(beginPinchFromGesture)();
       })
       .onUpdate((event) => {
-        pinchScaleRef.current = event.scale;
-        pushTransform();
+        'worklet';
+        runOnJS(updatePinchFromGesture)(event.scale);
       })
       .onFinalize(() => {
-        if (!pinchStartedRef.current) return;
-        pinchStartedRef.current = false;
-        settle();
+        'worklet';
+        runOnJS(finishPinchFromGesture)();
       });
 
     return {
       bodyGesture: Gesture.Race(tap, Gesture.Simultaneous(pan, pinch)),
       cornerGestures: corners,
     };
-  }, []);
+  }, [beginCornerFromGesture, beginPanFromGesture, beginPinchFromGesture, finishCornerFromGesture, finishPanFromGesture, finishPinchFromGesture, selectImageFromGesture, traceImageGestureTouch, updateCornerFromGesture, updatePanFromGesture, updatePinchFromGesture]);
 
   const offsetX = selected ? moveOffset.x : 0;
   const offsetY = selected ? moveOffset.y : 0;
@@ -1369,6 +1452,11 @@ export const NotebookCanvas = memo(function NotebookCanvas({
    * the stroke — a resting palm or any other touch is ignored.
    */
   const activeTouchIdRef = useRef<number | null>(null);
+  /** Pencil-over-image investigation: one-shot-per-stroke counters, logged
+   * once at stroke end — never per-sample, so this stays cheap even for a
+   * fast, long stroke. */
+  const strokeMoveSampleCountRef = useRef(0);
+  const strokeStartedOverImageRef = useRef<string | null>(null);
   /** Current page offset so viewport-local Pencil coordinates map onto the long paper. */
   const scrollOffsetYRef = useRef(0);
   const scrollViewRef = useRef<ComponentRef<typeof GestureScrollView>>(null);
@@ -1403,16 +1491,56 @@ export const NotebookCanvas = memo(function NotebookCanvas({
     }
   }, []);
 
+  // One-shot diagnostics for the palm/double-tap viewport-jump investigation.
+  // No polling: these only fire on genuine state transitions (lock begin/end,
+  // double-tap) or when a scroll is observed WHILE the lock should be
+  // preventing one — that last case is the actual smoking gun to look for.
+  const lastLockedScrollYRef = useRef<number | null>(null);
   const beginStylusScrollLock = useCallback(() => {
+    if (__DEV__) {
+      console.info('[NotebookViewport] stylus-lock-begin', {
+        scrollYBefore: scrollOffsetYRef.current,
+        wasPalmGrace: palmGraceActiveRef.current,
+      });
+    }
     clearPalmGraceTimer();
     palmGraceActiveRef.current = false;
     stylusStrokeLockRef.current = true;
     setStylusStrokeActive(true);
+    lastLockedScrollYRef.current = scrollOffsetYRef.current;
     applyNotebookScrollEnabled();
   }, [applyNotebookScrollEnabled, clearPalmGraceTimer]);
 
+  // Second-round diagnostic: the first round proved every captured
+  // pencil-double-tap fired with strokeActive/palmGrace both already false —
+  // i.e. the app's own scroll lock had fully released BEFORE the double-tap,
+  // so a scroll happening mid-lock was never going to be the finding. This
+  // arms a short, bounded, one-shot watch (not polling) at the two moments
+  // protection actually lapses — grace-timer expiry and double-tap itself —
+  // and reportNotebookScroll below checks it, so a jump landing in that
+  // unprotected gap (palm still resting, nothing blocking it) gets caught
+  // with its exact delta instead of only "no lock was on."
+  const POST_UNLOCK_WATCH_MS = 1200;
+  const postUnlockWatchRef = useRef<{ until: number; baselineY: number; reason: string } | null>(null);
+  const armPostUnlockWatch = useCallback((reason: string) => {
+    if (!__DEV__) return;
+    postUnlockWatchRef.current = {
+      until: Date.now() + POST_UNLOCK_WATCH_MS,
+      baselineY: scrollOffsetYRef.current,
+      reason,
+    };
+  }, []);
+
   const endStylusScrollLock = useCallback(
     (opts?: { grace?: boolean }) => {
+      if (__DEV__) {
+        console.info('[NotebookViewport] stylus-lock-end', {
+          scrollYAtEnd: scrollOffsetYRef.current,
+          scrollYAtLockBegin: lastLockedScrollYRef.current,
+          grace: Boolean(opts?.grace),
+        });
+      }
+      lastLockedScrollYRef.current = null;
       stylusStrokeLockRef.current = false;
       setStylusStrokeActive(false);
       clearPalmGraceTimer();
@@ -1423,13 +1551,14 @@ export const NotebookCanvas = memo(function NotebookCanvas({
           palmGraceTimerRef.current = null;
           palmGraceActiveRef.current = false;
           applyNotebookScrollEnabled();
+          armPostUnlockWatch('grace-expired');
         }, NOTEBOOK_PALM_GRACE_MS);
         return;
       }
       palmGraceActiveRef.current = false;
       applyNotebookScrollEnabled();
     },
-    [applyNotebookScrollEnabled, clearPalmGraceTimer],
+    [applyNotebookScrollEnabled, armPostUnlockWatch, clearPalmGraceTimer],
   );
 
   useEffect(
@@ -1466,6 +1595,8 @@ export const NotebookCanvas = memo(function NotebookCanvas({
   avoidRectsRef.current = avoidRects;
   const imagesRef = useRef(images);
   imagesRef.current = images;
+  const editableRef = useRef(editable);
+  editableRef.current = editable;
   const onImagesChangeRef = useRef(onImagesChange);
   onImagesChangeRef.current = onImagesChange;
   const containerSizeRef = useRef(containerSize);
@@ -2230,6 +2361,9 @@ export const NotebookCanvas = memo(function NotebookCanvas({
   const selectImage = useCallback((id: string) => {
     const image = imagesRef.current.find((img) => img.id === id);
     if (!image) return;
+    if (__DEV__) {
+      console.info('[NotebookSelection] image-tap-select', { id, mode: modeRef.current, viaHandler: 'NotebookImageObject Tap gesture -> onSelect' });
+    }
     selectedIdsRef.current = new Set([id]);
     setSelectedIds(new Set([id]));
   }, []);
@@ -2486,6 +2620,12 @@ export const NotebookCanvas = memo(function NotebookCanvas({
    */
   const endStroke = useCallback(() => {
     if (!drawingRef.current) return;
+    if (__DEV__ && (modeRef.current === 'write' || modeRef.current === 'highlight')) {
+      console.info('[NotebookImageAction] ink-stroke-end', {
+        startedOverImageId: strokeStartedOverImageRef.current,
+        moveSampleCount: strokeMoveSampleCountRef.current,
+      });
+    }
     drawingRef.current = false;
     activeTouchIdRef.current = null;
     endStylusScrollLock({ grace: true });
@@ -2561,12 +2701,106 @@ export const NotebookCanvas = memo(function NotebookCanvas({
           // Scroll is already natively locked for the stylus session.
           if (event.numberOfTouches > 1) return;
 
+          const activeMode = modeRef.current;
+          const touch = event.changedTouches[0] ?? event.allTouches[0];
+          const point = touch ? touchToCanvasPoint(touch.x, touch.y) : null;
+
+          // The floating Copy/Delete action bar renders as a sibling inside
+          // this same gesture-wrapped canvas, positioned just outside the
+          // image's own rect (above or below it) — from findImageAtPoint's
+          // perspective a touch on those buttons IS "blank paper". Proven
+          // root cause of "Copy/Delete unreliable": this touch-down handler
+          // fires (and, below, deselected) for that touch too, unmounting
+          // the action bar (imageActionBar depends on selectedIds) before
+          // the button's own onPress can fire on touch-up.
+          //
+          // Bounds are recomputed here, inline, from the same refs the rest
+          // of this handler already reads (selectedIdsRef/imagesRef/
+          // selectionMoveOffsetRef/containerSizeRef/pageGeomRef — all
+          // declared well before this gesture's useMemo, unlike a ref that
+          // mirrors the imageActionBar render-time useMemo, which crashed
+          // ("imageActionBarRef.current of undefined") in physical testing.
+          // Kept in exact sync with imageActionBar's own layout math (same
+          // clamp/gap/edge constants) rather than reusing that memo's
+          // OUTPUT, precisely to avoid depending on it from this closure.
+          const bar = (() => {
+            if (!editableRef.current || selectedIdsRef.current.size !== 1) return null;
+            const selectedId = Array.from(selectedIdsRef.current)[0];
+            const img = imagesRef.current.find((image) => image.id === selectedId);
+            if (!img) return null;
+            const cw = containerSizeRef.current.width;
+            const ch = pageGeomRef.current.canvasHeight;
+            if (cw <= 0 || ch <= 0) return null;
+            const offset = selectionMoveOffsetRef.current;
+            const leftWithOffset = img.x + offset.x;
+            const topWithOffset = img.y + offset.y;
+            const centerX = leftWithOffset + img.width / 2;
+            const maxLeft = Math.max(IMAGE_ACTION_BAR_EDGE, cw - IMAGE_ACTION_BAR_WIDTH - IMAGE_ACTION_BAR_EDGE);
+            const left = clamp(centerX - IMAGE_ACTION_BAR_WIDTH / 2, IMAGE_ACTION_BAR_EDGE, maxLeft);
+            const above = topWithOffset - IMAGE_ACTION_BAR_HEIGHT - IMAGE_ACTION_BAR_GAP;
+            const below = topWithOffset + img.height + IMAGE_ACTION_BAR_GAP;
+            const preferredTop = above < IMAGE_ACTION_BAR_EDGE ? below : above;
+            const maxTop = Math.max(IMAGE_ACTION_BAR_EDGE, ch - IMAGE_ACTION_BAR_HEIGHT - IMAGE_ACTION_BAR_EDGE);
+            const top = clamp(preferredTop, IMAGE_ACTION_BAR_EDGE, maxTop);
+            return { left, top };
+          })();
+          const barHit =
+            point !== null && bar !== null &&
+            point.x >= bar.left && point.x <= bar.left + IMAGE_ACTION_BAR_WIDTH &&
+            point.y >= bar.top && point.y <= bar.top + IMAGE_ACTION_BAR_HEIGHT;
+
+          // A tap on blank paper deselects — checked FIRST, before any
+          // mode gate, because several modes (Scroll, Type, and crucially
+          // Insert — the mode the toolbar stays in right after placing an
+          // image, since nothing resets it back to Write) return early via
+          // manager.fail() a few lines below and never reached this at all
+          // in the previous attempt. Select mode is still excluded: it owns
+          // deselection itself further down using the full selection
+          // bounding box (strokes + images, with padding), which is more
+          // permissive than "exactly on an image" — running this check for
+          // Select would wrongly drop a stroke-only or padding-zone
+          // selection before that logic decides whether the tap landed
+          // inside it.
+          if (__DEV__ && selectedIdsRef.current.size > 0) {
+            const hitImage = point ? findImageAtPoint(point) : null;
+            const before = Array.from(selectedIdsRef.current);
+            const willDeselect = activeMode !== 'select' && point !== null && !hitImage && !barHit;
+            console.info('[NotebookSelection] touch-down-with-selection', {
+              mode: activeMode,
+              pointerType: event.pointerType,
+              numberOfTouches: event.numberOfTouches,
+              selectedIdsBefore: before,
+              hitImageId: hitImage?.id ?? null,
+              barHit,
+              willDeselect,
+            });
+          }
+          if (activeMode !== 'select' && point && selectedIdsRef.current.size > 0 && !findImageAtPoint(point) && !barHit) {
+            selectedIdsRef.current = new Set();
+            setSelectedIds(new Set());
+            if (__DEV__) {
+              console.info('[NotebookSelection] deselected-on-blank-tap', { mode: activeMode });
+            }
+          }
+
+          // The action bar is UI chrome, never canvas content, in every
+          // mode — including Select, where (unlike the deselect check
+          // above) nothing else would have stopped this gesture from
+          // activating on it: findImageAtPoint is null there (no image),
+          // so Select mode's own tap-outside-image handling below would
+          // otherwise treat a button tap as the start of a fresh
+          // rect/lasso selection, consuming the touch before the button's
+          // native onPress ever gets it.
+          if (barHit) {
+            manager.fail();
+            return;
+          }
+
           // First touch of a fresh gesture. If a previous stroke somehow never
           // finalized, commit and clear it NOW, so this new touch starts a
           // brand-new stroke and can never extend the old one.
           if (drawingRef.current) endStroke();
 
-          const activeMode = modeRef.current;
           if (activeMode !== 'write' && activeMode !== 'highlight' && activeMode !== 'erase' && activeMode !== 'select') {
             manager.fail();
             return;
@@ -2580,19 +2814,43 @@ export const NotebookCanvas = memo(function NotebookCanvas({
             return;
           }
 
-          const touch = event.changedTouches[0] ?? event.allTouches[0];
-          if (!touch) {
+          if (!touch || !point) {
             manager.fail();
             return;
           }
 
-          const point = touchToCanvasPoint(touch.x, touch.y);
-          if (findImageAtPoint(point)) {
+          // An image normally claims touches inside its bounds (its own
+          // tap/pan gestures handle select/move — see failIfStylus in
+          // NotebookImageObjectBase, the other half of this contract). The
+          // one exception is a stylus actively drawing/highlighting/erasing:
+          // Apple Pencil must ink straight through an image, never be
+          // treated as touching it. Select mode is NOT exempted here — a
+          // Pencil tap in Select mode should still select the image, same
+          // as a finger would.
+          const stylusDrawingOverImage = activeMode !== 'select' && event.pointerType === PointerType.STYLUS;
+          const hitImageForInkRouting = findImageAtPoint(point);
+          if (__DEV__ && hitImageForInkRouting) {
+            console.info('[NotebookImageAction] touch-on-image', {
+              imageId: hitImageForInkRouting.id,
+              pointerType: event.pointerType,
+              mode: activeMode,
+              routedTo: stylusDrawingOverImage ? 'ink' : 'image-gesture',
+            });
+          }
+          if (hitImageForInkRouting && !stylusDrawingOverImage) {
             manager.fail();
             return;
           }
 
           manager.activate();
+          if (__DEV__) {
+            console.info('[NotebookImageAction] canvas-gesture-activated', {
+              touchId: touch.id,
+              startedOverImageId: hitImageForInkRouting?.id ?? null,
+              pointerType: event.pointerType,
+              mode: activeMode,
+            });
+          }
           drawingRef.current = true;
           activeTouchIdRef.current = touch.id;
           beginStylusScrollLock();
@@ -2642,6 +2900,8 @@ export const NotebookCanvas = memo(function NotebookCanvas({
           }
 
           if (activeMode === 'write' || activeMode === 'highlight') {
+            strokeMoveSampleCountRef.current = 0;
+            strokeStartedOverImageRef.current = hitImageForInkRouting?.id ?? null;
             activeInkRef.current?.begin(point);
           } else {
             erasedIdsRef.current = [];
@@ -2680,6 +2940,7 @@ export const NotebookCanvas = memo(function NotebookCanvas({
           }
 
           if (modeRef.current === 'write' || modeRef.current === 'highlight') {
+            strokeMoveSampleCountRef.current += 1;
             activeInkRef.current?.append(point);
           } else if (modeRef.current === 'erase') {
             setErasePoint(point);
@@ -2814,6 +3075,15 @@ export const NotebookCanvas = memo(function NotebookCanvas({
   // works while the Pencil stays down.
   const handleDoubleTap = useCallback(() => {
     const current = modeRef.current;
+    if (__DEV__) {
+      console.info('[NotebookViewport] pencil-double-tap', {
+        toolBefore: current,
+        scrollY: scrollOffsetYRef.current,
+        strokeActive: stylusStrokeLockRef.current,
+        palmGrace: palmGraceActiveRef.current,
+      });
+    }
+    armPostUnlockWatch('double-tap');
     if (current === 'write' || current === 'highlight') {
       previousDrawingToolRef.current = current;
       temporaryEraserRef.current = true;
@@ -2833,7 +3103,7 @@ export const NotebookCanvas = memo(function NotebookCanvas({
       setMode(restored);
       showToolToast(restored);
     }
-  }, [showToolToast]);
+  }, [armPostUnlockWatch, showToolToast]);
 
   useEffect(() => {
     if (!editable) return;
@@ -2899,12 +3169,19 @@ export const NotebookCanvas = memo(function NotebookCanvas({
   }, [strokes, text, images, onStrokesChange, onTextChange, onImagesChange, recordHistory, t]);
 
   const deleteSelectedObjects = useCallback(() => {
+    if (__DEV__) console.info('[NotebookImageAction] delete callback-entered', { selectedIds: Array.from(selectedIdsRef.current) });
     const ids = selectedIdsRef.current;
-    if (ids.size === 0) return false;
+    if (ids.size === 0) {
+      if (__DEV__) console.info('[NotebookImageAction] delete callback-completed', { result: 'no-op: empty selection' });
+      return false;
+    }
 
     const hasSelectedStroke = strokesRef.current.some((stroke) => ids.has(stroke.id));
     const hasSelectedImage = imagesRef.current.some((image) => ids.has(image.id));
-    if (!hasSelectedStroke && !hasSelectedImage) return false;
+    if (!hasSelectedStroke && !hasSelectedImage) {
+      if (__DEV__) console.info('[NotebookImageAction] delete callback-completed', { result: 'no-op: selection ids stale' });
+      return false;
+    }
 
     recordHistory();
     if (hasSelectedStroke) {
@@ -2917,6 +3194,7 @@ export const NotebookCanvas = memo(function NotebookCanvas({
     setSelectedIds(new Set());
     selectionMoveOffsetRef.current = { x: 0, y: 0 };
     setSelectionMoveOffset({ x: 0, y: 0 });
+    if (__DEV__) console.info('[NotebookImageAction] delete callback-completed', { result: 'removed', removedIds: Array.from(ids) });
     return true;
   }, [recordHistory]);
 
@@ -2926,8 +3204,12 @@ export const NotebookCanvas = memo(function NotebookCanvas({
   }, [clearPage, deleteSelectedObjects]);
 
   const duplicateSelected = useCallback(() => {
+    if (__DEV__) console.info('[NotebookImageAction] copy callback-entered', { selectedIds: Array.from(selectedIdsRef.current) });
     const ids = selectedIdsRef.current;
-    if (ids.size === 0) return;
+    if (ids.size === 0) {
+      if (__DEV__) console.info('[NotebookImageAction] copy callback-completed', { result: 'no-op: empty selection' });
+      return;
+    }
     const OFFSET = 18;
     const newIds = new Set<string>();
     const extraStrokes: NoteStroke[] = [];
@@ -2955,12 +3237,22 @@ export const NotebookCanvas = memo(function NotebookCanvas({
         ),
       );
     }
-    if (extraStrokes.length === 0 && extraImages.length === 0) return;
+    if (extraStrokes.length === 0 && extraImages.length === 0) {
+      if (__DEV__) console.info('[NotebookImageAction] copy callback-completed', { result: 'no-op: selection ids stale' });
+      return;
+    }
     recordHistory();
     if (extraStrokes.length > 0) onStrokesChangeRef.current([...strokesRef.current, ...extraStrokes]);
     if (extraImages.length > 0) onImagesChangeRef.current([...imagesRef.current, ...extraImages]);
     selectedIdsRef.current = newIds;
     setSelectedIds(new Set(newIds));
+    if (__DEV__) {
+      console.info('[NotebookImageAction] copy callback-completed', {
+        result: 'duplicated',
+        newIds: Array.from(newIds),
+        duplicatedImageUris: extraImages.map((img) => img.uri),
+      });
+    }
   }, [recordHistory]);
 
   const pickImage = useCallback(async () => {
@@ -2977,18 +3269,52 @@ export const NotebookCanvas = memo(function NotebookCanvas({
     const aspect = (asset.height ?? MAX_W) / (asset.width ?? MAX_W);
     const displayW = Math.min(MAX_W, asset.width ?? MAX_W);
     const displayH = displayW * aspect;
+    // Insert at the CURRENTLY VISIBLE viewport position, in canvas/paper
+    // coordinates — never assume scale===1 or scrollOffsetY is already in
+    // canvas units. scrollOffsetYRef is the ScrollView's raw contentOffset,
+    // i.e. SCREEN-scaled pixels (the paper renders at canvasHeight *
+    // canvasScale) — using it directly as a canvas-space y (the previous
+    // behavior) put the image at the wrong canvas position by exactly the
+    // zoom factor, worst at minimum zoom, which is exactly the physical
+    // failure reported (insert while zoomed out on page 2 landed on page 1).
+    // Route through the SAME screenToCanvasPoint transform every touch uses,
+    // so this always matches wherever the user is actually looking.
     const cs = containerSizeRef.current;
-    const cx = Math.max(MARGIN_X, (cs.width - displayW) / 2);
-    const cy = scrollOffsetYRef.current + 60;
-    const img: NoteImage = {
-      id: makeImageId(),
-      uri: asset.uri,
-      x: cx,
-      y: cy,
-      width: displayW,
-      height: displayH,
-      createdAt: new Date().toISOString(),
-    };
+    const displayScreenW = displayW * canvasScaleRef.current;
+    const screenX = Math.max(MARGIN_X, (cs.width - displayScreenW) / 2);
+    const screenY = 60;
+    const canvasAnchor = screenToCanvasPoint(
+      screenX,
+      screenY,
+      scrollOffsetYRef.current,
+      canvasScaleRef.current,
+      canvasTranslateXRef.current,
+    );
+    const cx = canvasAnchor.x;
+    const cy = canvasAnchor.y;
+    const imageId = makeImageId();
+    // The picker's asset.uri is transient (picker-owned temp/cache location,
+    // not guaranteed to survive relaunch or cache eviction). Copy it into a
+    // Youmi Lens-owned durable location before it ever becomes canonical
+    // state — see lib/notebookImageStorage.ts. On failure, fall back to the
+    // transient URI so this insertion isn't silently dropped (the image
+    // still shows for the current session); the dev warning inside
+    // persistNotebookImage makes a failed copy diagnosable rather than a
+    // silent future data loss.
+    const durableUri = await persistNotebookImage(asset.uri, imageId);
+    const img: NoteImage = clampImageGeometry(
+      {
+        id: imageId,
+        uri: durableUri ?? asset.uri,
+        x: cx,
+        y: cy,
+        width: displayW,
+        height: displayH,
+        createdAt: new Date().toISOString(),
+      },
+      cs.width,
+      pageGeomRef.current.canvasHeight,
+    );
     recordHistory();
     onImagesChangeRef.current([...imagesRef.current, img]);
     selectedIdsRef.current = new Set([img.id]);
@@ -3482,6 +3808,43 @@ export const NotebookCanvas = memo(function NotebookCanvas({
   );
 
   const reportNotebookScroll = useCallback((y: number) => {
+    // Smoking-gun check for the palm/double-tap viewport-jump investigation:
+    // scrollEnabled is set false via setNativeProps the moment a stylus
+    // stroke or palm-grace window begins, but that is a JS-thread round trip
+    // — an already-in-flight native pan (e.g. a palm that touched down
+    // before the Pencil) can still deliver scroll events after the lock is
+    // considered active. This never fires if the lock is airtight; if it
+    // does, y is the exact post-jump offset.
+    if (__DEV__ && (stylusStrokeLockRef.current || palmGraceActiveRef.current)) {
+      const before = lastLockedScrollYRef.current;
+      if (before !== null && Math.abs(y - before) > 0.5) {
+        console.info('[NotebookViewport] scroll-during-lock', {
+          scrollYBefore: before,
+          scrollYNow: y,
+          delta: y - before,
+          strokeActive: stylusStrokeLockRef.current,
+          palmGrace: palmGraceActiveRef.current,
+        });
+      }
+    }
+    // Second-round check: a jump landing just AFTER protection lapses
+    // (grace expired, or right around a double-tap) rather than during it —
+    // see armPostUnlockWatch above for why this is the more likely window.
+    if (__DEV__ && postUnlockWatchRef.current) {
+      const watch = postUnlockWatchRef.current;
+      if (Date.now() > watch.until) {
+        postUnlockWatchRef.current = null;
+      } else if (Math.abs(y - watch.baselineY) > 0.5) {
+        console.info('[NotebookViewport] scroll-after-unlock', {
+          reason: watch.reason,
+          scrollYBaseline: watch.baselineY,
+          scrollYNow: y,
+          delta: y - watch.baselineY,
+          msSinceArm: POST_UNLOCK_WATCH_MS - (watch.until - Date.now()),
+        });
+        postUnlockWatchRef.current = null;
+      }
+    }
     scrollOffsetYRef.current = y;
     showPageBadge(pageForScroll(y));
   }, [pageForScroll, showPageBadge]);

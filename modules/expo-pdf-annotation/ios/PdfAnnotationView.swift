@@ -108,6 +108,62 @@ public final class PdfAnnotationView: ExpoView {
   private var viewportTrustedForEmission: Bool { restoreVerified || userHasInteracted }
   #if DEBUG
   private var restoreTraceRemaining = 100
+  /// A bounded, per-gesture forensic window for the material viewport-jump
+  /// investigation. It is deliberately armed only by a Pencil stroke or a
+  /// tool change, so normal reading does not produce scroll/layout noise.
+  private var viewportTraceSequence = 0
+  private var viewportTraceUntil: Date?
+  private var pencilStrokeActive = false
+  private var strokeJustEnded = false
+  private var strokeFirstSampleSeen = false
+
+  private func armViewportTrace(_ reason: String) {
+    viewportTraceUntil = Date().addingTimeInterval(2)
+    traceViewportMutation("trace-armed", reason: reason, force: true)
+  }
+
+  private func traceViewportMutation(_ event: String, reason: String = "", force: Bool = false) {
+    guard force || (viewportTraceUntil.map { Date() <= $0 } ?? false) else { return }
+    viewportTraceSequence += 1
+    let scroll = observedScrollView ?? findInnerScrollView(in: pdfView)
+    let visible = pdfView.page(for: .zero, nearest: true).flatMap { page in document.map { $0.index(for: page) + 1 } }
+    let currentPage = pdfView.currentPage.flatMap { page in document.map { $0.index(for: page) + 1 } }
+    onViewportDiagnostic([
+      "sequence": viewportTraceSequence,
+      "event": event,
+      "reason": reason,
+      "currentPage": currentPage as Any,
+      "visiblePage": visible as Any,
+      "offsetX": scroll?.contentOffset.x as Any,
+      "offsetY": scroll?.contentOffset.y as Any,
+      "scaleFactor": pdfView.scaleFactor,
+      "pageCount": document?.pageCount ?? 0,
+      "annotationCount": annotationOverlay.annotationCount,
+      "pencilActive": pencilStrokeActive,
+      "strokeJustEnded": strokeJustEnded,
+      "mode": annotationMode,
+      "restoring": isRestoringViewport,
+      "restorationComplete": restorationComplete,
+    ])
+    print("[material-viewport-trace] seq=\(viewportTraceSequence) t=\(ProcessInfo.processInfo.systemUptime) event=\(event) reason=\(reason) currentPage=\(String(describing: currentPage)) visiblePage=\(String(describing: visible)) offset=\(String(describing: scroll?.contentOffset)) scale=\(pdfView.scaleFactor) pages=\(document?.pageCount ?? 0) annotations=\(annotationOverlay.annotationCount) pencilActive=\(pencilStrokeActive) strokeJustEnded=\(strokeJustEnded) mode=\(annotationMode) restoring=\(isRestoringViewport) restoreComplete=\(restorationComplete)")
+  }
+
+  /// Pencil double-tap / palm viewport-jump investigation: setNonPencilGesturesEnabled(true)
+  /// re-enables pan/pinch the INSTANT a stroke ends, with no grace at all —
+  /// unlike Notebook's 300ms window. If a palm is still resting at that
+  /// exact moment (the common case: a brief pause to double-tap, or just a
+  /// pause between strokes), it can drive the freshly re-enabled pan
+  /// immediately. This is a bounded, one-shot watch armed at that release
+  /// point, not polling — observeValue below only checks it while armed.
+  private var postStrokeWatchUntil: Date?
+  private var postStrokeWatchBaseline: CGPoint?
+  private static let postStrokeWatchSeconds: TimeInterval = 1.2
+
+  private func armPostStrokeWatch(reason: String) {
+    postStrokeWatchUntil = Date().addingTimeInterval(Self.postStrokeWatchSeconds)
+    postStrokeWatchBaseline = observedScrollView?.contentOffset
+    print("[PdfAnnotationView] post-stroke-watch-armed reason=\(reason) baseline=\(String(describing: postStrokeWatchBaseline))")
+  }
   #endif
 
   /// Bounded diagnostic for one mount; no timers or per-scroll bridge traffic.
@@ -130,6 +186,7 @@ public final class PdfAnnotationView: ExpoView {
   let onAnnotationsChanged = EventDispatcher()
   let onEraserGestureEnded = EventDispatcher()
   let onTextAnnotationAction = EventDispatcher()
+  let onViewportDiagnostic = EventDispatcher()
 
   var fileUri: String? {
     didSet { if fileUri != oldValue { loadDocumentIfNeeded() } }
@@ -160,11 +217,51 @@ public final class PdfAnnotationView: ExpoView {
         #endif
         return
       }
-      pendingInitialViewport = (max(1, Int(page)), max(0.01, CGFloat(scale)), CGPoint(x: max(0, x), y: max(0, y)))
+      let parsed = (
+        pageIndex: max(1, Int(page)),
+        scale: max(0.01, CGFloat(scale)),
+        anchor: CGPoint(x: max(0, x), y: max(0, y))
+      )
+
+      // Re-applying the SAME restore target must be a no-op — this guard is
+      // the exact counterpart of initialPage's `if initialPage != oldValue`
+      // above, which this property was missing.
+      //
+      // `initialViewport` is frozen at mount on the JS side (useState with no
+      // setter, see app/lecture-material/[lectureId]/[materialId].tsx), so its
+      // value is "the viewport this screen was OPENED at" and never changes
+      // for the life of the screen. But under the New Architecture the prop
+      // setter runs again on every re-render of that screen, and without an
+      // equality check this didSet then cleared restorationComplete and
+      // re-entered applyInitialViewportIfPossible() — which is otherwise
+      // guarded by `!restorationComplete` and therefore safe to call from
+      // layout/document paths. That re-armed a full restore back to the
+      // MOUNT viewport, discarding wherever the user had since scrolled to.
+      //
+      // Proven physically (forensic trace, seq 407 -> 408): a committed
+      // Pencil stroke at page 7 / offsetY 4842 with restorationComplete=true
+      // was followed immediately by restorationComplete=false, restoring=true
+      // at page 1 / offsetY -45. Both reported repros reduce to "the screen
+      // re-rendered": a stroke commit (annotation store update + viewport
+      // persist-write) and an Apple Pencil double-tap (annotationMode state
+      // change) are simply two different causes of the same re-render, which
+      // is why the jump is not stroke-content-specific.
+      if let pending = pendingInitialViewport,
+         pending.pageIndex == parsed.pageIndex,
+         pending.scale == parsed.scale,
+         pending.anchor == parsed.anchor {
+        #if DEBUG
+        print("[material-viewport] native prop initialViewport-didSet IGNORED (target unchanged) pending=\(String(describing: pendingInitialViewport))")
+        #endif
+        return
+      }
+
+      pendingInitialViewport = parsed
       restorationComplete = false
       restoreVerified = false
       #if DEBUG
       print("[material-viewport] native prop initialViewport-didSet ACCEPTED pendingInitialViewport=\(String(describing: pendingInitialViewport))")
+      traceViewportMutation("native-prop-initialViewport-rearm", reason: "new restore target page=\(parsed.pageIndex)", force: true)
       #endif
       applyInitialViewportIfPossible()
     }
@@ -175,6 +272,11 @@ public final class PdfAnnotationView: ExpoView {
   var annotationMode: String = "scroll" {
     didSet {
       if annotationMode != oldValue {
+        #if DEBUG
+        armViewportTrace("annotationMode \(oldValue) -> \(annotationMode)")
+        traceViewportMutation("native-prop-mode", reason: "React tool update", force: true)
+        armPostStrokeWatch(reason: "annotationMode \(oldValue) -> \(annotationMode)")
+        #endif
         annotationOverlay.mode = annotationMode
         updateGestureMode()
         // Drop the eraser cursor the moment the mode leaves "eraser" — this
@@ -213,7 +315,15 @@ public final class PdfAnnotationView: ExpoView {
 
   /// Strokes to render, keyed by 1-based page number. Coords in PDF page space.
   var annotationsByPage: [String: Any]? {
-    didSet { annotationOverlay.loadAnnotations(annotationsByPage) }
+    didSet {
+      #if DEBUG
+      traceViewportMutation("native-prop-annotations-before", reason: "React annotationsByPage update")
+      #endif
+      annotationOverlay.loadAnnotations(annotationsByPage)
+      #if DEBUG
+      traceViewportMutation("native-prop-annotations-after", reason: "React annotationsByPage update")
+      #endif
+    }
   }
 
   /// Number of stable, Youmi-owned blank pages after the immutable source PDF.
@@ -300,6 +410,9 @@ public final class PdfAnnotationView: ExpoView {
   }
 
   public override func layoutSubviews() {
+    #if DEBUG
+    traceViewportMutation("layoutSubviews-before", reason: "native layout")
+    #endif
     traceRestore("layout-before-super")
     super.layoutSubviews()
     traceRestore("layout-after-super")
@@ -318,6 +431,9 @@ public final class PdfAnnotationView: ExpoView {
     bringSubviewToFront(annotationOverlay)
     annotationOverlay.setNeedsDisplay()
     applyInitialViewportIfPossible()
+    #if DEBUG
+    traceViewportMutation("layoutSubviews-after", reason: "native layout")
+    #endif
   }
 
   private static func double(_ value: Any?) -> Double? {
@@ -334,6 +450,9 @@ public final class PdfAnnotationView: ExpoView {
   ///     alone unless it's now outside the new [min, max] window, in which
   ///     case clamp it. PDFView's own pinch state is preserved otherwise.
   private func applyScaleSettings(forceFit: Bool) {
+    #if DEBUG
+    traceViewportMutation("scale-settings-before", reason: "forceFit=\(forceFit)")
+    #endif
     traceRestore("scale-settings forceFit=\(forceFit)")
     guard document != nil else { return }
     guard pdfView.bounds.width > 0, pdfView.bounds.height > 0 else { return }
@@ -351,6 +470,9 @@ public final class PdfAnnotationView: ExpoView {
     } else if pdfView.scaleFactor > pdfView.maxScaleFactor {
       pdfView.scaleFactor = pdfView.maxScaleFactor
     }
+    #if DEBUG
+    traceViewportMutation("scale-settings-after", reason: "forceFit=\(forceFit)")
+    #endif
     #if DEBUG
     print("[PdfAnnotationView] applyScaleSettings forceFit=\(forceFit) fit=\(fit) min=\(pdfView.minScaleFactor) max=\(pdfView.maxScaleFactor) current=\(pdfView.scaleFactor)")
     #endif
@@ -437,6 +559,9 @@ public final class PdfAnnotationView: ExpoView {
   /// generated pages never writes to its URL. We rebuild from a fresh source
   /// load so a prop update cannot accidentally accumulate blank pages.
   private func rebuildCompositeDocument(preservingCurrentPage: Bool) {
+    #if DEBUG
+    traceViewportMutation("document-rebuild-before", reason: "preserving=\(preservingCurrentPage)")
+    #endif
     traceRestore("rebuild preserving=\(preservingCurrentPage) appended=\(appendedBlankPageCount)")
     guard let fileUri = loadedFileUri, let url = url(from: fileUri),
           let freshSource = PDFDocument(url: url) else { return }
@@ -474,6 +599,9 @@ public final class PdfAnnotationView: ExpoView {
     }
     document = freshSource
     pdfView.document = freshSource
+    #if DEBUG
+    traceViewportMutation("document-reassignment", reason: "composite document assigned")
+    #endif
     annotationOverlay.setNeedsDisplay()
 
     guard preservingCurrentPage else { return }
@@ -481,6 +609,9 @@ public final class PdfAnnotationView: ExpoView {
     if let restoreAnchor, restoreAnchor.pageIndex < freshSource.pageCount,
        let page = freshSource.page(at: restoreAnchor.pageIndex) {
       pdfView.go(to: PDFDestination(page: page, at: restoreAnchor.point))
+      #if DEBUG
+      traceViewportMutation("goTo", reason: "rebuildCompositeDocument anchor restore")
+      #endif
       emitCurrentPage()
     } else {
       // Defensive fallback only — e.g. the anchor page no longer exists.
@@ -557,11 +688,20 @@ public final class PdfAnnotationView: ExpoView {
     restorationComplete = false
     traceRestore("attempt-before-page")
     pdfView.go(to: page)
+    #if DEBUG
+    traceViewportMutation("goTo", reason: "viewport restore page")
+    #endif
     traceRestore("attempt-after-page")
     if let saved {
       pdfView.scaleFactor = min(pdfView.maxScaleFactor, max(pdfView.minScaleFactor, saved.scale))
+      #if DEBUG
+      traceViewportMutation("scale-assignment", reason: "viewport restore")
+      #endif
       traceRestore("attempt-after-scale")
       pdfView.go(to: PDFDestination(page: page, at: saved.anchor))
+      #if DEBUG
+      traceViewportMutation("goTo", reason: "viewport restore anchor")
+      #endif
       traceRestore("attempt-after-anchor")
     }
     DispatchQueue.main.async { [weak self] in
@@ -732,6 +872,9 @@ public final class PdfAnnotationView: ExpoView {
     print("[material-viewport] native goToPage requested=\(pageNumber) clamped=\(clampedPage) reason=\(reason)")
     #endif
     pdfView.go(to: page)
+    #if DEBUG
+    traceViewportMutation("goTo", reason: reason)
+    #endif
     emitCurrentPage()
   }
 
@@ -785,7 +928,17 @@ public final class PdfAnnotationView: ExpoView {
       // every other recognizer for the duration of just this one stroke
       // (restored in .ended/.cancelled/.failed below) blocks that without
       // touching intentional finger scroll/pinch between strokes.
+      #if DEBUG
+      pencilStrokeActive = true
+      strokeJustEnded = false
+      strokeFirstSampleSeen = false
+      armViewportTrace("Pencil began")
+      traceViewportMutation("pencil-begin", reason: "before non-Pencil disable", force: true)
+      #endif
       setNonPencilGesturesEnabled(false)
+      #if DEBUG
+      traceViewportMutation("non-pencil-gestures", reason: "disabled for Pencil", force: true)
+      #endif
       let p = recognizer.location(in: pdfView)
       let overlayPoint = recognizer.location(in: annotationOverlay)
       #if DEBUG
@@ -824,11 +977,24 @@ public final class PdfAnnotationView: ExpoView {
           emitPageReplacement(replacement.strokes, pageNumber: replacement.pageNumber)
         }
       } else {
+        #if DEBUG
+        if !strokeFirstSampleSeen {
+          strokeFirstSampleSeen = true
+          traceViewportMutation("pencil-first-sample", reason: "confirmed samples=\(recognizer.confirmedPoints.count)")
+        }
+        #endif
         for point in recognizer.confirmedPoints { annotationOverlay.appendPoint(at: point) }
       }
 
     case .ended:
       setNonPencilGesturesEnabled(true)
+      #if DEBUG
+      pencilStrokeActive = false
+      strokeJustEnded = true
+      traceViewportMutation("pencil-end", reason: "after non-Pencil enable", force: true)
+      traceViewportMutation("non-pencil-gestures", reason: "enabled after Pencil", force: true)
+      armPostStrokeWatch(reason: "pencil gesture \(recognizer.state.rawValue)")
+      #endif
       if annotationMode == "eraser" {
         #if DEBUG
         print("[PdfAnnotationView] eraser ended")
@@ -840,6 +1006,7 @@ public final class PdfAnnotationView: ExpoView {
         for point in recognizer.confirmedPoints { annotationOverlay.appendPoint(at: point) }
         if let commit = annotationOverlay.endStroke() {
         #if DEBUG
+        traceViewportMutation("annotation-committed", reason: "page=\(commit.pageNumber) points=\(commit.stroke.points.count)", force: true)
         print("[PdfAnnotationView] pencil .ended commit page=\(commit.pageNumber) points=\(commit.stroke.points.count)")
         #endif
         emitStrokeCommitted(commit.stroke, pageNumber: commit.pageNumber)
@@ -852,6 +1019,13 @@ public final class PdfAnnotationView: ExpoView {
 
     case .cancelled, .failed:
       setNonPencilGesturesEnabled(true)
+      #if DEBUG
+      pencilStrokeActive = false
+      strokeJustEnded = true
+      traceViewportMutation("pencil-terminal", reason: "state=\(recognizer.state.rawValue) after enable", force: true)
+      traceViewportMutation("non-pencil-gestures", reason: "enabled after terminal Pencil", force: true)
+      armPostStrokeWatch(reason: "pencil gesture \(recognizer.state.rawValue)")
+      #endif
       if annotationMode == "eraser" {
         #if DEBUG
         print("[PdfAnnotationView] eraser ended state=\(recognizer.state.rawValue)")
@@ -871,6 +1045,9 @@ public final class PdfAnnotationView: ExpoView {
   // MARK: - Notifications + KVO
 
   @objc private func handlePageChanged(_ notification: Notification) {
+    #if DEBUG
+    traceViewportMutation("PDFViewPageChanged", reason: "PDFKit notification")
+    #endif
     traceRestore("PDFViewPageChanged")
     emitCurrentPage()
     annotationOverlay.setNeedsDisplay()
@@ -878,6 +1055,9 @@ public final class PdfAnnotationView: ExpoView {
   }
 
   @objc private func handleAnnotationLayoutChange() {
+    #if DEBUG
+    traceViewportMutation("annotation-layout-change", reason: "PDFKit scale/visible pages notification")
+    #endif
     annotationOverlay.setNeedsDisplay()
     scheduleViewportSnapshot()
   }
@@ -944,9 +1124,15 @@ public final class PdfAnnotationView: ExpoView {
   /// tracking; re-enabling only affects the NEXT touch, so this never
   /// resurrects a gesture that was cancelled mid-recognition.
   private func setNonPencilGesturesEnabled(_ enabled: Bool) {
+    #if DEBUG
+    traceViewportMutation("setNonPencilGesturesEnabled-before", reason: "enabled=\(enabled)")
+    #endif
     for recognizer in allGestureRecognizers(in: pdfView) where recognizer !== pencilGesture {
       recognizer.isEnabled = enabled
     }
+    #if DEBUG
+    traceViewportMutation("setNonPencilGesturesEnabled-after", reason: "enabled=\(enabled)")
+    #endif
   }
 
   private func applyPdfGestureTouchPolicy() {
@@ -1011,6 +1197,23 @@ public final class PdfAnnotationView: ExpoView {
   ) {
     annotationOverlay.setNeedsDisplay()
     if keyPath == "contentOffset" || keyPath == "bounds" { scheduleViewportSnapshot() }
+    #if DEBUG
+    if keyPath == "contentOffset" {
+      traceViewportMutation("contentOffset", reason: "KVO")
+    } else if keyPath == "bounds" {
+      traceViewportMutation("scroll-bounds", reason: "KVO")
+    }
+    if keyPath == "contentOffset", let until = postStrokeWatchUntil, let baseline = postStrokeWatchBaseline {
+      if Date() > until {
+        postStrokeWatchUntil = nil
+        postStrokeWatchBaseline = nil
+      } else if let current = observedScrollView?.contentOffset, hypot(current.x - baseline.x, current.y - baseline.y) > 0.5 {
+        print("[PdfAnnotationView] scroll-after-unlock baseline=\(baseline) current=\(current) deltaX=\(current.x - baseline.x) deltaY=\(current.y - baseline.y)")
+        postStrokeWatchUntil = nil
+        postStrokeWatchBaseline = nil
+      }
+    }
+    #endif
   }
 
   // MARK: - Event helpers
@@ -1316,6 +1519,8 @@ final class AnnotationOverlay: UIView {
   private var inProgressColor: String = "#061B34"
   private var inProgressWidth: Double = 2.4
   private var inProgressOpacity: Double = 1
+
+  var annotationCount: Int { pagedStrokes.values.reduce(0) { $0 + $1.count } }
 
   /// Eraser cursor — current Pencil location in overlay coordinates. Drawn as
   /// a circular outline on top of the ink so the user can see where the

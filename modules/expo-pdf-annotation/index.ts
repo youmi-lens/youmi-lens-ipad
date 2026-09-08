@@ -16,6 +16,25 @@ export type NativePdfErrorEvent = {
   message: string;
 };
 
+/** DEBUG-only native PDFKit event sequencing for device forensic captures. */
+export type NativePdfViewportDiagnosticEvent = {
+  sequence: number;
+  event: string;
+  reason: string;
+  currentPage?: number;
+  visiblePage?: number;
+  offsetX?: number;
+  offsetY?: number;
+  scaleFactor: number;
+  pageCount: number;
+  annotationCount: number;
+  pencilActive: boolean;
+  strokeJustEnded: boolean;
+  mode: string;
+  restoring: boolean;
+  restorationComplete: boolean;
+};
+
 export type NativePdfEraserGestureEndedEvent = {
   pageNumber?: number;
 };
@@ -110,6 +129,7 @@ export type ExpoPdfAnnotationViewProps = {
   onAnnotationsChanged?: (event: { nativeEvent: NativePdfAnnotationsChangedEvent }) => void;
   onEraserGestureEnded?: (event: { nativeEvent: NativePdfEraserGestureEndedEvent }) => void;
   onTextAnnotationAction?: (event: { nativeEvent: NativePdfTextAnnotationActionEvent }) => void;
+  onViewportDiagnostic?: (event: { nativeEvent: NativePdfViewportDiagnosticEvent }) => void;
   style?: unknown;
 };
 

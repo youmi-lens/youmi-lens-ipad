@@ -17,8 +17,9 @@ public final class ExpoPdfAnnotationModule: Module {
         "onViewportChanged",
         "onError",
         "onAnnotationsChanged",
-        "onEraserGestureEnded"
-        ,"onTextAnnotationAction"
+        "onEraserGestureEnded",
+        "onTextAnnotationAction",
+        "onViewportDiagnostic"
       )
 
       Prop("fileUri") { (view: PdfAnnotationView, fileUri: String?) in

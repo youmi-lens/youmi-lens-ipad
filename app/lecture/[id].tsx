@@ -542,6 +542,34 @@ export default function LectureDetailScreen() {
     setNotesOpen(false);
   };
 
+  // Cancel (and the system dismiss gesture below) intentionally discard the
+  // draft — but only after the user confirms. Silently discarding an
+  // inserted image or a paragraph of handwriting because of a mis-tap next
+  // to Done, or an accidental edge-swipe/back gesture, is exactly the "no
+  // silent loss" failure this exists to prevent. Reference equality is
+  // enough here: every edit path (onStrokesChange/onTextChange/
+  // onImagesChange) always creates a new array/string, so an untouched
+  // draft still points at the exact same reference set in openNotesEditor.
+  const notesEditorDirty =
+    notesDraft !== (lecture.notes ?? '') ||
+    strokesDraft !== (lecture.noteStrokes ?? []) ||
+    imagesDraft !== (lecture.noteImages ?? []);
+
+  const requestCloseNotesEditor = () => {
+    if (!notesEditorDirty) {
+      setNotesOpen(false);
+      return;
+    }
+    Alert.alert(
+      t('lecture.notesDiscardTitle'),
+      t('lecture.notesDiscardMessage'),
+      [
+        { text: t('common.cancel'), style: 'cancel' },
+        { text: t('lecture.notesDiscardConfirm'), style: 'destructive', onPress: () => setNotesOpen(false) },
+      ],
+    );
+  };
+
   const handleExportPdf = async () => {
     if (!hasExportableLectureNotes(lecture)) {
       Alert.alert(t('lecture.nothingExport'), t('lecture.noNotesExport'));
@@ -963,11 +991,11 @@ export default function LectureDetailScreen() {
         visible={notesOpen}
         animationType="slide"
         presentationStyle="fullScreen"
-        onRequestClose={() => setNotesOpen(false)}
+        onRequestClose={requestCloseNotesEditor}
       >
         <SafeAreaView style={styles.modalRoot} edges={['top', 'bottom', 'left', 'right']}>
           <View style={styles.modalHeader}>
-            <PressableScale accessibilityRole="button" onPress={() => setNotesOpen(false)} style={styles.modalAction}>
+            <PressableScale accessibilityRole="button" onPress={requestCloseNotesEditor} style={styles.modalAction}>
               <Text style={styles.modalActionText}>{t('common.cancel')}</Text>
             </PressableScale>
             <Text style={styles.modalTitle}>{t('lecture.notesTitle')}</Text>

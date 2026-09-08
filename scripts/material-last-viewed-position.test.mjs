@@ -161,7 +161,11 @@ check('restoreVerified/userHasInteracted reset to false on a genuinely new docum
   assert.match(load, /self\.restoreVerified = false/);
   assert.match(load, /self\.userHasInteracted = false/);
   const didSetStart = swift.indexOf('var initialViewport: [String: Any]?');
-  const didSet = swift.slice(didSetStart, didSetStart + 900);
+  // Boundary-anchored (not a fixed character count) so documenting the didSet
+  // cannot push the assertion target outside the window — see the equality
+  // guard added for the Pencil-stroke/double-tap viewport jump, covered by
+  // scripts/material-viewport-rearm-guard.test.mjs.
+  const didSet = swift.slice(didSetStart, swift.indexOf('var annotationMode: String', didSetStart));
   assert.match(didSet, /restoreVerified = false/);
 });
 

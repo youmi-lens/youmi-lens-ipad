@@ -14,6 +14,7 @@ import {
   type NativePdfPageChangedEvent,
   type NativePdfTextAnnotationsByPage,
   type NativePdfTextAnnotationActionEvent,
+  type NativePdfViewportDiagnosticEvent,
 } from '@/modules/expo-pdf-annotation';
 
 const NativePdfViewComponent = ExpoPdfAnnotationView as React.ComponentType<
@@ -52,6 +53,7 @@ export type NativePdfAnnotationViewProps = {
   onAnnotationsChanged?: (event: NativePdfAnnotationsChangedEvent) => void;
   onEraserGestureEnded?: (event: NativePdfEraserGestureEndedEvent) => void;
   onTextAnnotationAction?: (event: NativePdfTextAnnotationActionEvent) => void;
+  onViewportDiagnostic?: (event: NativePdfViewportDiagnosticEvent) => void;
 };
 
 export const NATIVE_PDF_ANNOTATION_AVAILABLE = Platform.OS === 'ios';
@@ -80,6 +82,7 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
       onAnnotationsChanged,
       onEraserGestureEnded,
       onTextAnnotationAction,
+      onViewportDiagnostic,
     },
     ref,
   ) {
@@ -125,6 +128,7 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
         onAnnotationsChanged={(event) => onAnnotationsChanged?.(event.nativeEvent)}
         onEraserGestureEnded={(event) => onEraserGestureEnded?.(event.nativeEvent)}
         onTextAnnotationAction={(event) => onTextAnnotationAction?.(event.nativeEvent)}
+        onViewportDiagnostic={(event) => onViewportDiagnostic?.(event.nativeEvent)}
       />
     );
   },

@@ -53,6 +53,7 @@ import type {
   NativePdfAnnotationsChangedEvent,
   NativePdfAnnotationStroke,
   NativePdfTextAnnotationActionEvent,
+  NativePdfViewportDiagnosticEvent,
   NativePdfTextAnnotationsByPage,
   NativePdfViewport,
 } from '@/modules/expo-pdf-annotation';
@@ -282,6 +283,10 @@ export default function LectureMaterialWorkspaceScreen() {
   useEffect(() => {
     if (!doubleTapAvailable) return;
     return addPencilDoubleTapListener(() => {
+      debugMaterialViewport('pencil-double-tap', {
+        mode: nativeAnnotationModeRef.current,
+        nativePage: nativeCurrentPageRef.current,
+      });
       if (useNativePdfViewer) {
         const current = nativeAnnotationModeRef.current;
         if (current === 'pen' || current === 'highlighter') {
@@ -651,6 +656,10 @@ export default function LectureMaterialWorkspaceScreen() {
     scheduleViewportPersist();
   }, [scheduleViewportPersist, showNavigatorBriefly]);
 
+  const handleNativeViewportDiagnostic = useCallback((event: NativePdfViewportDiagnosticEvent) => {
+    debugMaterialViewport('native-forensic', event);
+  }, []);
+
   const handlePdfError = useCallback((err: unknown) => {
     setLoadingPdf(false);
     // Raw technical detail stays in logs; the user sees a localized generic message.
@@ -849,6 +858,12 @@ export default function LectureMaterialWorkspaceScreen() {
       if (!lid || !mid) return;
       const page = Number.isFinite(event.pageNumber) ? event.pageNumber : nativeCurrentPageRef.current;
       if (!Number.isFinite(page) || page <= 0) return;
+      debugMaterialViewport('native-annotation-commit-received', {
+        action: event.action ?? 'add',
+        page,
+        nativePage: nativeCurrentPageRef.current,
+        strokePoints: event.stroke?.points.length,
+      });
 
       const toStoreStroke = (native: NativePdfAnnotationStroke): MaterialAnnotationStroke => ({
         id: native.id,
@@ -867,6 +882,7 @@ export default function LectureMaterialWorkspaceScreen() {
       if (event.action === 'replacePage') {
         const nextStrokes = event.strokes.map(toStoreStroke);
         replaceMaterialPageAnnotationStrokesForMaterial(mid, page, nextStrokes, materialScopeLectureId(mid));
+        debugMaterialViewport('native-annotation-store-update', { action: 'replacePage', page });
         return;
       }
 
@@ -875,6 +891,7 @@ export default function LectureMaterialWorkspaceScreen() {
         ...toStoreStroke(event.stroke),
       };
       addAnnotationStroke(materialReviewMode ? materialScopeLectureId(mid) : lid, mid, page, stroke);
+      debugMaterialViewport('native-annotation-store-update', { action: 'add', page, strokeId: stroke.id });
       ensureTrailingBlankPageAfterContent(page);
     },
     [addAnnotationStroke, ensureTrailingBlankPageAfterContent, materialReviewMode, replaceMaterialPageAnnotationStrokesForMaterial],
@@ -1014,6 +1031,7 @@ export default function LectureMaterialWorkspaceScreen() {
           onLoadComplete={(event) => handlePdfLoadComplete(event.totalPages, event.sourcePageCount)}
           onPageChanged={(event) => handlePdfPageChanged(event.pageNumber)}
           onViewportChanged={handleNativeViewportChanged}
+          onViewportDiagnostic={handleNativeViewportDiagnostic}
           onError={(event) => handlePdfError(new Error(event.message))}
           onAnnotationsChanged={handleNativeAnnotationCommitted}
           onEraserGestureEnded={restoreNativeTemporaryEraserIfNeeded}
