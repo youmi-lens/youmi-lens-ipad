@@ -269,6 +269,9 @@ export type Lecture = {
   /** When the deletion state (delete OR restore) last changed. Drives account-level
    *  deletion merge so a stale snapshot never resurrects a newer decision. */
   deletionUpdatedAt?: string;
+  /** Local delivery state for a soft-delete awaiting canonical cloud confirmation. */
+  deletionSyncState?: 'pending' | 'failed';
+  deletionSyncError?: string;
   /** When the notes were last edited (account-level notes freshness). */
   notesUpdatedAt?: string;
   /** When the marks were last changed (account-level marks freshness). */

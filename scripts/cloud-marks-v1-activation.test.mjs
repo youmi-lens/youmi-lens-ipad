@@ -46,7 +46,15 @@ check('3. createLecture stores marks in local state only (no cloud write at Fini
   assert.doesNotMatch(fn, /supabase|pushRecordingPatch/);
 });
 check('6. cloud marks write is fire-and-forget (pushRecordingPatch is void, never awaited)', () => {
-  const fn = store.slice(store.indexOf('const pushRecordingPatch ='), store.indexOf('const updateLecture ='));
+  // Anchored to pushRecordingPatch's own closing `[currentUserId],\n  );`
+  // rather than the next `const updateLecture =` — that anchor used to be
+  // the very next declaration, but syncLectureDeletion (the Cloud Library
+  // cross-device delete sync, which legitimately DOES `await supabase`) now
+  // sits between them, and the wider slice was wrongly failing this
+  // assertion on code this check was never meant to see.
+  const start = store.indexOf('const pushRecordingPatch =');
+  const end = store.indexOf('[currentUserId],\n  );', start) + '[currentUserId],\n  );'.length;
+  const fn = store.slice(start, end);
   assert.match(fn, /void supabase\s*\.from\('recordings'\)\s*\.update/);
   assert.doesNotMatch(fn, /await supabase/);
 });

@@ -13,7 +13,7 @@
  *
  *   2. The mutation guard: the Course Detail UI must route its delete through
  *      the store's `deleteLectures` (which delegates to the pure helper +
- *      `pushRecordingPatch`). If someone changes the UI to simply hide/filter
+ *      the dedicated atomic deletion writer). If someone changes the UI to simply hide/filter
  *      the cards without calling the canonical soft delete, the first guard
  *      assertion below fails; if someone makes the batch a hard delete, the
  *      tombstone / hard-delete guards fail.
@@ -90,10 +90,11 @@ check('Course Detail never hard-deletes during selection', () => {
   assert.equal(courseDetail.includes('permanentlyDeleteLecture'), false, 'selection delete must never hard-delete');
 });
 
-check('store.deleteLectures delegates to the pure plan + canonical pushRecordingPatch', () => {
+check('store.deleteLectures delegates to the pure plan + dedicated atomic deletion writer', () => {
   const fn = store.slice(store.indexOf('const deleteLectures = useCallback'), store.indexOf('const deleteCourse = useCallback'));
   assert.ok(fn.includes('buildBatchSoftDelete('), 'deleteLectures must build the soft-delete plan');
-  assert.ok(fn.includes('pushRecordingPatch('), 'deleteLectures must push through the canonical remote path');
+  assert.ok(fn.includes('syncLectureDeletion('), 'deleteLectures must atomically deliver canonical deletion fields');
+  assert.equal(fn.includes('pushRecordingPatch('), false, 'delete must not use compatibility field stripping');
 });
 
 check('store.deleteLectures never hard-deletes / tombstones', () => {

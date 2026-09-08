@@ -24,14 +24,18 @@ function DeletedItem({
   title,
   typeLabel,
   deletedAt,
+  deletionSyncState,
   onRestore,
+  onRetryDeletion,
   onPermanentDelete,
 }: {
   icon: IoniconName;
   title: string;
   typeLabel: string;
   deletedAt: string | null;
+  deletionSyncState?: 'pending' | 'failed';
   onRestore: () => void;
+  onRetryDeletion?: () => void;
   onPermanentDelete: () => void;
 }) {
   const { t, language } = useI18n();
@@ -51,7 +55,23 @@ function DeletedItem({
           </Text>
         </View>
       </View>
+      {deletionSyncState === 'failed' ? (
+        <Text style={styles.syncError}>Cloud deletion was not confirmed. Retry before treating this as deleted on other devices.</Text>
+      ) : deletionSyncState === 'pending' ? (
+        <Text style={styles.syncPending}>Confirming deletion across your devices…</Text>
+      ) : null}
       <View style={styles.itemActions}>
+        {deletionSyncState === 'failed' && onRetryDeletion ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Retry cloud deletion for ${title}`}
+            onPress={onRetryDeletion}
+            style={({ pressed }) => [styles.actionBtn, styles.retryBtn, pressed && styles.pressed]}
+          >
+            <Ionicons name="refresh-outline" size={16} color={colors.deepNavy} />
+            <Text style={styles.restoreLabel}>Retry sync</Text>
+          </Pressable>
+        ) : null}
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={t('deleted.restoreItem', { title })}
@@ -83,6 +103,7 @@ export default function RecentlyDeletedScreen() {
     deletedLectures,
     restoreCourse,
     restoreLecture,
+    retryLectureDeletion,
     permanentlyDeleteCourse,
     permanentlyDeleteLecture,
   } = useData();
@@ -178,7 +199,9 @@ export default function RecentlyDeletedScreen() {
                       title={localizeSystemDefaultTitle(t, lecture.title)}
                       typeLabel="Lecture"
                       deletedAt={lecture.deletedAt ?? null}
+                      deletionSyncState={lecture.deletionSyncState}
                       onRestore={() => restoreLecture(lecture.id)}
+                      onRetryDeletion={() => retryLectureDeletion(lecture.id)}
                       onPermanentDelete={() =>
                         confirmPermanentDelete('lecture', lecture.id, lecture.title)
                       }
@@ -256,9 +279,12 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   restoreBtn: { backgroundColor: colors.surface, borderColor: colors.borderStrong },
+  retryBtn: { backgroundColor: colors.iceTint, borderColor: colors.iceBlue },
   restoreLabel: { fontSize: fontSize.sm, fontWeight: '700', color: colors.deepNavy },
   deleteBtn: { backgroundColor: colors.recordingTint, borderColor: colors.recordingTint },
   deleteLabel: { fontSize: fontSize.sm, fontWeight: '700', color: colors.recordingRed },
+  syncError: { fontSize: fontSize.sm, lineHeight: fontSize.sm * 1.4, color: colors.recordingRed, fontWeight: '600' },
+  syncPending: { fontSize: fontSize.sm, lineHeight: fontSize.sm * 1.4, color: colors.textSecondary, fontWeight: '600' },
   emptyCard: { alignItems: 'center', paddingVertical: spacing.xxl },
   emptyIcon: {
     width: 76,

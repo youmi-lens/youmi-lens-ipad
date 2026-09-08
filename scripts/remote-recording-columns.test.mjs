@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 
 import {
   REMOTE_RECORDING_COLUMNS,
+  REMOTE_RECORDING_COLUMNS_DELETION_ONLY,
   REMOTE_RECORDING_COLUMNS_LEGACY,
   REMOTE_RECORDING_COLUMNS_STAGE2_NO_UPDATED_AT,
   REMOTE_RECORDING_COLUMNS_WITHOUT_UPDATED_AT,
@@ -43,14 +44,37 @@ for (const column of [
 }
 assert.doesNotMatch(stagingFallback, /,\s*updated_at\b/, 'bare updated_at must be dropped on staging');
 
-// PRODUCTION (has `updated_at`, no Stage-2 columns): a Stage-2 column error must
-// drop the Stage-2 group but keep updated_at, so production keeps working.
-const prodFallback = remoteRecordingFallbackColumns(
-  'column recordings.course_id does not exist',
+// PRODUCTION, post recording-deletion migration (has `updated_at`, has
+// course_id/deleted_at/deletion_updated_at, lacks the rest of Stage-2):
+// discovered live — the error names whichever missing column PostgREST hits
+// first in SELECT-list order (here, "notes", the first Stage-2 column NOT
+// present), and the fallback must land on the narrower deletion-only Stage-2
+// subset — not drop Stage-2 entirely, which would silently lose the very
+// columns the cross-device delete contract needs.
+const prodFirstFallback = remoteRecordingFallbackColumns(
+  'column recordings.notes does not exist',
   REMOTE_RECORDING_COLUMNS,
 );
-assert.match(prodFallback, /,\s*updated_at\b/, 'production keeps updated_at');
-assert.doesNotMatch(prodFallback, /course_id|deleted_at|marked_timestamps/, 'Stage-2 group dropped on production');
+assert.equal(prodFirstFallback, REMOTE_RECORDING_COLUMNS_DELETION_ONLY);
+assert.match(prodFirstFallback, /,\s*updated_at\b/, 'production keeps updated_at');
+for (const column of ['course_id', 'deleted_at', 'deletion_updated_at']) {
+  assert.match(prodFirstFallback, new RegExp(`\\b${column}\\b`), `${column} must survive the first production fallback`);
+}
+for (const column of ['marked_timestamps', 'title_updated_at', 'notes_updated_at', 'marks_updated_at']) {
+  assert.doesNotMatch(prodFirstFallback, new RegExp(`\\b${column}\\b`), `${column} is genuinely absent and must not be requested`);
+}
+assert.doesNotMatch(prodFirstFallback, /\bnotes\b/, 'bare notes must not be requested — it does not exist on this project');
+
+// If even the narrower deletion-only subset still errors (an environment
+// missing course_id too), the SECOND fallback must drop Stage-2 entirely —
+// this is the one-tier-deeper case the original (now-corrected) test only
+// modeled as a single step.
+const prodSecondFallback = remoteRecordingFallbackColumns(
+  'column recordings.course_id does not exist',
+  REMOTE_RECORDING_COLUMNS_DELETION_ONLY,
+);
+assert.match(prodSecondFallback, /,\s*updated_at\b/, 'production keeps updated_at');
+assert.doesNotMatch(prodSecondFallback, /course_id|deleted_at|marked_timestamps/, 'Stage-2 group dropped entirely on the second fallback');
 
 // Deeper multilingual fallback still reaches LEGACY.
 assert.equal(

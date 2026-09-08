@@ -130,6 +130,8 @@ export type DataContextValue = {
   moveLectureToCourse: (lectureId: string, targetCourseId: string) => boolean;
   /** Soft-delete a lecture — moves it to Recently Deleted; does not destroy data. */
   deleteLecture: (id: string) => void;
+  /** Retry a previously failed canonical soft-delete without touching its content. */
+  retryLectureDeletion: (id: string) => void;
   /**
    * Soft-delete several lectures at once (multi-select). Same soft-delete
    * contract as deleteLecture — deletedAt + deletion_updated_at stamped, and a
@@ -842,10 +844,19 @@ function mergeRemoteRecordingsIntoStore(
       notes: mergedNotes,
       notesUpdatedAt: mergedNotesUpdatedAt,
       noteStrokes: local?.noteStrokes ?? [],
+      // Notes images are LOCAL-ONLY, same as noteStrokes right above — there is
+      // no cloud column for them. Omitting this field silently dropped every
+      // inserted image on the next remote-merge cycle (screen focus/nav fires
+      // this constantly), even though saveNotes() had already persisted it
+      // locally. Same bug class as the Build 50 recordingEngine/audioSegments
+      // fix just above, missed here because noteImages shipped after that fix.
+      noteImages: local?.noteImages ?? [],
       noteUpdatedAt: local?.noteUpdatedAt,
       deletedAt: resolvedDeletion.deletedAt,
       deletionUpdatedAt: resolvedDeletion.deletionUpdatedAt,
       deletedReason: resolvedDeletion.deletedAt ? (local?.deletedReason ?? 'manual') : null,
+      deletionSyncState: resolvedDeletion.source === 'remote' ? undefined : local?.deletionSyncState,
+      deletionSyncError: resolvedDeletion.source === 'remote' ? undefined : local?.deletionSyncError,
       // Recording-engine/recovery provenance is LOCAL-ONLY — there is no
       // cloud column for any of these, so they must be explicitly carried
       // forward from `local` on every merge or they silently vanish the
@@ -1407,6 +1418,59 @@ export function DataProvider({ children }: { children: ReactNode }) {
     [currentUserId],
   );
 
+  // Deletion is the one recording mutation whose successful local appearance
+  // must never be mistaken for successful account-level delivery. Its two
+  // canonical fields are atomic: unlike compatibility writes, neither may be
+  // stripped and reported as a partial success.
+  const syncLectureDeletion = useCallback(async (
+    lectureIds: string[],
+    remoteIds: string[],
+    deletedAt: string,
+    deletionUpdatedAt: string,
+  ) => {
+    if (remoteIds.length === 0) return;
+    if (!currentUserId) {
+      setLectures((prev) => prev.map((lecture) =>
+        lectureIds.includes(lecture.id)
+          ? {
+              ...lecture,
+              deletionSyncState: 'failed',
+              deletionSyncError: 'Sign in to sync this deletion across your devices.',
+            }
+          : lecture,
+      ));
+      return;
+    }
+    const { data, error } = await supabase
+      .from('recordings')
+      .update({ deleted_at: deletedAt, deletion_updated_at: deletionUpdatedAt })
+      .in('id', remoteIds)
+      .eq('user_id', currentUserId)
+      // RLS can make an UPDATE affect zero rows without returning an error.
+      // Read back only ids so an ownership/policy mismatch remains retryable
+      // instead of being misreported as a confirmed cloud deletion.
+      .select('id');
+    if (error || (data ?? []).length !== remoteIds.length) {
+      const message = error?.message ?? 'Cloud deletion was not confirmed for every selected lecture.';
+      setLectures((prev) => prev.map((lecture) =>
+        lectureIds.includes(lecture.id)
+          ? {
+              ...lecture,
+              deletionSyncState: 'failed',
+              deletionSyncError: 'Could not sync this deletion. Retry from Recently Deleted.',
+            }
+          : lecture,
+      ));
+      console.warn('[store] lecture deletion cloud push failed (retryable)', { message });
+      return;
+    }
+    setLectures((prev) => prev.map((lecture) =>
+      lectureIds.includes(lecture.id)
+        ? { ...lecture, deletionSyncState: undefined, deletionSyncError: undefined }
+        : lecture,
+    ));
+  }, [currentUserId]);
+
   const updateLecture = useCallback((id: string, patch: Partial<Lecture>) => {
     const now = new Date().toISOString();
     // Stage 2: typed notes and marks are account-level. When a patch changes
@@ -1619,17 +1683,34 @@ export function DataProvider({ children }: { children: ReactNode }) {
     const remoteId = lecturesRef.current.find((l) => l.id === id)?.remoteRecordingId ?? null;
     setLectures((prev) =>
       prev.map((l) =>
-        l.id === id ? { ...l, deletedAt: now, deletionUpdatedAt: now, deletedReason: 'manual' } : l,
+        l.id === id
+          ? {
+              ...l,
+              deletedAt: now,
+              deletionUpdatedAt: now,
+              deletedReason: 'manual',
+              ...(remoteId ? { deletionSyncState: 'pending' as const, deletionSyncError: undefined } : {}),
+            }
+          : l,
       ),
     );
-    if (remoteId) pushRecordingPatch({ deleted_at: now, deletion_updated_at: now }, [remoteId], 'lecture delete');
-  }, [pushRecordingPatch]);
+    if (remoteId) void syncLectureDeletion([id], [remoteId], now, now);
+  }, [syncLectureDeletion]);
+
+  const retryLectureDeletion = useCallback((id: string) => {
+    const lecture = lecturesRef.current.find((item) => item.id === id);
+    if (!lecture?.remoteRecordingId || !lecture.deletedAt || !lecture.deletionUpdatedAt) return;
+    setLectures((prev) => prev.map((item) =>
+      item.id === id ? { ...item, deletionSyncState: 'pending', deletionSyncError: undefined } : item,
+    ));
+    void syncLectureDeletion([id], [lecture.remoteRecordingId], lecture.deletedAt, lecture.deletionUpdatedAt);
+  }, [syncLectureDeletion]);
 
   // Batch multi-select soft delete. Local-first: snapshot the selected UUIDs
   // from the LIVE ref, stamp the same soft-delete fields deleteLecture uses,
-  // then push ONE remote update (`.in('id', ids)`) — all-or-nothing server-side,
-  // so a partial network failure can never half-delete the batch, and a full
-  // failure leaves the local soft-delete authoritative with no rollback.
+  // then push ONE remote update (`.in('id', ids)`) — all-or-nothing server-side.
+  // A full delivery failure remains visibly retryable; it is never presented as
+  // a confirmed account-level deletion.
   const deleteLectures = useCallback((ids: string[]) => {
     if (!Array.isArray(ids) || ids.length === 0) return;
     const now = new Date().toISOString();
@@ -1639,10 +1720,23 @@ export function DataProvider({ children }: { children: ReactNode }) {
     setLectures((prev) =>
       prev.map((l) => (patchesById.has(l.id) ? { ...l, ...patchesById.get(l.id)! } : l)),
     );
+    const remoteLectureIds = plan.localPatches
+      .filter((patch) => lecturesRef.current.find((lecture) => lecture.id === patch.id)?.remoteRecordingId)
+      .map((patch) => patch.id);
     if (plan.remoteIds.length > 0) {
-      pushRecordingPatch(plan.remotePatch, plan.remoteIds, 'lecture batch delete');
+      setLectures((prev) => prev.map((lecture) =>
+        remoteLectureIds.includes(lecture.id)
+          ? { ...lecture, deletionSyncState: 'pending', deletionSyncError: undefined }
+          : lecture,
+      ));
+      void syncLectureDeletion(
+        remoteLectureIds,
+        plan.remoteIds,
+        plan.remotePatch.deleted_at,
+        plan.remotePatch.deletion_updated_at,
+      );
     }
-  }, [pushRecordingPatch]);
+  }, [syncLectureDeletion]);
 
   const deleteCourse = useCallback(
     (id: string): DeleteCourseResult => {
@@ -2148,6 +2242,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
       updateLecture,
       moveLectureToCourse,
       deleteLecture,
+      retryLectureDeletion,
       deleteLectures,
       deleteCourse,
       restoreCourse,
@@ -2222,7 +2317,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
       clearAnnotationsForPage,
       clearAll,
     }),
-    [visibleStoreReady, currentUserId, activeCourses, activeLectures, refreshCloudLibrary, deletedCourses, deletedLectures, selectedCourseId, createCourse, createLecture, saveInProgressLecture, updateLecture, moveLectureToCourse, deleteLecture, deleteLectures, deleteCourse, restoreCourse, restoreLecture, permanentlyDeleteCourse, permanentlyDeleteLecture, renameCourse, renameLecture, activeMaterials, addMaterial, renameMaterial, updateMaterial, deleteMaterial, activeMaterialLinks, reserveLectureId, linkMaterialToLecture, updateLectureMaterialLink, removeLectureMaterialLink, cleanupOrphanMaterialLinks, activeMaterialAnnotations, saveAnnotationStrokes, replaceMaterialPageAnnotationStrokesForMaterial, replaceMaterialPageTextAnnotationsForMaterial, addAnnotationStroke, undoLastAnnotationStroke, clearAnnotationsForPage, clearAll],
+    [visibleStoreReady, currentUserId, activeCourses, activeLectures, refreshCloudLibrary, deletedCourses, deletedLectures, selectedCourseId, createCourse, createLecture, saveInProgressLecture, updateLecture, moveLectureToCourse, deleteLecture, retryLectureDeletion, deleteLectures, deleteCourse, restoreCourse, restoreLecture, permanentlyDeleteCourse, permanentlyDeleteLecture, renameCourse, renameLecture, activeMaterials, addMaterial, renameMaterial, updateMaterial, deleteMaterial, activeMaterialLinks, reserveLectureId, linkMaterialToLecture, updateLectureMaterialLink, removeLectureMaterialLink, cleanupOrphanMaterialLinks, activeMaterialAnnotations, saveAnnotationStrokes, replaceMaterialPageAnnotationStrokesForMaterial, replaceMaterialPageTextAnnotationsForMaterial, addAnnotationStroke, undoLastAnnotationStroke, clearAnnotationsForPage, clearAll],
   );
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;

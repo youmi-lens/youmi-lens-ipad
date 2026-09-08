@@ -152,9 +152,13 @@ console.log('Write/read wiring — the first client persists what the second cli
 check('D write: lecture rename pushes title + title_updated_at (+updated_at compat)', () => {
   assert.match(store, /pushRecordingPatch\(\s*\{ title: trimmed, title_updated_at: now, updated_at: now \}/);
 });
-check('G/H write: delete & restore push deleted_at + deletion_updated_at', () => {
-  assert.match(store, /pushRecordingPatch\(\{ deleted_at: now, deletion_updated_at: now \}/);        // delete
-  assert.match(store, /pushRecordingPatch\(\{ deleted_at: null, deletion_updated_at: now \}/);       // restore
+check('G write: delete sends deleted_at + deletion_updated_at atomically, with no compatibility field stripping', () => {
+  const deletionWriter = store.slice(store.indexOf('const syncLectureDeletion ='), store.indexOf('const updateLecture ='));
+  assert.match(deletionWriter, /\.update\(\{ deleted_at: deletedAt, deletion_updated_at: deletionUpdatedAt \}\)/);
+  assert.doesNotMatch(deletionWriter, /pushRecordingPatch|delete next\[key\]|retrying without/);
+});
+check('H write: restore preserves the existing explicit deletion freshness write', () => {
+  assert.match(store, /pushRecordingPatch\(\{ deleted_at: null, deletion_updated_at: now \}/);
 });
 check('E/F write: notes & marks push notes/marked_timestamps + their freshness clocks', () => {
   assert.match(store, /cloud\.notes = patch\.notes[\s\S]{0,60}cloud\.notes_updated_at = now/);
