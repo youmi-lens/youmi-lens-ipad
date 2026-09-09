@@ -72,11 +72,15 @@ check('the routing decision is unconditional on id format — not inside a .catc
   assert.match(beforeFirstSupabaseCall, /CANONICAL_COURSE_ID_RE\.test/);
 });
 
-console.log('2 — canonical (UUID) Course delete is byte-for-byte the pre-existing UPDATE path');
-check('canonical branch still only UPDATEs courses, with the original retry-minimal fallback', () => {
-  assert.match(writeCourseDeletion, /\.update\(\{ deleted_at: deletedAt, deletion_updated_at: now, updated_at: now \}\)/);
-  assert.match(writeCourseDeletion, /\.update\(\{ deleted_at: deletedAt \}\)/); // minimal retry, unchanged
+console.log('2 — canonical (UUID) Course delete still only UPDATEs courses, now with a real freshness clock');
+check('canonical branch attempts the full freshness-clock payload first (deleted_at + deletion_updated_at + updated_at)', () => {
+  assert.match(writeCourseDeletion, /attempt\(\{ deleted_at: deletedAt, deletion_updated_at: now, updated_at: now \}, 2\)/);
+  assert.match(writeCourseDeletion, /\.update\(payload\)/);
   assert.match(writeCourseDeletion, /\.eq\('id', courseId\)\s*\.eq\('user_id', userId\)/);
+});
+check('a project genuinely missing one of those columns strips only that column and retries — never both unconditionally', () => {
+  assert.match(writeCourseDeletion, /stripUnknownColumnFromPatch\(payload, error\.message\)/);
+  assert.match(writeCourseDeletion, /attempt\(reduced, tries - 1\)/);
 });
 check('canonical branch never inserts — a UUID course delete cannot create a second row', () => {
   const canonicalOnly = writeCourseDeletion.slice(writeCourseDeletion.indexOf('void supabase'));

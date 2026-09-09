@@ -447,10 +447,14 @@ async function fetchRemoteCoursesForUser(userId: string): Promise<RemoteCourseRo
 const CANONICAL_COURSE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Cloud Library Stage 4: account-level course delete/restore. `deletedAt` is the
-// state (null = active), `now` stamps the freshness clock so a stale ACTIVE
-// snapshot can never resurrect a newer tombstone (deletionSync). Fire-and-forget;
-// on a project without the Stage-4 columns it retries the minimal `deleted_at`
-// write and, failing that (no courses table at all), stays local-only.
+// state (null = active), `now` stamps `deletion_updated_at` — the freshness
+// clock a second device compares against its own cached deletion state (same
+// contract as recordings.deletion_updated_at) so a stale cached DELETE can
+// never shadow a newer explicit RESTORE, and vice versa. Fire-and-forget; the
+// strip-and-retry loop (shared with pushRecordingPatch) drops only whichever
+// column a given project's schema actually lacks — e.g. a project not yet
+// carrying this migration — rather than discarding the freshness clock
+// unconditionally, which used to erase it even on a project that has it.
 //
 // A legacy (non-UUID id) course has no courses row to UPDATE — see
 // writeLegacyCourseDeletion, which gives it one instead of leaving the
@@ -460,22 +464,23 @@ function writeCourseDeletion(userId: string, courseId: string, courseName: strin
     void writeLegacyCourseDeletion(userId, courseName, deletedAt, now);
     return;
   }
-  void supabase
-    .from('courses')
-    .update({ deleted_at: deletedAt, deletion_updated_at: now, updated_at: now })
-    .eq('id', courseId)
-    .eq('user_id', userId)
-    .then(({ error }) => {
-      if (!error) return;
-      void supabase
-        .from('courses')
-        .update({ deleted_at: deletedAt })
-        .eq('id', courseId)
-        .eq('user_id', userId)
-        .then(({ error: e2 }) => {
-          if (e2) console.info('[store] course deletion cloud write skipped (kept local)', { courseId, message: e2.message });
-        });
-    });
+  const attempt = (payload: Record<string, unknown>, tries: number): void => {
+    void supabase
+      .from('courses')
+      .update(payload)
+      .eq('id', courseId)
+      .eq('user_id', userId)
+      .then(({ error }) => {
+        if (!error) return;
+        const reduced = tries > 0 ? stripUnknownColumnFromPatch(payload, error.message) : null;
+        if (reduced) {
+          attempt(reduced, tries - 1);
+        } else {
+          console.info('[store] course deletion cloud write skipped (kept local)', { courseId, message: error.message });
+        }
+      });
+  };
+  attempt({ deleted_at: deletedAt, deletion_updated_at: now, updated_at: now }, 2);
 }
 
 // A legacy course (no courses row, name-derived from recordings.course) has
@@ -1421,11 +1426,14 @@ export function DataProvider({ children }: { children: ReactNode }) {
   // Deletion is the one recording mutation whose successful local appearance
   // must never be mistaken for successful account-level delivery. Its two
   // canonical fields are atomic: unlike compatibility writes, neither may be
-  // stripped and reported as a partial success.
+  // stripped and reported as a partial success. `deletedAt: null` is the same
+  // primitive used in reverse — a RESTORE — so restoreLecture reuses this
+  // instead of the unverified pushRecordingPatch, gaining the same read-back
+  // verification and retryable failure state delete already has.
   const syncLectureDeletion = useCallback(async (
     lectureIds: string[],
     remoteIds: string[],
-    deletedAt: string,
+    deletedAt: string | null,
     deletionUpdatedAt: string,
   ) => {
     if (remoteIds.length === 0) return;
@@ -1779,24 +1787,40 @@ export function DataProvider({ children }: { children: ReactNode }) {
       // Explicit restore stamps a NEW deletion clock so it wins over any stale
       // tombstone on other clients (only an explicit newer restore un-deletes).
       setLectures((prev) =>
-        prev.map((l) => (l.id === id ? { ...l, deletedAt: null, deletionUpdatedAt: now, deletedReason: null } : l)),
+        prev.map((l) => (l.id === id
+          ? {
+              ...l,
+              deletedAt: null,
+              deletionUpdatedAt: now,
+              deletedReason: null,
+              ...(l.remoteRecordingId ? { deletionSyncState: 'pending' as const, deletionSyncError: undefined } : {}),
+            }
+          : l)),
       );
       // A lecture cannot live in a deleted course — restore the parent course
-      // too so the recovered lecture is reachable again in active views.
+      // too so the recovered lecture is reachable again in active views. This
+      // also needs its own cloud write (same freshness-clock contract as an
+      // explicit course restore): without it, the course stays cloud-deleted
+      // forever and a second device keeps hiding the lecture via
+      // deletedCourseIds, even though the lecture's own state synced fine.
       if (target) {
-        setCourses((prev) =>
-          prev.map((c) =>
-            c.id === target.courseId && c.deletedAt
-              ? { ...c, deletedAt: null, deletedReason: null }
-              : c,
-          ),
-        );
+        const course = coursesRef.current.find((c) => c.id === target.courseId);
+        if (course?.deletedAt) {
+          setCourses((prev) =>
+            prev.map((c) =>
+              c.id === target.courseId
+                ? { ...c, deletedAt: null, deletionUpdatedAt: now, deletedReason: null }
+                : c,
+            ),
+          );
+          if (currentUserId) writeCourseDeletion(currentUserId, target.courseId, course.name, null, now);
+        }
         if (target.remoteRecordingId) {
-          pushRecordingPatch({ deleted_at: null, deletion_updated_at: now }, [target.remoteRecordingId], 'lecture restore');
+          void syncLectureDeletion([id], [target.remoteRecordingId], null, now);
         }
       }
     },
-    [lectures, pushRecordingPatch],
+    [lectures, currentUserId, syncLectureDeletion],
   );
 
   // Permanent deletion removes the local record outright, so — unlike a soft
