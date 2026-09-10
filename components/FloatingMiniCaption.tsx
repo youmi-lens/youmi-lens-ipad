@@ -10,6 +10,8 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import Reanimated, { runOnJS, useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { NativeLookupText } from '@/components/NativeLookupText';
@@ -102,9 +104,22 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
     x: Math.max(EDGE_MARGIN, width - LISTENING_PILL_WIDTH - 16),
     y: Math.max(EDGE_MARGIN, height - LISTENING_PILL_HEIGHT - 24),
   });
-  const listeningPillPan = useRef(new Animated.ValueXY(initialListeningPill.current)).current;
+  // Collapsed-pill drag: UI-thread worklet (Reanimated shared values), not
+  // PanResponder. PanResponder's touch handling runs on the JS thread, so
+  // every finger-move event had to round-trip through JS before the native
+  // transform updated — with the popup collapsed, this component still
+  // re-renders every ~250ms (the currentDurationMillis subscription below is
+  // unconditional, above the `if (!panelVisible)` early return), and that
+  // re-render can contend with PanResponder's own JS-thread touch handling
+  // for the same thread, showing up as a small but real drag stutter. A
+  // Gesture.Pan() worklet's onUpdate runs entirely on the UI thread — it
+  // cannot be delayed by JS-thread work at all — so this removes the
+  // stutter's cause rather than just reducing its odds. runOnJS is used only
+  // at gesture end, to commit the settled position and the tap-suppression
+  // flag, exactly matching what onPanResponderRelease/Terminate did before.
+  const listeningPillX = useSharedValue(initialListeningPill.current.x);
+  const listeningPillY = useSharedValue(initialListeningPill.current.y);
   const listeningPillPosRef = useRef({ ...initialListeningPill.current });
-  const listeningPillDragStart = useRef({ x: 0, y: 0 });
   const listeningPillWasDraggedRef = useRef(false);
 
   useEffect(() => {
@@ -183,44 +198,72 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
     });
   }, [height, pan, panelSizeAnim, width]);
 
-  const listeningPillResponder = useMemo(() => {
-    const settle = (dx: number, dy: number) => {
-      const maxX = Math.max(EDGE_MARGIN, width - LISTENING_PILL_WIDTH - EDGE_MARGIN);
-      const maxY = Math.max(EDGE_MARGIN, height - LISTENING_PILL_HEIGHT - EDGE_MARGIN);
-      const next = {
-        x: Math.min(Math.max(listeningPillDragStart.current.x + dx, EDGE_MARGIN), maxX),
-        y: Math.min(Math.max(listeningPillDragStart.current.y + dy, EDGE_MARGIN), maxY),
-      };
-      listeningPillPosRef.current = next;
-      Animated.spring(listeningPillPan, { toValue: next, useNativeDriver: true, friction: 9, tension: 80 }).start();
-    };
-    return PanResponder.create({
-      onStartShouldSetPanResponder: () => false,
-      onMoveShouldSetPanResponder: (_e, g) => Math.abs(g.dx) > 5 || Math.abs(g.dy) > 5,
-      onPanResponderGrant: () => {
-        listeningPillWasDraggedRef.current = true;
-        listeningPillDragStart.current = { ...listeningPillPosRef.current };
-      },
-      onPanResponderMove: (_e, g) => {
-        listeningPillPan.setValue({
-          x: listeningPillDragStart.current.x + g.dx,
-          y: listeningPillDragStart.current.y + g.dy,
-        });
-      },
-      onPanResponderRelease: (_e, g) => {
-        settle(g.dx, g.dy);
-        setTimeout(() => {
-          listeningPillWasDraggedRef.current = false;
-        }, 120);
-      },
-      onPanResponderTerminate: (_e, g) => {
-        settle(g.dx, g.dy);
-        setTimeout(() => {
-          listeningPillWasDraggedRef.current = false;
-        }, 120);
-      },
-    });
-  }, [height, listeningPillPan, width]);
+  // Drag-start snapshot, read/written only inside worklets — a plain closure
+  // variable would not reliably persist across onStart/onUpdate/onFinalize
+  // for the same gesture; a shared value does.
+  const listeningPillStartX = useSharedValue(0);
+  const listeningPillStartY = useSharedValue(0);
+
+  const beginListeningPillDrag = useCallback(() => {
+    listeningPillWasDraggedRef.current = true;
+  }, []);
+
+  // Commits the settled position for anything that reads it outside the
+  // gesture (e.g. a future drag's start snapshot) and clears the tap-
+  // suppression flag after the same 120ms window the previous
+  // implementation used, so a drag-release can't also fire the pill's
+  // onPress.
+  const commitListeningPillDrag = useCallback((x: number, y: number) => {
+    listeningPillPosRef.current = { x, y };
+    setTimeout(() => {
+      listeningPillWasDraggedRef.current = false;
+    }, 120);
+  }, []);
+
+  const listeningPillGesture = useMemo(() => {
+    const maxX = Math.max(EDGE_MARGIN, width - LISTENING_PILL_WIDTH - EDGE_MARGIN);
+    const maxY = Math.max(EDGE_MARGIN, height - LISTENING_PILL_HEIGHT - EDGE_MARGIN);
+    return Gesture.Pan()
+      .minDistance(5)
+      .onStart(() => {
+        'worklet';
+        listeningPillStartX.value = listeningPillX.value;
+        listeningPillStartY.value = listeningPillY.value;
+        runOnJS(beginListeningPillDrag)();
+      })
+      .onUpdate((event) => {
+        'worklet';
+        // Unclamped during the drag itself, exactly like the previous
+        // PanResponder implementation — only the settled release position
+        // below is clamped into bounds.
+        listeningPillX.value = listeningPillStartX.value + event.translationX;
+        listeningPillY.value = listeningPillStartY.value + event.translationY;
+      })
+      // Fires exactly once whether the gesture ends normally or is
+      // cancelled — the same "settle" the old code ran from both
+      // onPanResponderRelease and onPanResponderTerminate.
+      .onFinalize((event) => {
+        'worklet';
+        const nextX = Math.min(Math.max(listeningPillStartX.value + event.translationX, EDGE_MARGIN), maxX);
+        const nextY = Math.min(Math.max(listeningPillStartY.value + event.translationY, EDGE_MARGIN), maxY);
+        listeningPillX.value = withSpring(nextX, { damping: 14, stiffness: 140, mass: 1 });
+        listeningPillY.value = withSpring(nextY, { damping: 14, stiffness: 140, mass: 1 });
+        runOnJS(commitListeningPillDrag)(nextX, nextY);
+      });
+  }, [
+    height,
+    width,
+    listeningPillX,
+    listeningPillY,
+    listeningPillStartX,
+    listeningPillStartY,
+    beginListeningPillDrag,
+    commitListeningPillDrag,
+  ]);
+
+  const listeningPillAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: listeningPillX.value }, { translateY: listeningPillY.value }],
+  }));
 
   const captionsLive = status === 'active' || status === 'listening';
   const latestFinalEnglish = latestFinalLine?.text ?? captionLines[captionLines.length - 1]?.text ?? '';
@@ -361,24 +404,23 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
 
   if (!panelVisible) {
     return (
-      <Animated.View
-        style={[styles.listeningPillWrap, { transform: listeningPillPan.getTranslateTransform() }]}
-        {...listeningPillResponder.panHandlers}
-      >
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={t('mini.showCaptions')}
-          onPress={() => {
-            if (listeningPillWasDraggedRef.current) return;
-            setPanelVisible(true);
-          }}
-          style={({ pressed }) => [styles.listeningPill, pressed && styles.pressed]}
-        >
-          <View style={styles.listeningDot} />
-          <Text style={styles.listeningPillLabel}>{t('mini.listening')}</Text>
-          <Ionicons name="chevron-up" size={15} color={colors.textOnNavyMuted} />
-        </Pressable>
-      </Animated.View>
+      <GestureDetector gesture={listeningPillGesture}>
+        <Reanimated.View style={[styles.listeningPillWrap, listeningPillAnimatedStyle]}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={t('mini.showCaptions')}
+            onPress={() => {
+              if (listeningPillWasDraggedRef.current) return;
+              setPanelVisible(true);
+            }}
+            style={({ pressed }) => [styles.listeningPill, pressed && styles.pressed]}
+          >
+            <View style={styles.listeningDot} />
+            <Text style={styles.listeningPillLabel}>{t('mini.listening')}</Text>
+            <Ionicons name="chevron-up" size={15} color={colors.textOnNavyMuted} />
+          </Pressable>
+        </Reanimated.View>
+      </GestureDetector>
     );
   }
 
