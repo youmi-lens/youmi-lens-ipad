@@ -35,6 +35,11 @@ assert.match(
 );
 assert.match(
   sources,
+  /lastInterruption = "checkpoint_begin_segment_failed"/,
+  'a failed next-segment open during checkpoint rollover must be distinguishably tagged for JS',
+);
+assert.match(
+  sources,
   /Do not publishStatus: a successful checkpoint must stay invisible to JS/,
   'successful checkpoints must document no JS status publish',
 );

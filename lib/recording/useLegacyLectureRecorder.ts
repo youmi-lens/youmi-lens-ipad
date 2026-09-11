@@ -122,6 +122,7 @@ export function useLegacyLectureRecorder(enabled: boolean): LectureRecorder {
   return {
     engine: 'legacy', permissionChecked, permissionStatus, recoveryChecked: true,
     recoverableSession: null, isRecording: recorderState.isRecording, isPaused,
+    degradedReason: null,
     durationMillis: recorderState.durationMillis, recordingUri, error, errorDetail,
     requestPermission, startRecording, pauseRecording, resumeRecording, stopRecording,
     leaveRecording: stopRecording,

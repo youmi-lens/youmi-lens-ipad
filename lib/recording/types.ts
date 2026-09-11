@@ -12,6 +12,16 @@ export type LectureRecorder = {
   recoverableSession: DurableRecordingSession | null;
   isRecording: boolean;
   isPaused: boolean;
+  /**
+   * Non-null only while paused for a reason the owner didn't choose — a
+   * checkpoint rollover failing to open its next segment, an
+   * AVAudioSession interruption, or a route change forcing a pause. A
+   * short, stable reason code (e.g. `checkpoint_begin_segment_failed`),
+   * never raw native error text — safe to show or log in any build. Null
+   * for an ordinary user-initiated pause, and always null for the legacy
+   * engine (which has no forced-pause concept of its own).
+   */
+  degradedReason: string | null;
   durationMillis: number;
   recordingUri: string | null;
   error: string | null;

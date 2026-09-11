@@ -39,6 +39,7 @@ import { useRecordingNotes } from '@/lib/recordingNotes';
 import { useData } from '@/lib/store';
 import { useRolloutEligibility } from '@/lib/recording/useRolloutEligibility';
 import { useLectureRecorder } from '@/lib/useLectureRecorder';
+import { useUnresolvedRecordingGuard } from '@/lib/recording/useUnresolvedRecordingGuard';
 import { resolveCaptionAreaState, recordingControlsEnabled } from '@/lib/lectureStartupState.mjs';
 import {
   captionsToTranscript,
@@ -116,6 +117,42 @@ export default function RecordingScreen() {
   // One stable lecture identity owns both the local draft and (when gated on)
   // exactly one native durable recording session.
   const [pendingLectureId] = useState(() => resumeLecture?.id ?? reserveLectureId());
+
+  // P0 identity-safety guard: only meaningful for the param-less "start
+  // fresh" path (no explicit lectureId) — an explicit reopen is always
+  // authoritative and already goes through the normal per-lecture recovery
+  // lookup below. See useUnresolvedRecordingGuard's own doc comment for why.
+  const unresolvedGuard = useUnresolvedRecordingGuard(!isResume && !isGuest && !visualFixture, pendingLectureId);
+  const unresolvedGuardHandledRef = useRef(false);
+  useEffect(() => {
+    if (isResume || isGuest || visualFixture) return;
+    if (!unresolvedGuard.checked || unresolvedGuardHandledRef.current) return;
+    if (unresolvedGuard.singleMatch) {
+      const matchedLectureId = unresolvedGuard.singleMatch.lectureId;
+      const matchedLecture = lectures.find((l) => l.id === matchedLectureId);
+      // Never resurrect a deleted or already-finished lecture by reattaching
+      // to it — only redirect when the matched lectureId is either not yet
+      // known locally (the durable session predates its first JS-side
+      // autosave) or is a genuinely still-in-progress, non-deleted lecture.
+      const safeToRedirect = !matchedLecture || (!matchedLecture.deletedAt && matchedLecture.status === 'in_progress');
+      if (safeToRedirect) {
+        unresolvedGuardHandledRef.current = true;
+        router.replace({ pathname: '/recording', params: { lectureId: matchedLectureId } });
+        return;
+      }
+    }
+    if (unresolvedGuard.ambiguous) {
+      // More than one real unresolved recording exists — never guess which
+      // one to reattach. Block this fresh recording and send the owner back
+      // to resolve them from their course pages.
+      unresolvedGuardHandledRef.current = true;
+      Alert.alert(
+        t('recording.multipleUnresolvedTitle'),
+        t('recording.multipleUnresolvedBody'),
+        [{ text: t('common.ok'), onPress: () => router.back() }],
+      );
+    }
+  }, [isResume, isGuest, visualFixture, unresolvedGuard, lectures, router, t]);
 
   const {
     engine: recordingEngine,
@@ -523,6 +560,12 @@ export default function RecordingScreen() {
     // Resumed lecture: wait for the existing central Pause/Continue control
     // before the recorder/mic/captions start, so opening it is a safe review.
     if (isResume && !continueRequested) return;
+    // Do not silently start a brand-new recording while a real, unresolved
+    // recoverable session belongs to another lecture — wait for the guard to
+    // resolve, and never proceed if it found something (the effect above
+    // handles redirecting/blocking in that case). See
+    // useUnresolvedRecordingGuard.
+    if (!isResume && (!unresolvedGuard.checked || unresolvedGuard.singleMatch || unresolvedGuard.ambiguous)) return;
     autoStarted.current = true;
     void startRecording().then((started) => {
       if (__DEV__) console.info('[recording] automatic local recording result', { started });
@@ -533,7 +576,7 @@ export default function RecordingScreen() {
     });
   // The recorder and caption starters intentionally run once after permission resolves.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visualFixture, granted, isGuest, isResume, continueRequested, contentPreferencesLoaded, recoveryChecked, recoverableSession]);
+  }, [visualFixture, granted, isGuest, isResume, continueRequested, contentPreferencesLoaded, recoveryChecked, recoverableSession, unresolvedGuard]);
 
   // Keep this fresh for the mount-once AppState listener below.
   isRecordingRef.current = isRecording;
@@ -1204,10 +1247,19 @@ export default function RecordingScreen() {
                 ) : captionAreaState === 'captions_connecting' ? (
                   <Text style={styles.stateBody}>{t('recording.connectingCaptions')}</Text>
                 ) : captionAreaState === 'captions_unavailable' ? (
-                  // Only reachable while audio is active — the copy is accurate.
+                  // Reachable while audio is active OR while a native forced
+                  // pause (checkpoint rollover failure, interruption, route
+                  // change) has since stopped capture without this state
+                  // re-resolving — isRecording is checked directly at render
+                  // so the "still active" claim is never shown when it's
+                  // false. This is the P0 fix: the copy used to assume audio
+                  // was always active here, which is exactly what silently
+                  // broke down during the checkpoint-rollover incident.
                   <View style={styles.captionFallback}>
                     <Text style={styles.stateBody}>
-                      {micStreamError ?? liveCaptionError ?? t('recording.captionsUnavailable')}
+                      {isRecording
+                        ? (micStreamError ?? liveCaptionError ?? t('recording.captionsUnavailable'))
+                        : t('recording.captionsUnavailablePaused')}
                     </Text>
                     <SecondaryButton
                       label={t('recording.retryCaptions')}

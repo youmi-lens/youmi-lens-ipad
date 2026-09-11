@@ -576,6 +576,12 @@ final class DurableForegroundRecorder {
       }
       runtimeState = .paused
       audioSession.deactivate()
+      // Distinguishable from a plain user pause or an AVAudioSession
+      // interruption/route change — JS uses this to show a clear "checkpoint
+      // failed, tap Resume" recovery state instead of an ordinary paused UI.
+      // The committed segments up to (and including) this checkpoint are
+      // untouched; only the NEXT segment failed to open.
+      lastInterruption = "checkpoint_begin_segment_failed"
       let session = try? store.getSession(recordingSessionId: recordingSessionId)
       _ = publishStatus(session: session)
       throw error
@@ -642,9 +648,50 @@ final class DurableForegroundRecorder {
     }
   }
 
+  /// True only when the currently-owned session (if any) is safe to
+  /// silently release in favor of a different session's claim.
+  ///
+  /// Deliberately narrow: only `.paused` and `.interrupted` qualify — a
+  /// session sitting there with nothing currently happening to it. Every
+  /// OTHER non-recording state (`.preparing`, `.ready`, `.pausing`,
+  /// `.resuming`, `.stopping`) is mid-lifecycle-transition — about to
+  /// become active, or in the middle of becoming inactive — and pre-empting
+  /// those would race the very operation already in flight for that owner
+  /// (this is exactly what testOwnershipAndStartFailure guards: preparing a
+  /// SECOND session while the first is merely `.ready`, not yet recording,
+  /// must still be rejected as recorderBusy). `.recording` — genuinely
+  /// active capture — is the hard conflict the product invariant "only one
+  /// session may actively capture at a time" exists to protect, and
+  /// claim/claimForFinalization still throw `.recorderBusy` for it,
+  /// unchanged. `.idle`/`.failed` mean there is effectively no live owner
+  /// to protect either way.
+  ///
+  /// A `.paused`/`.interrupted` owner has already safely committed
+  /// everything it's going to for now. Releasing it here touches no
+  /// segments, no metadata, nothing on disk; it only clears this in-memory
+  /// pointer, exactly what a cold process relaunch already does today (see
+  /// claimForFinalization's own doc comment below) — so the released
+  /// session's OWN later Resume/Finish can re-claim it the same way
+  /// recovery already works after a relaunch. Without this, a single paused
+  /// lecture permanently deadlocked every OTHER in-progress lecture in the
+  /// app for the remaining lifetime of the process: opening any of them
+  /// correctly found a real, recoverable session, but Resume always failed
+  /// with `.recorderBusy` — "I found your unfinished recording, but I
+  /// cannot let you continue it."
+  private var currentOwnerIsSafeToRelease: Bool {
+    guard ownedSessionId != nil else { return false }
+    switch runtimeState {
+    case .paused, .interrupted, .idle, .failed:
+      return true
+    case .preparing, .ready, .recording, .pausing, .resuming, .stopping:
+      return false
+    }
+  }
+
   private func claim(_ recordingSessionId: String) throws {
     if let ownedSessionId, ownedSessionId != recordingSessionId {
-      throw DurableRecorderCoreError.recorderBusy
+      guard currentOwnerIsSafeToRelease else { throw DurableRecorderCoreError.recorderBusy }
+      releaseOwnership()
     }
     ownedSessionId = recordingSessionId
   }
@@ -660,8 +707,11 @@ final class DurableForegroundRecorder {
   ///
   /// After a cold relaunch the process has no `ownedSessionId`, but a paused
   /// (or already-finalizing) session may still have valid committed segments.
-  /// Finish must be able to claim those sessions. A different live owner, or
-  /// any active capture owned by another path, remains a hard conflict.
+  /// Finish must be able to claim those sessions. A genuinely live owner
+  /// (actively recording) remains a hard conflict; a different owner that is
+  /// merely paused is safely released first — same rule as `claim` above,
+  /// see `currentOwnerIsSafeToRelease`'s doc comment. Any active capture
+  /// owned by another path is still a hard conflict regardless.
   private func claimForFinalization(
     _ recordingSessionId: String,
     session: DurableRecordingSession
@@ -670,7 +720,8 @@ final class DurableForegroundRecorder {
       return
     }
     if ownedSessionId != nil {
-      throw DurableRecorderCoreError.recorderBusy
+      guard currentOwnerIsSafeToRelease else { throw DurableRecorderCoreError.recorderBusy }
+      releaseOwnership()
     }
     guard activeCapture == nil else {
       throw DurableRecorderCoreError.recorderBusy

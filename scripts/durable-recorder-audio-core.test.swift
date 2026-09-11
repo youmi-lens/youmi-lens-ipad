@@ -657,6 +657,304 @@ private func testInvalidCheckpointOutput() async throws {
   }
 }
 
+private func testCheckpointBeginSegmentFailurePreservesAudio() async throws {
+  let root = temporaryRoot("checkpoint-begin-fail")
+  defer { try? FileManager.default.removeItem(at: root) }
+  let (store, engine, audioSession, factory, _) = try makeEngine(root: root)
+  var payloads: [[String: Any]] = []
+  engine.onStatusChange = { payloads.append($0) }
+
+  let session = try store.createSession(lectureId: "lecture-checkpoint-begin-fail")
+  try await prepare(engine, sessionId: session.recordingSessionId)
+  _ = try engine.startRecording(recordingSessionId: session.recordingSessionId)
+  let publishCount = payloads.count
+
+  // The commit half of the rollover (finalizeActiveSegment) must succeed;
+  // only the SECOND half (beginSegment for the next segment) fails — this is
+  // the exact P0 incident: segment N committed, segment N+1 never opened.
+  factory.failNext = true
+  do {
+    try engine.performCheckpointForTesting()
+    throw AudioTestFailure(description: "A forced beginSegment failure during checkpoint succeeded")
+  } catch is AudioTestFailure {
+    throw AudioTestFailure(description: "A forced beginSegment failure during checkpoint succeeded")
+  } catch {
+    let after = try store.getSession(recordingSessionId: session.recordingSessionId)
+    try require(after.state == .paused, "A failed beginSegment during checkpoint must leave the session paused")
+    try require(after.segments.count == 1, "The already-committed checkpoint segment must be preserved")
+    try require(
+      after.segments[0].interruptionReason == "checkpoint",
+      "The preserved segment must still carry its checkpoint reason"
+    )
+    try require(payloads.count == publishCount + 1, "A failed rollover must publish exactly one authoritative status")
+    let published = payloads.last!
+    try require((published["runtimeState"] as? String) == "paused", "UI must stop claiming recording after a failed rollover")
+    try require(
+      (published["interruptionState"] as? String) == "checkpoint_begin_segment_failed",
+      "A failed rollover must be distinguishable from a plain interruption or route change"
+    )
+    try require(
+      ((published["session"] as? [String: Any])?["state"] as? String) == "paused",
+      "Published status must reflect the paused session"
+    )
+    try require(engine.getRecordingStatus()["activeSegmentId"] as? String == nil, "No active capture after a failed rollover")
+    try require(audioSession.deactivationCount > 0, "A failed rollover must deactivate the audio session")
+  }
+}
+
+private func testResumeAfterFailedCheckpointRollover() async throws {
+  let root = temporaryRoot("checkpoint-begin-fail-resume")
+  defer { try? FileManager.default.removeItem(at: root) }
+  let (store, engine, _, factory, _) = try makeEngine(root: root)
+  let session = try store.createSession(lectureId: "lecture-checkpoint-begin-fail-resume")
+  try await prepare(engine, sessionId: session.recordingSessionId)
+  _ = try engine.startRecording(recordingSessionId: session.recordingSessionId)
+
+  factory.failNext = true
+  do {
+    try engine.performCheckpointForTesting()
+    throw AudioTestFailure(description: "A forced beginSegment failure during checkpoint succeeded")
+  } catch is AudioTestFailure {
+    throw AudioTestFailure(description: "A forced beginSegment failure during checkpoint succeeded")
+  } catch {
+    // Expected — proven by testCheckpointBeginSegmentFailurePreservesAudio.
+  }
+  let paused = try store.getSession(recordingSessionId: session.recordingSessionId)
+  try require(paused.state == .paused && paused.segments.count == 1, "Precondition: one committed segment, paused")
+
+  // Resume must retry opening the NEXT segment on the SAME session — not
+  // create a new one — and must leave the already-committed segment intact.
+  _ = try engine.resumeRecording(recordingSessionId: session.recordingSessionId)
+  let resumed = try store.getSession(recordingSessionId: session.recordingSessionId)
+  try require(resumed.state == .recording, "Resume after a failed rollover must return to recording")
+  try require(resumed.segments == paused.segments, "Resume must not alter the already-committed segment")
+  try require(resumed.recordingSessionId == session.recordingSessionId, "Resume must reattach to the SAME session")
+  let status = engine.getRecordingStatus()
+  try require((status["activeSegmentId"] as? String) != nil, "Resume must open a new active segment")
+  try require(
+    (status["activeSegmentId"] as? String) != paused.segments[0].segmentId,
+    "The new active segment must not reuse the committed one's identity"
+  )
+
+  try engine.performCheckpointForTesting()
+  let after = try store.getSession(recordingSessionId: session.recordingSessionId)
+  try require(after.segments.map(\.sequence) == [1, 2], "A subsequent checkpoint must extend the same session")
+}
+
+private func testFinishAfterFailedCheckpointRollover() async throws {
+  let root = temporaryRoot("checkpoint-begin-fail-finish")
+  defer { try? FileManager.default.removeItem(at: root) }
+  let (store, engine, _, factory, _) = try makeEngine(root: root)
+  let session = try store.createSession(lectureId: "lecture-checkpoint-begin-fail-finish")
+  try await prepare(engine, sessionId: session.recordingSessionId)
+  _ = try engine.startRecording(recordingSessionId: session.recordingSessionId)
+
+  factory.failNext = true
+  do {
+    try engine.performCheckpointForTesting()
+    throw AudioTestFailure(description: "A forced beginSegment failure during checkpoint succeeded")
+  } catch is AudioTestFailure {
+    throw AudioTestFailure(description: "A forced beginSegment failure during checkpoint succeeded")
+  } catch {
+    // Expected.
+  }
+  let paused = try store.getSession(recordingSessionId: session.recordingSessionId)
+  try require(paused.segments.count == 1, "Precondition: one committed segment")
+
+  // Finish must still be able to finalize the segment(s) already committed
+  // before the failed rollover — no data loss just because the NEXT
+  // segment never opened.
+  _ = try engine.stopRecording(recordingSessionId: session.recordingSessionId)
+  let finalized = try store.getSession(recordingSessionId: session.recordingSessionId)
+  try require(finalized.state == .finalized, "Finish after a failed rollover must still finalize")
+  try require(finalized.segments == paused.segments, "Finish must not lose or alter the committed segment")
+  try require(finalized.segments.count == 1, "Finish must not invent a phantom second segment")
+}
+
+// P0 — cross-lecture ownership: a paused session must never permanently
+// deadlock every OTHER in-progress lecture in the app. Real incident: four
+// separate Hhh lectures each had their own real, recoverable durable
+// session — but only the FIRST one ever paused could be resumed; every
+// other one's Resume/Finish failed with recorderBusy ("Another durable
+// recording session already owns the native recorder"), because pausing a
+// session never released `ownedSessionId` — only Finish/discard/a cold
+// process relaunch did.
+
+private func testPausedOwnerReleasedForDifferentSessionResume() async throws {
+  let root = temporaryRoot("ownership-paused-release")
+  defer { try? FileManager.default.removeItem(at: root) }
+  let (store, engine, _, _, _) = try makeEngine(root: root)
+  let lectureA = try store.createSession(lectureId: "lecture-ownership-a")
+  let lectureB = try store.createSession(lectureId: "lecture-ownership-b")
+
+  try await prepare(engine, sessionId: lectureA.recordingSessionId)
+  _ = try engine.startRecording(recordingSessionId: lectureA.recordingSessionId)
+  _ = try engine.pauseRecording(recordingSessionId: lectureA.recordingSessionId)
+  let pausedA = try store.getSession(recordingSessionId: lectureA.recordingSessionId)
+  try require(pausedA.state == .paused && pausedA.segments.count == 1, "Precondition: A paused with one segment")
+
+  // Before the fix, THIS is exactly where a real owner opened lecture B,
+  // hit Resume, and got "Could not resume the recording." with no way out.
+  try await prepare(engine, sessionId: lectureB.recordingSessionId)
+  _ = try engine.startRecording(recordingSessionId: lectureB.recordingSessionId)
+  let recordingB = try store.getSession(recordingSessionId: lectureB.recordingSessionId)
+  try require(recordingB.state == .recording, "B must be able to start despite A merely being paused")
+
+  // A's segment must be completely untouched — released, never discarded.
+  let untouchedA = try store.getSession(recordingSessionId: lectureA.recordingSessionId)
+  try require(untouchedA == pausedA, "Releasing A's ownership must not mutate A's own session/segments at all")
+
+  _ = try engine.pauseRecording(recordingSessionId: lectureB.recordingSessionId)
+  let pausedB = try store.getSession(recordingSessionId: lectureB.recordingSessionId)
+  try require(pausedB.segments.count == 1, "Precondition: B paused with one segment")
+
+  // Reopening A afterward must still resume A's OWN session — ownership
+  // transfer must be a two-way street, not a one-shot escape hatch.
+  _ = try engine.resumeRecording(recordingSessionId: lectureA.recordingSessionId)
+  let resumedA = try store.getSession(recordingSessionId: lectureA.recordingSessionId)
+  try require(resumedA.state == .recording, "A must be resumable again after B released it back")
+  try engine.performCheckpointForTesting()
+  let afterA = try store.getSession(recordingSessionId: lectureA.recordingSessionId)
+  try require(afterA.segments.map(\.sequence) == [1, 2], "A's resumed segment must extend A's own session")
+
+  // B must still be exactly as A left it — preserved, not corrupted, not
+  // silently finalized or discarded by A reclaiming ownership.
+  let untouchedB = try store.getSession(recordingSessionId: lectureB.recordingSessionId)
+  try require(untouchedB == pausedB, "Releasing B's ownership back to A must not mutate B's own session/segments")
+}
+
+private func testActiveOwnerStillBlocksDifferentSessionClaim() async throws {
+  let root = temporaryRoot("ownership-active-blocks")
+  defer { try? FileManager.default.removeItem(at: root) }
+  let (store, engine, _, _, _) = try makeEngine(root: root)
+  let lectureA = try store.createSession(lectureId: "lecture-ownership-active-a")
+  let lectureB = try store.createSession(lectureId: "lecture-ownership-active-b")
+
+  try await prepare(engine, sessionId: lectureA.recordingSessionId)
+  _ = try engine.startRecording(recordingSessionId: lectureA.recordingSessionId)
+  let recordingA = try store.getSession(recordingSessionId: lectureA.recordingSessionId)
+  try require(recordingA.state == .recording, "Precondition: A is genuinely, actively recording")
+
+  // A GENUINELY active recording must never be silently pre-empted — this
+  // is the one case the fix must NOT relax.
+  do {
+    try await prepare(engine, sessionId: lectureB.recordingSessionId)
+    throw AudioTestFailure(description: "A second session claimed the recorder while the first was actively recording")
+  } catch is AudioTestFailure {
+    throw AudioTestFailure(description: "A second session claimed the recorder while the first was actively recording")
+  } catch let error as DurableRecorderCoreError {
+    try require(error == .recorderBusy, "An actively-recording owner must still reject a different session's claim")
+  }
+  let stillRecordingA = try store.getSession(recordingSessionId: lectureA.recordingSessionId)
+  try require(stillRecordingA.state == .recording, "A must be completely unaffected by B's rejected claim attempt")
+}
+
+private func testReadyOwnerStillBlocksDifferentSessionClaim() async throws {
+  // Regression guard for the exact scenario testOwnershipAndStartFailure
+  // already covers — proving the NEW release logic did not widen the
+  // releasable-state set beyond paused/interrupted. A session merely
+  // `.ready` (prepared, not yet started) is mid-lifecycle, not "resting",
+  // and must still block a different session's claim.
+  let root = temporaryRoot("ownership-ready-blocks")
+  defer { try? FileManager.default.removeItem(at: root) }
+  let (store, engine, _, _, _) = try makeEngine(root: root)
+  let lectureA = try store.createSession(lectureId: "lecture-ownership-ready-a")
+  let lectureB = try store.createSession(lectureId: "lecture-ownership-ready-b")
+  try await prepare(engine, sessionId: lectureA.recordingSessionId)
+
+  do {
+    try await prepare(engine, sessionId: lectureB.recordingSessionId)
+    throw AudioTestFailure(description: "A second session claimed the recorder while the first was merely ready")
+  } catch is AudioTestFailure {
+    throw AudioTestFailure(description: "A second session claimed the recorder while the first was merely ready")
+  } catch let error as DurableRecorderCoreError {
+    try require(error == .recorderBusy, "A ready-but-not-recording owner must still reject a different session's claim")
+  }
+}
+
+private func testFinishAcrossPausedOwner() async throws {
+  let root = temporaryRoot("ownership-finish-across-paused")
+  defer { try? FileManager.default.removeItem(at: root) }
+  let (store, engine, _, _, _) = try makeEngine(root: root)
+  let lectureA = try store.createSession(lectureId: "lecture-ownership-finish-a")
+  let lectureB = try store.createSession(lectureId: "lecture-ownership-finish-b")
+
+  try await prepare(engine, sessionId: lectureA.recordingSessionId)
+  _ = try engine.startRecording(recordingSessionId: lectureA.recordingSessionId)
+  _ = try engine.pauseRecording(recordingSessionId: lectureA.recordingSessionId)
+  let pausedA = try store.getSession(recordingSessionId: lectureA.recordingSessionId)
+
+  // Finish on B (never even started/prepared, cold) must not be blocked by
+  // A merely holding ownership while paused.
+  try await prepare(engine, sessionId: lectureB.recordingSessionId)
+  _ = try engine.startRecording(recordingSessionId: lectureB.recordingSessionId)
+  _ = try engine.stopRecording(recordingSessionId: lectureB.recordingSessionId)
+  let finalizedB = try store.getSession(recordingSessionId: lectureB.recordingSessionId)
+  try require(finalizedB.state == .finalized, "Finish must succeed for B despite A merely holding ownership while paused")
+
+  let untouchedA = try store.getSession(recordingSessionId: lectureA.recordingSessionId)
+  try require(untouchedA == pausedA, "Finishing B must not touch A's preserved segments/state at all")
+}
+
+private func testFourLectureOwnershipCycling() async throws {
+  // Directly represents the owner's real condition: four separate
+  // paused/recoverable lectures, each with its own committed segment,
+  // cycling which one currently owns the recorder — proving ownership
+  // transfer never corrupts any of the other three's data.
+  let root = temporaryRoot("ownership-four-lectures")
+  defer { try? FileManager.default.removeItem(at: root) }
+  let (store, engine, _, _, _) = try makeEngine(root: root)
+  let lectures = try (["a", "b", "c", "d"]).map { try store.createSession(lectureId: "lecture-four-\($0)") }
+
+  for lecture in lectures {
+    try await prepare(engine, sessionId: lecture.recordingSessionId)
+    _ = try engine.startRecording(recordingSessionId: lecture.recordingSessionId)
+    _ = try engine.pauseRecording(recordingSessionId: lecture.recordingSessionId)
+  }
+  // Every lecture must independently show exactly one committed segment —
+  // creating/pausing D must not have disturbed A, B, or C at all.
+  for lecture in lectures {
+    let session = try store.getSession(recordingSessionId: lecture.recordingSessionId)
+    try require(session.state == .paused && session.segments.count == 1, "\(lecture.lectureId) must be paused with its own single segment")
+  }
+
+  // Resume each one in turn (not necessarily in creation order) and prove
+  // every other one stays exactly as it was. Tracks each lecture's expected
+  // segment count explicitly (1 until its own turn, 2 after) rather than
+  // assuming an order, so a regression in ANY lecture's isolation is caught
+  // precisely, not just "something changed."
+  var expectedSegmentCount = [String: Int](uniqueKeysWithValues: lectures.map { ($0.recordingSessionId, 1) })
+  let resumeOrder = [2, 0, 3, 1] // C, A, D, B
+  for index in resumeOrder {
+    let target = lectures[index]
+    _ = try engine.resumeRecording(recordingSessionId: target.recordingSessionId)
+    let resumed = try store.getSession(recordingSessionId: target.recordingSessionId)
+    try require(resumed.state == .recording, "\(target.lectureId) must resume regardless of which lecture currently held ownership")
+    _ = try engine.pauseRecording(recordingSessionId: target.recordingSessionId)
+    let afterCycle = try store.getSession(recordingSessionId: target.recordingSessionId)
+    try require(afterCycle.segments.count == 2, "\(target.lectureId) must have gained exactly one more committed segment")
+    expectedSegmentCount[target.recordingSessionId] = 2
+
+    for other in lectures {
+      let session = try store.getSession(recordingSessionId: other.recordingSessionId)
+      try require(session.state == .paused, "\(other.lectureId) must be paused after this cycle, regardless of whose turn it was")
+      try require(
+        session.segments.count == expectedSegmentCount[other.recordingSessionId],
+        "\(other.lectureId) must have exactly its own expected segment count — untouched unless it was THIS cycle's target"
+      )
+    }
+  }
+
+  // Final sanity: total segment count across all four must equal exactly
+  // (1 initial + 1 resumed) each — no lecture was silently dropped, merged,
+  // or duplicated across the whole cycling sequence.
+  for lecture in lectures {
+    let session = try store.getSession(recordingSessionId: lecture.recordingSessionId)
+    try require(session.segments.count == 2, "\(lecture.lectureId) must end with exactly 2 segments — its original plus its one resume")
+    try require(session.segments.map(\.sequence) == [1, 2], "\(lecture.lectureId)'s segment sequence must stay contiguous and its own")
+  }
+}
+
 private func testCheckpointStatusListenerRegression() async throws {
   let root = temporaryRoot("checkpoint-listener")
   defer { try? FileManager.default.removeItem(at: root) }
@@ -756,6 +1054,14 @@ private enum DurableRecorderAudioTestRunner {
     try await testForcedPauseCheckpointRace()
     try await testStaleCheckpointCallback()
     try await testInvalidCheckpointOutput()
+    try await testCheckpointBeginSegmentFailurePreservesAudio()
+    try await testResumeAfterFailedCheckpointRollover()
+    try await testFinishAfterFailedCheckpointRollover()
+    try await testPausedOwnerReleasedForDifferentSessionResume()
+    try await testActiveOwnerStillBlocksDifferentSessionClaim()
+    try await testReadyOwnerStillBlocksDifferentSessionClaim()
+    try await testFinishAcrossPausedOwner()
+    try await testFourLectureOwnershipCycling()
     try await testCheckpointStatusListenerRegression()
     try await testLongSessionSegmentCounts()
     try await testScheduledCheckpointTimerFires()
