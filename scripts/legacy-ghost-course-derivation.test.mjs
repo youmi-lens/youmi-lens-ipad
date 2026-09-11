@@ -83,17 +83,17 @@ console.log('2/3 — an active legacy recording still derives its Course, includ
 check('a non-deleted row reaches the existing derivation logic unchanged (name compute, dedup, purge check, addCourse)', () => {
   assert.match(step2, /const courseName = normalizedCourseName\(row\.course\);/);
   assert.match(step2, /const nameKey = courseName\.toLowerCase\(\);/);
-  assert.match(step2, /if \(coursesByName\.has\(nameKey\)\) continue;/);
+  assert.match(step2, /if \(hasActiveCourseByName\(nameKey\)\) continue;/);
   assert.match(step2, /if \(isPurgedCourseName\(purged, courseName\)\) continue;/);
   assert.match(step2, /addCourse\(/);
 });
-check('the same-name dedup (coursesByName.has) is what makes "derive once" hold across a mix of rows for one name', () => {
+check('the same-name dedup (hasActiveCourseByName) is what makes "derive once" hold across a mix of rows for one name', () => {
   // Whichever row (active) is processed first adds the name; every other row
   // for that name — active or deleted — then short-circuits here, so a mix
   // of one deleted + one active recording still yields exactly one Course,
   // and only ever from an active row (the deleted-row guard runs first).
   const guardIdx = step2.indexOf('if (row.deleted_at) continue;');
-  const dedupIdx = step2.indexOf('if (coursesByName.has(nameKey)) continue;');
+  const dedupIdx = step2.indexOf('if (hasActiveCourseByName(nameKey)) continue;');
   assert.ok(guardIdx > -1 && dedupIdx > -1 && guardIdx < dedupIdx);
 });
 

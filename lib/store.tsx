@@ -570,12 +570,33 @@ function mergeRemoteRecordingsIntoStore(
   const localCoursesByName = new Map(localCourses.map((course) => [course.name.trim().toLowerCase(), course]));
 
   const coursesById = new Map<string, Course>();
-  const coursesByName = new Map<string, Course>();
+  // Name-based fallback exists only for legacy rows whose course_id is
+  // missing/unresolvable. A course name is not a unique identifier — two
+  // courses (a soft-deleted one and a brand-new one, say) can legitimately
+  // share a name — so this must never guess:
+  //   - a soft-deleted course NEVER claims a name-fallback slot. Its identity
+  //     is its id; matching it by name could silently re-file a brand-new,
+  //     unrelated recording under a dead course purely because the names
+  //     collide (see courseRestoreOnCommit.mjs for the equivalent commit-time
+  //     guard against writing INTO a deleted course — this is the read-side
+  //     counterpart, against ever DERIVING one via name).
+  //   - if more than one ACTIVE course shares a normalized name, the name is
+  //     ambiguous and must resolve to nothing rather than arbitrarily picking
+  //     one.
+  const activeCoursesByName = new Map<string, Course[]>();
   const addCourse = (course: Course) => {
     coursesById.set(course.id, course);
+    if (course.deletedAt) return;
     const key = course.name.trim().toLowerCase();
-    if (!coursesByName.has(key)) coursesByName.set(key, course);
+    activeCoursesByName.set(key, [...(activeCoursesByName.get(key) ?? []), course]);
   };
+  /** True only when exactly one ACTIVE course has this name — never a deleted one, never an ambiguous multi-match. */
+  const resolveActiveCourseByName = (name: string): Course | undefined => {
+    const candidates = activeCoursesByName.get(name.trim().toLowerCase());
+    return candidates?.length === 1 ? candidates[0] : undefined;
+  };
+  const hasActiveCourseByName = (name: string): boolean =>
+    (activeCoursesByName.get(name.trim().toLowerCase())?.length ?? 0) > 0;
 
   // 1. Authoritative cloud courses (Stage 4). Identity is `courses.id` (a stable
   //    UUID), never the name — a rename keeps the id, a duplicate name cannot
@@ -627,7 +648,7 @@ function mergeRemoteRecordingsIntoStore(
     if (row.deleted_at) continue;
     const courseName = normalizedCourseName(row.course);
     const nameKey = courseName.toLowerCase();
-    if (coursesByName.has(nameKey)) continue;
+    if (hasActiveCourseByName(nameKey)) continue;
     if (isPurgedCourseName(purged, courseName)) continue;
     const localByName = localCoursesByName.get(nameKey);
     const preset = choosePreset(coursesById.size);
@@ -661,7 +682,7 @@ function mergeRemoteRecordingsIntoStore(
   //    step 2 now correctly refuses to derive.
   for (const local of localCourses) {
     if (coursesById.has(local.id)) continue;
-    if (coursesByName.has(local.name.trim().toLowerCase())) continue;
+    if (hasActiveCourseByName(local.name.trim().toLowerCase())) continue;
     if (isPurgedCourseName(purged, local.name)) continue;
     if (!CANONICAL_COURSE_ID_RE.test(local.id)) continue;
     addCourse(local);
@@ -686,8 +707,13 @@ function mergeRemoteRecordingsIntoStore(
     // legacy rows. When a row resolves to a cloud course but its course_id is
     // missing/stale, queue a one-time heal so the server pointer becomes
     // authoritative too (idempotent; stripped on projects without the column).
+    // Explicit course_id is authoritative and is never second-guessed by a
+    // name lookup. Name fallback only runs when course_id truly didn't
+    // resolve, and only ever returns a course when the name is unambiguous
+    // (see resolveActiveCourseByName) — never a deleted course, never a guess
+    // among several active same-named courses.
     const courseById = row.course_id ? coursesById.get(row.course_id) : undefined;
-    const course = courseById ?? coursesByName.get(courseName.toLowerCase());
+    const course = courseById ?? resolveActiveCourseByName(courseName);
     if (course && cloudCourseIds.has(course.id) && row.course_id !== course.id) {
       courseIdFixups.push({ id: row.id, course_id: course.id });
     }
@@ -813,7 +839,11 @@ function mergeRemoteRecordingsIntoStore(
 
     return {
       id: local?.id ?? makeRemoteLectureId(row.id),
-      courseId: course?.id ?? stableIdFromName('cloud_course', UNFILED_COURSE_NAME),
+      // If neither course_id nor an unambiguous name match resolved a course
+      // (e.g. the name collides across several active courses), keep this
+      // lecture's existing local association rather than guessing or
+      // silently dropping it to Unfiled.
+      courseId: course?.id ?? local?.courseId ?? stableIdFromName('cloud_course', UNFILED_COURSE_NAME),
       title: finalTitle,
       titleUpdatedAt: localTitleUpdatedAt,
       date,

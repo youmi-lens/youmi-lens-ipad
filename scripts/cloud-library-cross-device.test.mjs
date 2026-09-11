@@ -198,7 +198,7 @@ check('course rename updates authoritative courses.name by stable id (+ legacy l
 console.log('Course identity — merge associates lectures by stable course_id first');
 check('merge resolves a lecture course by course_id before name, and heals missing course_id', () => {
   assert.match(store, /const courseById = row\.course_id \? coursesById\.get\(row\.course_id\) : undefined;/);
-  assert.match(store, /const course = courseById \?\? coursesByName\.get\(courseName\.toLowerCase\(\)\);/);
+  assert.match(store, /const course = courseById \?\? resolveActiveCourseByName\(courseName\);/);
   assert.match(store, /courseIdFixups\.push\(\{ id: row\.id, course_id: course\.id \}\)/);
 });
 

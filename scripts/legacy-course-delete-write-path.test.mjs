@@ -124,8 +124,15 @@ check('cloud courses (step 1) are reserved by id AND name regardless of deletion
   assert.match(mergeStep1, /cloudCourseIds\.add\(cr\.id\)/);
   assert.match(mergeStep1, /addCourse\(/);
 });
-check('legacy name-derivation (step 2) skips any name already reserved in step 1, unconditionally', () => {
-  assert.match(mergeStep2, /if \(coursesByName\.has\(nameKey\)\) continue;/);
+check('legacy name-derivation (step 2) skips any name already reserved by an ACTIVE step-1 course', () => {
+  // Was unconditional (coursesByName.has, populated regardless of deletion
+  // state) — that let a DELETED cloud course's name-reservation silently
+  // block (and, worse, on the read side, absorb) an active legacy recording
+  // sharing its name. See course-name-collision-ownership.test.mjs: a
+  // soft-deleted course must never claim a name slot, so this guard is now
+  // scoped to active reservations only — a deleted cloud course no longer
+  // prevents step 2 from deriving a legitimate active course for that name.
+  assert.match(mergeStep2, /if \(hasActiveCourseByName\(nameKey\)\) continue;/);
 });
 
 console.log('5 — call sites pass the Course name through, and canonical Course lifecycle is untouched');
