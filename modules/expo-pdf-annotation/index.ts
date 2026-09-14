@@ -90,15 +90,32 @@ export type NativePdfTextAnnotation = {
 export type NativePdfTextAnnotationsByPage = { [pageNumber: string]: NativePdfTextAnnotation[] };
 
 export type NativePdfTextAnnotationActionEvent = {
-  action: 'paste' | 'select' | 'move' | 'edit' | 'copy' | 'delete';
+  /**
+   * Text create/edit are both native-driven: a `UITextView` overlay
+   * anchored directly on the PDF page (no JS modal) collects the typing,
+   * and JS only ever hears about it once committed —
+   * 'create' fires with the FINAL typed text (+ position/width/fontSize)
+   * already attached, only when non-empty; an empty commit creates nothing.
+   * 'edit' fires with the FINAL typed text for an existing annotationId,
+   * even when empty — JS's existing clear-to-delete rule decides from
+   * there, exactly as it did for the old Save-button modal.
+   * 'deselect' clears the current selection when the user taps empty space
+   * with something selected. 'paste' still creates immediately with
+   * clipboard content already attached; move/copy/delete act on an
+   * existing annotation.
+   */
+  action: 'paste' | 'select' | 'deselect' | 'create' | 'move' | 'edit' | 'copy' | 'delete';
   pageNumber: number;
   annotationId?: string;
   text?: string;
   x?: number;
   y?: number;
+  /** Only ever populated on 'create', from the native inline editor's own sizing. */
+  width?: number;
+  fontSize?: number;
 };
 
-export type NativePdfAnnotationMode = 'scroll' | 'pen' | 'highlighter' | 'eraser';
+export type NativePdfAnnotationMode = 'scroll' | 'pen' | 'highlighter' | 'eraser' | 'text';
 
 export type ExpoPdfAnnotationViewProps = {
   fileUri?: string;
@@ -137,6 +154,7 @@ export type ExpoPdfAnnotationNativeRef = {
   setPageAsync?: (pageNumber: number) => Promise<void>;
   flushViewportAsync?: () => Promise<void>;
   captureViewportAsync?: () => Promise<NativePdfViewport | null>;
+  markStrokeRemovalIntentAsync?: (ids: string[]) => Promise<void>;
 };
 
 export const ExpoPdfAnnotationView = requireNativeViewManager<ExpoPdfAnnotationViewProps>(

@@ -98,6 +98,9 @@ export type Course = {
   deletionUpdatedAt?: string;
   /** Why the course was soft-deleted (e.g. 'manual'). */
   deletedReason?: string | null;
+  /** Local delivery state for a course soft-delete/restore awaiting cloud confirmation. */
+  deletionSyncState?: 'pending' | 'failed';
+  deletionSyncError?: string;
 };
 
 /** A recorded lecture belonging to a course. */

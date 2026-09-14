@@ -25,4 +25,9 @@ Pod::Spec.new do |s|
   }
 
   s.source_files = "**/*.{h,m,mm,swift,hpp,cpp}"
+  # __tests__ holds standalone Simulator regression fixtures with top-level
+  # executable code (run manually via `simctl spawn`). They must never be
+  # compiled into the app target — top-level code is illegal in a framework and
+  # would break the build. Exclude the whole directory from the pod sources.
+  s.exclude_files = "**/__tests__/**/*"
 end

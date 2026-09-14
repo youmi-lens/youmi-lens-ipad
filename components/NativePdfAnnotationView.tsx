@@ -28,6 +28,16 @@ export type NativePdfAnnotationViewRef = {
   flushViewport: () => void;
   /** Reads PDFKit's current page/zoom/page-space anchor without waiting for its normal debounce. */
   captureViewport: () => Promise<NativePdfViewport | null>;
+  /**
+   * Tell the native view these stroke ids are being intentionally removed
+   * by JS (Undo, or a Redo-of-a-delete) — must be called BEFORE sending the
+   * `annotationsByPage` snapshot that excludes them, so the native
+   * stale-snapshot protection (`pendingLocalStrokeIds`) doesn't silently
+   * re-draw a stroke the user just asked to remove. See
+   * AnnotationOverlay.markStrokeRemovalIntent's doc comment for the full
+   * race this closes.
+   */
+  markStrokeRemovalIntent: (ids: string[]) => void;
 };
 
 export type NativePdfAnnotationViewProps = {
@@ -101,6 +111,11 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
       },
       captureViewport() {
         return nativeRef.current?.captureViewportAsync?.() ?? Promise.resolve(null);
+      },
+      markStrokeRemovalIntent(ids: string[]) {
+        nativeRef.current?.markStrokeRemovalIntentAsync?.(ids).catch((error: unknown) => {
+          if (__DEV__) console.warn('[native-pdf] markStrokeRemovalIntentAsync failed', error);
+        });
       },
     }), []);
 

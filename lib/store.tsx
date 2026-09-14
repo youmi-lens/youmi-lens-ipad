@@ -20,6 +20,7 @@ import { AppState } from 'react-native';
 
 import { useAuth } from './auth';
 import { createCloudRealtimeInvalidator } from './cloudRealtimeInvalidation.mjs';
+import { sameNameCreateBlock } from './courseCreateGuard.mjs';
 import { GUEST_STORAGE_SCOPE } from './guest';
 import {
   addPurgedCourseNames,
@@ -31,7 +32,7 @@ import {
   parseTombstones,
   toTombstoneIndex,
 } from './deletionTombstones.mjs';
-import { resolveDeletionState } from './deletionSync.mjs';
+import { confirmsDeletionWrite, resolveDeletionState } from './deletionSync.mjs';
 import { batchSoftDeleteIsEmpty, buildBatchSoftDelete } from './lectureBatchDelete.mjs';
 import { buildLectureMove } from './lectureMove.mjs';
 import { resolveMergedLectureTitle } from './lectureTitle.mjs';
@@ -109,6 +110,10 @@ export type NewLectureInput = {
 export type DeleteCourseResult =
   | { ok: true }
   | { ok: false; reason: 'course_not_empty'; activeLectureCount: number };
+export type CreateCourseResult =
+  | { ok: true; course: Course }
+  | { ok: false; reason: 'same_name_active' | 'delete_pending' | 'delete_failed' };
+export type RestoreCourseResult = { ok: true } | { ok: false; reason: 'name_conflict' | 'sync_failed' };
 
 export type DataContextValue = {
   /** True once the current user's scoped store has hydrated from device storage. */
@@ -121,7 +126,7 @@ export type DataContextValue = {
   /** The course currently selected on the Record Home screen. */
   selectedCourseId: string | null;
   setSelectedCourseId: (id: string | null) => void;
-  createCourse: (input: NewCourseInput) => Course;
+  createCourse: (input: NewCourseInput) => CreateCourseResult;
   createLecture: (input: NewLectureInput) => Lecture;
   /** Create-or-update a resumable in-progress lecture (never lose partial work). */
   saveInProgressLecture: (input: NewLectureInput) => Lecture;
@@ -143,11 +148,13 @@ export type DataContextValue = {
    * Returns a result so the UI can explain why a non-empty course was kept.
    */
   deleteCourse: (id: string) => DeleteCourseResult;
+  /** Retry a failed/pending canonical course soft-delete without changing its lectures. */
+  retryCourseDeletion: (id: string) => void;
   /** Courses currently in Recently Deleted (deletedAt set). */
   deletedCourses: Course[];
   /** Lectures individually moved to Recently Deleted (deletedAt set). */
   deletedLectures: Lecture[];
-  restoreCourse: (id: string) => void;
+  restoreCourse: (id: string) => Promise<RestoreCourseResult>;
   restoreLecture: (id: string) => void;
   /** Permanently remove a course and its lectures. Irreversible. */
   permanentlyDeleteCourse: (id: string) => void;
@@ -577,9 +584,8 @@ function mergeRemoteRecordingsIntoStore(
   //   - a soft-deleted course NEVER claims a name-fallback slot. Its identity
   //     is its id; matching it by name could silently re-file a brand-new,
   //     unrelated recording under a dead course purely because the names
-  //     collide (see courseRestoreOnCommit.mjs for the equivalent commit-time
-  //     guard against writing INTO a deleted course — this is the read-side
-  //     counterpart, against ever DERIVING one via name).
+  //     collide — this is a read-side guard against ever DERIVING an
+  //     association via name, never against writing into a deleted course.
   //   - if more than one ACTIVE course shares a normalized name, the name is
   //     ambiguous and must resolve to nothing rather than arbitrarily picking
   //     one.
@@ -973,6 +979,9 @@ export function DataProvider({ children }: { children: ReactNode }) {
   // In-flight guard for the cloud-course reconciliation (P0 sync heal), keyed by
   // course name so overlapping syncs never double-insert the same course.
   const syncingCoursesRef = useRef<Set<string>>(new Set());
+  // Course deletion is keyed by canonical UUID, never display name. A name can
+  // legitimately be reused after the old UUID is tombstoned.
+  const syncingCourseDeletionsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     tombstonesRef.current = tombstones;
@@ -989,6 +998,66 @@ export function DataProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     materialsRef.current = materials;
   }, [materials]);
+
+  const syncCourseDeletion = useCallback(async (
+    courseId: string,
+    deletedAt: string | null,
+    deletionUpdatedAt: string,
+  ): Promise<boolean> => {
+    if (syncingCourseDeletionsRef.current.has(courseId)) return false;
+    const fail = (message: string) => {
+      setCourses((prev) => prev.map((course) =>
+        course.id === courseId
+          ? { ...course, deletionSyncState: 'failed', deletionSyncError: message }
+          : course,
+      ));
+      return false;
+    };
+    if (!currentUserId) return fail('Sign in to sync this course deletion across your devices.');
+    syncingCourseDeletionsRef.current.add(courseId);
+    try {
+      const { data, error } = await supabase
+        .from('courses')
+        .update({ deleted_at: deletedAt, deletion_updated_at: deletionUpdatedAt, updated_at: deletionUpdatedAt })
+        .eq('id', courseId)
+        .eq('user_id', currentUserId)
+        // RLS can report no error while changing zero rows. Require the exact
+        // UUID back before allowing a pending delete/recreate transition.
+        .select('id,deleted_at,deletion_updated_at');
+      const row = (data ?? []).find((item) => item.id === courseId);
+      // Semantic clock comparison, never byte-identical strings: timestamptz
+      // returns as `+00:00` (often with microseconds) while we send `Z`, which
+      // used to fail confirmation on every successful write. See
+      // confirmsDeletionWrite in lib/deletionSync.mjs.
+      const confirmed = row != null && confirmsDeletionWrite({
+        rowDeletedAt: row.deleted_at,
+        rowDeletionUpdatedAt: row.deletion_updated_at,
+        sentDeletedAt: deletedAt,
+        sentDeletionUpdatedAt: deletionUpdatedAt,
+      });
+      if (error || !confirmed) {
+        const conflict = error?.code === '23505' && deletedAt == null;
+        return fail(conflict
+          ? 'A course with this name already exists. Rename or keep the newer course before restoring this one.'
+          : 'Could not confirm this course change in the cloud. Retry from Recently Deleted.');
+      }
+      setCourses((prev) => prev.map((course) =>
+        course.id === courseId
+          ? {
+              ...course,
+              deletedAt,
+              deletionUpdatedAt,
+              deletedReason: deletedAt ? (course.deletedReason ?? 'manual') : null,
+              deletionSyncState: undefined,
+              deletionSyncError: undefined,
+            }
+          : course,
+      ));
+      return true;
+    } finally {
+      syncingCourseDeletionsRef.current.delete(courseId);
+    }
+  }, [currentUserId]);
 
   const applyRemoteRecordings = useCallback(
     async (baseCourses: Course[], baseLectures: Lecture[]) => {
@@ -1042,10 +1111,15 @@ export function DataProvider({ children }: { children: ReactNode }) {
       // then adopts that UUID and the course_id heal links the recordings.
       // It NEVER merges two courses, NEVER re-keys a canonical (UUID-id) course,
       // and rename never reaches here (a renamed course keeps its id and stays a
-      // cloud course). Idempotent via the unique (user_id, lower(name)) index.
-      // Tombstoned cloud rows reserve their canonical identity. They are hidden
-      // from active views, but reconciliation must not mistake them for a
-      // missing course and fork a new active UUID from a stale local cache.
+      // cloud course). Idempotent via the unique active-name index.
+      //
+      // A deleted row deliberately does NOT reserve its name for a new canonical
+      // Course. During delete → recreate, the original delete write and the new
+      // insert can race: the first new insert may see the old row as active and
+      // hit the active-name index. Once that delete reaches the cloud, this
+      // reconciliation must retry the NEW UUID, not suppress it merely because
+      // the old tombstone shares its display name.
+      const knownCloudCourseIds = new Set(remoteCourses.map((course) => course.id));
       const knownCloudCourseNames = new Set(
         remoteCourses
           .map((c) => normalizedCourseName(c.name).toLowerCase()),
@@ -1066,9 +1140,25 @@ export function DataProvider({ children }: { children: ReactNode }) {
         const name = normalizedCourseName(course.name);
         const nameKey = name.toLowerCase();
         if (nameKey === UNFILED_COURSE_NAME.toLowerCase()) continue;
-        if (knownCloudCourseNames.has(nameKey)) continue;
-        if (linkedCourseNames.has(nameKey)) continue;
-        if (isPurgedCourseName(toTombstoneIndex(tombstonesRef.current), name)) continue;
+        const isCanonicalCourse = uuidRe.test(course.id);
+        // Canonical identity is authoritative. A remote row with the same name
+        // but a DIFFERENT id may be a soft-deleted predecessor and must never
+        // block the new course's retry insert. Legacy name-derived courses have
+        // no stable cloud id, so retain their conservative name guard.
+        if (isCanonicalCourse
+          ? knownCloudCourseIds.has(course.id)
+          : knownCloudCourseNames.has(nameKey)) continue;
+        // A legacy recording's historical course_id may retain this display
+        // name forever. That relationship belongs to its old canonical Course;
+        // it must not prevent a different, newly-created canonical UUID from
+        // being persisted. Legacy name-derived courses still need this guard,
+        // because they do not have an identity of their own to compare.
+        if (!isCanonicalCourse && linkedCourseNames.has(nameKey)) continue;
+        // The purge index is name-based legacy suppression, not an ownership
+        // claim. A newly authored canonical UUID may legitimately reuse a
+        // permanently deleted display name; createCourse clears the tombstone,
+        // but a refresh can observe the old ref before React publishes it.
+        if (!isCanonicalCourse && isPurgedCourseName(toTombstoneIndex(tombstonesRef.current), name)) continue;
         if (syncingCoursesRef.current.has(nameKey)) continue;
         // A legacy (non-UUID) local course object can be stale cached state
         // from before this device ever managed a successful merge (exactly
@@ -1078,21 +1168,29 @@ export function DataProvider({ children }: { children: ReactNode }) {
         // this local object was never durably marked deleted anywhere. A
         // canonical (UUID) course has no such ambiguity: createCourse always
         // means the user is actively authoring it, so it heals unconditionally.
-        if (!uuidRe.test(course.id)) {
+        if (!isCanonicalCourse) {
           const hasActiveRecording = remoteRows.some(
             (row) => !row.deleted_at && normalizedCourseName(row.course).toLowerCase() === nameKey,
           );
           if (!hasActiveRecording) continue;
         }
         syncingCoursesRef.current.add(nameKey);
-        const cloudId = uuidRe.test(course.id) ? course.id : makeUuid();
+        const cloudId = isCanonicalCourse ? course.id : makeUuid();
         void (async () => {
           try {
             let res = await supabase
               .from('courses')
               .insert({ id: cloudId, user_id: currentUserId, name, icon: course.icon, tint: course.tint, accent: course.accent });
-            // Retry name-only for a project that predates icon/tint/accent (production).
-            if (res.error) res = await supabase.from('courses').insert({ id: cloudId, user_id: currentUserId, name });
+            // A duplicate active name is authoritative. Retrying with a
+            // reduced payload cannot resolve it, and the old name-only retry
+            // obscured 23505 with an icon-not-null error on the current
+            // schema. Keep all required visual defaults on the bounded
+            // compatibility retry as well.
+            if (res.error && res.error.code !== '23505') {
+              res = await supabase
+                .from('courses')
+                .insert({ id: cloudId, user_id: currentUserId, name, icon: course.icon, tint: course.tint, accent: course.accent });
+            }
             if (res.error) console.info('[store] course reconcile skipped (kept local)', { name, message: res.error.message });
           } finally {
             syncingCoursesRef.current.delete(nameKey);
@@ -1115,9 +1213,16 @@ export function DataProvider({ children }: { children: ReactNode }) {
           });
       }
 
+      // Pending course tombstones survive cache persistence and are retried on
+      // a later cloud refresh/foreground pass. The UUID is the only key.
+      for (const course of merged.courses) {
+        if (!course.deletedAt || !course.deletionUpdatedAt || !course.deletionSyncState) continue;
+        void syncCourseDeletion(course.id, course.deletedAt, course.deletionUpdatedAt);
+      }
+
       return { courses: merged.courses, lectures: merged.lectures };
     },
-    [currentUserId],
+    [currentUserId, syncCourseDeletion],
   );
 
   const refreshCloudLibrary = useCallback(async (): Promise<void> => {
@@ -1348,7 +1453,15 @@ export function DataProvider({ children }: { children: ReactNode }) {
     }
   }, [materialAnnotations, storageScopeId, hydratedUserId, loaded]);
 
-  const createCourse = useCallback((input: NewCourseInput): Course => {
+  const createCourse = useCallback((input: NewCourseInput): CreateCourseResult => {
+    const normalizedName = normalizedCourseName(input.name).toLowerCase();
+    // Do not fabricate an optimistic duplicate while the old UUID is still
+    // active remotely or its delete has not been confirmed. The caller can
+    // retry after the durable UUID-keyed tombstone finishes. EVERY same-name
+    // row is inspected, not just the first — see lib/courseCreateGuard.mjs for
+    // the physical failure that first-match resolution caused.
+    const blocked = sameNameCreateBlock(coursesRef.current, normalizedName, normalizedCourseName);
+    if (blocked) return { ok: false, reason: blocked };
     // Stage 4: the id is a stable UUID that IS the cloud `courses.id`. Generating
     // it client-side (rather than re-keying after an insert) keeps the local
     // course, its lectures' courseId, and the cloud row on one identity — so an
@@ -1374,15 +1487,19 @@ export function DataProvider({ children }: { children: ReactNode }) {
       const full = { id: course.id, user_id: currentUserId, name: course.name, icon: course.icon, tint: course.tint, accent: course.accent };
       void supabase.from('courses').insert(full).then(({ error }) => {
         if (!error) return;
+        // An active-name collision is authoritative; retrying with an
+        // incomplete payload can never resolve it and used to hide 23505 with
+        // an unrelated icon-not-null error.
+        if (error.code === '23505') return;
         void supabase
           .from('courses')
-          .insert({ id: course.id, user_id: currentUserId, name: course.name })
+          .insert({ id: course.id, user_id: currentUserId, name: course.name, icon: course.icon, tint: course.tint, accent: course.accent })
           .then(({ error: minErr }) => {
             if (minErr) console.info('[store] course cloud insert skipped (kept local)', { message: minErr.message });
           });
       });
     }
-    return course;
+    return { ok: true, course };
   }, [currentUserId]);
 
   const createLecture = useCallback((input: NewLectureInput): Lecture => {
@@ -1778,37 +1895,74 @@ export function DataProvider({ children }: { children: ReactNode }) {
 
   const deleteCourse = useCallback(
     (id: string): DeleteCourseResult => {
-      // Only an empty course can be deleted. Lectures already in Recently
-      // Deleted do not count — a course of only deleted lectures is "empty".
-      const activeLectureCount = lectures.filter(
-        (l) => l.courseId === id && !l.deletedAt,
+      // PRODUCT RULE: only an empty course can be deleted. Authoritative here,
+      // not in the UI — a bypassed/stale screen must not be able to tombstone a
+      // course that still holds content. Ownership is the canonical course
+      // UUID, never the name. Lectures already in Recently Deleted do not
+      // count, so a course of only deleted lectures IS empty and deletable.
+      // Rejecting early also guarantees no local tombstone, no durable pending
+      // state, and no cloud mutation for a non-empty course.
+      const activeLectureCount = lecturesRef.current.filter(
+        (lecture) => lecture.courseId === id && !lecture.deletedAt,
       ).length;
       if (activeLectureCount > 0) {
         return { ok: false, reason: 'course_not_empty', activeLectureCount };
       }
       const now = new Date().toISOString();
-      const courseName = coursesRef.current.find((c) => c.id === id)?.name ?? '';
       setCourses((prev) =>
-        prev.map((c) => (c.id === id ? { ...c, deletedAt: now, deletionUpdatedAt: now, deletedReason: 'manual' } : c)),
+        prev.map((c) => (c.id === id
+          ? {
+              ...c,
+              deletedAt: now,
+              deletionUpdatedAt: now,
+              deletedReason: 'manual',
+              // A guest course has no cloud row to confirm. Keep its existing
+              // local-only contract rather than presenting a false sync error.
+              deletionSyncState: currentUserId ? 'pending' : undefined,
+              deletionSyncError: undefined,
+            }
+          : c)),
       );
       setSelectedCourseId((current) => (current === id ? null : current));
-      // Stage 4: account-level course deletion (courses.deleted_at + freshness).
-      if (currentUserId) writeCourseDeletion(currentUserId, id, courseName, now, now);
+      // The parent UUID alone is tombstoned. Its lectures and their course_id
+      // remain untouched, preserving historical ownership and restore.
+      if (currentUserId) void syncCourseDeletion(id, now, now);
       return { ok: true };
     },
-    [lectures, currentUserId],
+    [currentUserId, syncCourseDeletion],
   );
 
-  const restoreCourse = useCallback((id: string) => {
+  const retryCourseDeletion = useCallback((id: string) => {
+    const course = coursesRef.current.find((item) => item.id === id);
+    if (!course?.deletedAt || !course.deletionUpdatedAt) return;
+    setCourses((prev) => prev.map((item) =>
+      item.id === id ? { ...item, deletionSyncState: 'pending', deletionSyncError: undefined } : item,
+    ));
+    void syncCourseDeletion(id, course.deletedAt, course.deletionUpdatedAt);
+  }, [syncCourseDeletion]);
+
+  const restoreCourse = useCallback(async (id: string): Promise<RestoreCourseResult> => {
+    const course = coursesRef.current.find((item) => item.id === id);
+    if (!course?.deletedAt) return { ok: false, reason: 'sync_failed' };
     const now = new Date().toISOString();
-    const courseName = coursesRef.current.find((c) => c.id === id)?.name ?? '';
-    // Explicit restore stamps a NEW deletion clock so it wins over any stale
-    // tombstone on other clients (only an explicit newer restore un-deletes).
+    if (!currentUserId) {
+      setCourses((prev) => prev.map((c) =>
+        c.id === id
+          ? { ...c, deletedAt: null, deletionUpdatedAt: now, deletedReason: null, deletionSyncState: undefined, deletionSyncError: undefined }
+          : c,
+      ));
+      return { ok: true };
+    }
+    // Keep the old UUID deleted locally until the exact cloud update confirms.
+    // This is essential when a newer active course now owns the same name.
     setCourses((prev) =>
-      prev.map((c) => (c.id === id ? { ...c, deletedAt: null, deletionUpdatedAt: now, deletedReason: null } : c)),
+      prev.map((c) => (c.id === id ? { ...c, deletionSyncState: 'pending', deletionSyncError: undefined } : c)),
     );
-    if (currentUserId) writeCourseDeletion(currentUserId, id, courseName, null, now);
-  }, [currentUserId]);
+    const ok = await syncCourseDeletion(id, null, now);
+    if (ok) return { ok: true };
+    const latest = coursesRef.current.find((item) => item.id === id);
+    return { ok: false, reason: latest?.deletionSyncError?.includes('already exists') ? 'name_conflict' : 'sync_failed' };
+  }, [currentUserId, syncCourseDeletion]);
 
   const restoreLecture = useCallback(
     (id: string) => {
@@ -2299,6 +2453,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
       retryLectureDeletion,
       deleteLectures,
       deleteCourse,
+      retryCourseDeletion,
       restoreCourse,
       restoreLecture,
       permanentlyDeleteCourse,
@@ -2371,7 +2526,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
       clearAnnotationsForPage,
       clearAll,
     }),
-    [visibleStoreReady, currentUserId, activeCourses, activeLectures, refreshCloudLibrary, deletedCourses, deletedLectures, selectedCourseId, createCourse, createLecture, saveInProgressLecture, updateLecture, moveLectureToCourse, deleteLecture, retryLectureDeletion, deleteLectures, deleteCourse, restoreCourse, restoreLecture, permanentlyDeleteCourse, permanentlyDeleteLecture, renameCourse, renameLecture, activeMaterials, addMaterial, renameMaterial, updateMaterial, deleteMaterial, activeMaterialLinks, reserveLectureId, linkMaterialToLecture, updateLectureMaterialLink, removeLectureMaterialLink, cleanupOrphanMaterialLinks, activeMaterialAnnotations, saveAnnotationStrokes, replaceMaterialPageAnnotationStrokesForMaterial, replaceMaterialPageTextAnnotationsForMaterial, addAnnotationStroke, undoLastAnnotationStroke, clearAnnotationsForPage, clearAll],
+    [visibleStoreReady, currentUserId, activeCourses, activeLectures, refreshCloudLibrary, deletedCourses, deletedLectures, selectedCourseId, createCourse, createLecture, saveInProgressLecture, updateLecture, moveLectureToCourse, deleteLecture, retryLectureDeletion, deleteLectures, deleteCourse, retryCourseDeletion, restoreCourse, restoreLecture, permanentlyDeleteCourse, permanentlyDeleteLecture, renameCourse, renameLecture, activeMaterials, addMaterial, renameMaterial, updateMaterial, deleteMaterial, activeMaterialLinks, reserveLectureId, linkMaterialToLecture, updateLectureMaterialLink, removeLectureMaterialLink, cleanupOrphanMaterialLinks, activeMaterialAnnotations, saveAnnotationStrokes, replaceMaterialPageAnnotationStrokesForMaterial, replaceMaterialPageTextAnnotationsForMaterial, addAnnotationStroke, undoLastAnnotationStroke, clearAnnotationsForPage, clearAll],
   );
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;

@@ -217,24 +217,23 @@ check('A: createCourse inserts an authoritative courses row keyed by a stable UU
   const fn = store.slice(store.indexOf('const createCourse ='), store.indexOf('const createLecture ='));
   assert.match(fn, /id: makeUuid\(\)/);                              // id === courses.id
   assert.match(fn, /supabase\.from\('courses'\)\.insert\(full\)/);   // cloud insert (icon/tint/accent)
-  assert.match(fn, /insert\(\{ id: course\.id, user_id: currentUserId, name: course\.name \}\)/); // prod fallback
+  assert.match(fn, /insert\(\{ id: course\.id, user_id: currentUserId, name: course\.name, icon: course\.icon, tint: course\.tint, accent: course\.accent \}\)/); // fallback retains required visual fields
 });
-check('I: deleteCourse/restoreCourse write account-level courses deletion with a freshness clock', () => {
+check('I: deleteCourse/restoreCourse use UUID-keyed, read-back-confirmed course deletion', () => {
   const del = store.slice(store.indexOf('const deleteCourse ='), store.indexOf('const restoreCourse ='));
   const res = store.slice(store.indexOf('const restoreCourse ='), store.indexOf('const restoreLecture ='));
-  assert.match(del, /writeCourseDeletion\(currentUserId, id, courseName, now, now\)/);
-  assert.match(res, /writeCourseDeletion\(currentUserId, id, courseName, null, now\)/);
+  assert.match(del, /deletionSyncState: 'pending'/);
+  assert.match(del, /syncCourseDeletion\(id, now, now\)/);
+  assert.match(res, /await syncCourseDeletion\(id, null, now\)/);
 });
-check('writeCourseDeletion targets courses.deleted_at + deletion_updated_at, stripping only the column a project actually lacks', () => {
-  const at = store.indexOf('function writeCourseDeletion');
-  const fn = store.slice(at, at + 1200);
+check('syncCourseDeletion targets exact UUID and requires the row back from Supabase', () => {
+  const at = store.indexOf('const syncCourseDeletion =');
+  const fn = store.slice(at, at + 2200);
   assert.match(fn, /\.from\('courses'\)/);
-  assert.match(fn, /deleted_at: deletedAt, deletion_updated_at: now, updated_at: now/);
-  // Reuses the shared strip-and-retry primitive (stripUnknownColumnFromPatch) —
-  // a missing column on ONE project must not blow away the freshness clock on
-  // a project (production, post-migration) that actually has it.
-  assert.match(fn, /stripUnknownColumnFromPatch\(payload, error\.message\)/);
-  assert.doesNotMatch(fn, /\.update\(\{ deleted_at: deletedAt \}\)/, 'must not unconditionally drop the freshness clock on any error');
+  assert.match(fn, /\.eq\('id', courseId\)/);
+  assert.match(fn, /\.eq\('user_id', currentUserId\)/);
+  assert.match(fn, /\.select\('id,deleted_at,deletion_updated_at'\)/);
+  assert.match(fn, /deletionSyncState: 'failed'/);
 });
 console.log('I2 — production courses now carry a real deletion freshness clock (schema gap closed)');
 check('§restore-regression: a second device with a STALE cached-deleted course (no clock) adopts a genuinely newer remote restore', () => {

@@ -2,6 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { ComponentProps, useState } from 'react';
 import {
+  Alert,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -33,7 +34,18 @@ export default function CreateCourseScreen() {
 
   const handleCreate = () => {
     if (!canCreate) return;
-    createCourse({ name: name.trim(), icon: preset.icon, tint: preset.tint, accent: preset.accent });
+    const result = createCourse({ name: name.trim(), icon: preset.icon, tint: preset.tint, accent: preset.accent });
+    if (!result.ok) {
+      Alert.alert(
+        'Course not created',
+        result.reason === 'delete_pending'
+          ? 'The previous course deletion is still being confirmed. Try again shortly.'
+          : result.reason === 'delete_failed'
+            ? 'The previous course deletion could not sync. Retry it from Recently Deleted first.'
+            : 'A course with this name already exists.',
+      );
+      return;
+    }
     router.back();
   };
 

@@ -54,7 +54,7 @@ const TOOLBAR_VERT_EDGE_ZONE_MIN = 150;
 
 const STORAGE_KEY = 'youmi.materialToolbar.v1';
 
-export type MaterialToolMode = 'scroll' | 'pen' | 'highlighter' | 'eraser';
+export type MaterialToolMode = 'scroll' | 'pen' | 'highlighter' | 'eraser' | 'text';
 
 export type MaterialToolbarDock =
   | 'topLeft'
@@ -191,6 +191,7 @@ type GlyphName =
   | 'pen'
   | 'highlighter'
   | 'eraser'
+  | 'text'
   | 'undo'
   | 'redo'
   | 'hand'
@@ -237,6 +238,12 @@ function GlyphBase({
           <Path d="M10 9.6l5.6 5.6" stroke={color} strokeWidth={1.9} fill="none" />
         </>
       ) : null}
+      {name === 'text' ? (
+        <>
+          <Path d="M6 8h11M6 8V6.5M17 8V6.5M11.5 8v14M9 22h5" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" fill="none" />
+          <Path d="M17 12h6M20 12v10M18.5 22h3" stroke={color} strokeWidth={1.7} strokeLinecap="round" fill="none" />
+        </>
+      ) : null}
       {name === 'undo' ? (
         <>
           <Path d="M10 8L6 12l4 4" stroke={color} strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round" fill="none" />
@@ -279,7 +286,9 @@ function glyphForMode(mode: MaterialToolMode): GlyphName {
       ? 'highlighter'
       : mode === 'eraser'
         ? 'eraser'
-        : 'hand';
+        : mode === 'text'
+          ? 'text'
+          : 'hand';
 }
 
 /** Vertical navy gradient fill — copied from NotebookCanvas.NavySurface. */
@@ -319,11 +328,12 @@ function GripDots() {
   );
 }
 
-const PRIMARY_TOOLS: { key: Exclude<MaterialToolMode, 'scroll'>; label: string }[] = [
+const PRIMARY_DRAW_TOOLS: { key: Exclude<MaterialToolMode, 'scroll' | 'text'>; label: string }[] = [
   { key: 'pen', label: 'Pen' },
   { key: 'highlighter', label: 'Highlight' },
   { key: 'eraser', label: 'Eraser' },
 ];
+const TEXT_TOOL: { key: 'text'; label: string } = { key: 'text', label: 'Text' };
 
 export type MaterialColorOption = { key: string; value: string };
 /** `dot` is the preview-dot diameter shown inside the nib; `value` is the width/radius. */
@@ -332,6 +342,13 @@ export type MaterialSizeOption = { key: string; value: number; dot: number };
 export type MaterialFloatingToolbarProps = {
   mode: MaterialToolMode;
   onChangeMode: (next: MaterialToolMode) => void;
+  /**
+   * Shows the Text tool alongside Pen/Highlight/Eraser. Only the native
+   * PDFKit path supports text annotations — the legacy JS-overlay path has
+   * no text model at all, so its toolbar instance omits this (default false)
+   * rather than offering a mode it cannot handle.
+   */
+  showTextTool?: boolean;
   onUndo: () => void;
   canUndo: boolean;
   onRedo: () => void;
@@ -362,6 +379,7 @@ export type MaterialFloatingToolbarProps = {
 export function MaterialFloatingToolbar({
   mode,
   onChangeMode,
+  showTextTool = false,
   onUndo,
   canUndo,
   onRedo,
@@ -794,7 +812,8 @@ export function MaterialFloatingToolbar({
         <GripDots />
       </View>
       <View style={[styles.tools, vertical && styles.toolsVertical]}>
-        {PRIMARY_TOOLS.map(renderToolButton)}
+        {PRIMARY_DRAW_TOOLS.map(renderToolButton)}
+        {showTextTool ? renderToolButton(TEXT_TOOL) : null}
       </View>
       <View style={[styles.divider, vertical && styles.dividerVertical]} />
       {renderHand()}

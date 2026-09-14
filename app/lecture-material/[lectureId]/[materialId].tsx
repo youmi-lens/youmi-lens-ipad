@@ -46,6 +46,17 @@ import { colors, fontSize, radius, spacing } from '@/constants/theme';
 import { resolveMaterialUri } from '@/lib/importMaterial';
 import { clampedMaterialResumePage, compositePageCount, appendedPageCountAfterFinalPageContent } from '@/lib/materialWorkspace';
 import { materialViewportEqual, normalizeMaterialViewport } from '@/lib/materialViewport';
+import {
+  EMPTY_MATERIAL_HISTORY,
+  applyMaterialHistoryRedo,
+  applyMaterialHistoryUndo,
+  popMaterialHistoryRedo,
+  popMaterialHistoryUndo,
+  pushMaterialHistory,
+  type MaterialHistoryAction,
+  type MaterialHistoryApplyResult,
+  type MaterialHistoryState,
+} from '@/lib/materialHistory';
 import type { MaterialAnnotationStroke, MaterialTextAnnotation, MaterialViewport } from '@/lib/models';
 import type {
   NativePdfAnnotationMode,
@@ -225,8 +236,10 @@ export default function LectureMaterialWorkspaceScreen() {
   const [totalPages, setTotalPages] = useState<number>(material?.pageCount ?? 0);
   const [sourcePageCount, setSourcePageCount] = useState<number>(material?.sourcePageCount ?? material?.pageCount ?? 0);
   const [appendedPageCount, setAppendedPageCount] = useState<number>(material?.appendedPageCount ?? 0);
-  const [editingText, setEditingText] = useState<MaterialTextAnnotation | null>(null);
-  const [editingTextValue, setEditingTextValue] = useState('');
+  // Text create/edit is a native inline UITextView overlay directly on the
+  // PDF page (PdfAnnotationView.inlineTextEditor) — no JS-side modal. JS
+  // only ever receives the FINAL committed 'create'/'edit' event, already
+  // typed and confirmed natively (see handleNativeTextAnnotationAction).
   const [selectedTextAnnotationId, setSelectedTextAnnotationId] = useState<string | undefined>();
   const [exporting, setExporting] = useState(false);
   const [loadingPdf, setLoadingPdf] = useState(true);
@@ -243,11 +256,15 @@ export default function LectureMaterialWorkspaceScreen() {
   const previousDrawModeRef = useRef<MaterialDrawingMode>('pen');
   const doubleTapAvailable = useMemo(() => isPencilDoubleTapAvailable(), []);
 
-  // Per-page redo stacks for the toolbar's Redo action. Undo pushes the removed
-  // stroke here; Redo re-adds it. Stored in component state only — no annotation
-  // schema change. Cleared on page change and whenever a fresh stroke is drawn
-  // or erased (the standard "new action invalidates redo" rule).
-  const [nativeRedoStack, setNativeRedoStack] = useState<MaterialAnnotationStroke[]>([]);
+  // Native path: ONE unified, time-ordered Undo/Redo history covering both
+  // strokes and text (see lib/materialHistory.ts) — a mixed sequence like
+  // draw → move text → draw undoes in true chronological order, which two
+  // independent per-type stacks cannot do correctly. It is only an operation
+  // log ABOVE the existing stroke/text stores; storage is unchanged. Scoped
+  // to the current page/session — cleared on page change, not persisted.
+  const [nativeHistory, setNativeHistory] = useState<MaterialHistoryState>(EMPTY_MATERIAL_HISTORY);
+  // Legacy JS-overlay path keeps its own simpler stroke-only redo stack,
+  // unchanged — text/paste never existed there, so it's out of scope here.
   const [redoStack, setRedoStack] = useState<MaterialAnnotationStroke[]>([]);
 
   // Capture the page we want the PDF to open at ONCE on mount. Passing
@@ -264,9 +281,24 @@ export default function LectureMaterialWorkspaceScreen() {
   useEffect(() => { sourcePageCountRef.current = sourcePageCount; }, [sourcePageCount]);
   useEffect(() => { appendedPageCountRef.current = appendedPageCount; }, [appendedPageCount]);
 
-  // Redo only applies to the page it was undone on — drop it on any page change.
+  // Native-path unified history is scoped to the whole document/editing
+  // session, NOT the current page — a mixed Pen→Highlighter→Text sequence
+  // that happens to cross a page boundary (including an incidental scroll
+  // nudge PDFKit reports as a page change, not just deliberate navigation)
+  // must stay fully undoable. Each history action already carries its own
+  // pageNumber (see lib/materialHistory.ts) and undo/redo apply it there
+  // directly, so nothing here needs the CURRENT page to reconstruct a step.
+  // Only reset when the DOCUMENT itself changes (a genuinely new editing
+  // session) — in practice this component remounts on materialId change,
+  // so this only fires if it's ever reused across materials without an
+  // unmount.
   useEffect(() => {
-    setNativeRedoStack([]);
+    setNativeHistory(EMPTY_MATERIAL_HISTORY);
+  }, [material?.id]);
+
+  // Legacy JS-overlay path keeps its existing, unrelated, page-scoped redo
+  // behavior — untouched, out of scope for this native-path history fix.
+  useEffect(() => {
     setRedoStack([]);
   }, [currentPage]);
 
@@ -735,6 +767,26 @@ export default function LectureMaterialWorkspaceScreen() {
     replaceMaterialPageTextAnnotationsForMaterial(id, pageNumber, annotations, materialScopeLectureId(id));
   }, [replaceMaterialPageTextAnnotationsForMaterial]);
 
+  // Shared by 'paste' and the native inline-editor's 'create' commit — both
+  // hand JS the SAME shape (final text + position, already typed/confirmed
+  // natively), so both create exactly one MaterialTextAnnotation and push
+  // exactly one text-create history action. No second text-creation path.
+  const createTextAnnotationFromEvent = useCallback((
+    pageNumber: number, text: string, x: number, y: number, width: number, fontSize: number,
+  ) => {
+    const id = materialIdRef.current;
+    if (!id) return;
+    const current = textAnnotationsForMaterialPage(id, pageNumber);
+    const now = new Date().toISOString();
+    const created: MaterialTextAnnotation = {
+      id: `material-text-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      text, x, y, width, fontSize, createdAt: now, updatedAt: now,
+    };
+    setNativeHistory((h) => pushMaterialHistory(h, { kind: 'text-create', pageNumber, annotation: created }));
+    saveTextAnnotations(pageNumber, [...current, created]);
+    ensureTrailingBlankPageAfterContent(pageNumber);
+  }, [ensureTrailingBlankPageAfterContent, saveTextAnnotations, textAnnotationsForMaterialPage]);
+
   const handleNativeTextAnnotationAction = useCallback((event: NativePdfTextAnnotationActionEvent) => {
     const id = materialIdRef.current;
     if (!id || !event.pageNumber) return;
@@ -743,47 +795,68 @@ export default function LectureMaterialWorkspaceScreen() {
       setSelectedTextAnnotationId(event.annotationId);
       return;
     }
+    if (event.action === 'deselect') {
+      setSelectedTextAnnotationId(undefined);
+      return;
+    }
+    if (event.action === 'create') {
+      // The native inline editor already collected and confirmed the final
+      // text before emitting this — no modal, nothing left to ask the user.
+      const text = event.text?.trim();
+      if (!text || !Number.isFinite(event.x) || !Number.isFinite(event.y)) return;
+      createTextAnnotationFromEvent(event.pageNumber, text, event.x!, event.y!, event.width ?? 180, event.fontSize ?? 16);
+      return;
+    }
     if (event.action === 'paste') {
       const text = event.text?.trim();
       if (!text || !Number.isFinite(event.x) || !Number.isFinite(event.y)) return;
-      const now = new Date().toISOString();
-      saveTextAnnotations(event.pageNumber, [...current, {
-        id: `material-text-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        text,
-        x: event.x!, y: event.y!, width: 180, fontSize: 16,
-        createdAt: now, updatedAt: now,
-      }]);
-      ensureTrailingBlankPageAfterContent(event.pageNumber);
+      // Paste is treated as text-create for history: Undo removes the pasted
+      // item, Redo restores it — same as native Text-tool creation above.
+      createTextAnnotationFromEvent(event.pageNumber, text, event.x!, event.y!, 180, 16);
       return;
     }
     const selected = current.find((annotation) => annotation.id === event.annotationId);
     if (!selected) return;
     if (event.action === 'delete') {
+      setNativeHistory((h) => pushMaterialHistory(h, { kind: 'text-delete', pageNumber: event.pageNumber, annotation: selected }));
       saveTextAnnotations(event.pageNumber, current.filter((annotation) => annotation.id !== selected.id));
       setSelectedTextAnnotationId(undefined);
     } else if (event.action === 'edit') {
-      setEditingText(selected); setEditingTextValue(selected.text);
+      // The native inline editor already collected the final text (even if
+      // empty — an empty commit is the existing clear-to-delete path, same
+      // rule the old Save-button modal used, just reached directly now).
+      const text = (event.text ?? '').trim();
+      if (text && text !== selected.text) {
+        setNativeHistory((h) => pushMaterialHistory(h, {
+          kind: 'text-edit', pageNumber: event.pageNumber, annotationId: selected.id, before: selected.text, after: text,
+        }));
+      } else if (!text) {
+        setNativeHistory((h) => pushMaterialHistory(h, { kind: 'text-delete', pageNumber: event.pageNumber, annotation: selected }));
+      }
+      saveTextAnnotations(event.pageNumber, text
+        ? current.map((annotation) => annotation.id === selected.id ? { ...annotation, text, updatedAt: new Date().toISOString() } : annotation)
+        : current.filter((annotation) => annotation.id !== selected.id));
+      if (text) ensureTrailingBlankPageAfterContent(event.pageNumber);
+      if (!text) setSelectedTextAnnotationId(undefined);
     } else if (event.action === 'move' && Number.isFinite(event.x) && Number.isFinite(event.y)) {
+      // Reached both by the existing long-press "Move" flow (a second
+      // long-press elsewhere completes it) and by the finger-drag gesture
+      // (native tracks the drag live, then emits this ONE mutation at drag
+      // end) — one drag gesture = one history action either way.
+      setNativeHistory((h) => pushMaterialHistory(h, {
+        kind: 'text-move',
+        pageNumber: event.pageNumber,
+        annotationId: selected.id,
+        before: { x: selected.x, y: selected.y },
+        after: { x: event.x!, y: event.y! },
+      }));
       saveTextAnnotations(event.pageNumber, current.map((annotation) => annotation.id === selected.id
         ? { ...annotation, x: event.x!, y: event.y!, updatedAt: new Date().toISOString() }
         : annotation));
     } else if (event.action === 'move') {
       Alert.alert('Move text', 'Long-press the new location on the page.');
     }
-  }, [ensureTrailingBlankPageAfterContent, saveTextAnnotations, textAnnotationsForMaterialPage]);
-
-  const saveEditedText = useCallback(() => {
-    if (!editingText) return;
-    const text = editingTextValue.trim();
-    const id = materialIdRef.current;
-    if (!id) return;
-    const current = textAnnotationsForMaterialPage(id, currentPage);
-    saveTextAnnotations(currentPage, text
-      ? current.map((annotation) => annotation.id === editingText.id ? { ...annotation, text, updatedAt: new Date().toISOString() } : annotation)
-      : current.filter((annotation) => annotation.id !== editingText.id));
-    if (text) ensureTrailingBlankPageAfterContent(currentPage);
-    setEditingText(null);
-  }, [currentPage, editingText, editingTextValue, ensureTrailingBlankPageAfterContent, saveTextAnnotations, textAnnotationsForMaterialPage]);
+  }, [createTextAnnotationFromEvent, ensureTrailingBlankPageAfterContent, saveTextAnnotations, textAnnotationsForMaterialPage]);
 
   const handleNativeModeChange = useCallback((next: NativePdfAnnotationMode) => {
     nativeAnnotationModeRef.current = next;
@@ -851,6 +924,16 @@ export default function LectureMaterialWorkspaceScreen() {
     setNativeAnnotationMode(restored);
   }, []);
 
+  // Batching boundary for one eraser gesture (drag). A single continuous
+  // erase can cross multiple strokes, each firing its own "replacePage"
+  // commit (see PdfAnnotationView's eraseStroke call sites) — those already
+  // update the store live, unchanged, one at a time. This ref only captures
+  // the page's stroke array as it stood BEFORE the first replacePage of the
+  // in-progress gesture, so onEraserGestureEnded can push ONE stroke-erase
+  // history action covering the whole gesture (before → after), matching
+  // "one drag = one action" instead of one entry per stroke crossed.
+  const eraseBatchBeforeRef = useRef<{ pageNumber: number; strokes: MaterialAnnotationStroke[] } | null>(null);
+
   const handleNativeAnnotationCommitted = useCallback(
     (event: NativePdfAnnotationsChangedEvent) => {
       const lid = nativeLectureIdRef.current;
@@ -876,10 +959,10 @@ export default function LectureMaterialWorkspaceScreen() {
         createdAt: native.createdAt,
       });
 
-      // A fresh native edit (draw or erase) invalidates the redo stack.
-      setNativeRedoStack([]);
-
       if (event.action === 'replacePage') {
+        if (!eraseBatchBeforeRef.current || eraseBatchBeforeRef.current.pageNumber !== page) {
+          eraseBatchBeforeRef.current = { pageNumber: page, strokes: annotationsForMaterialPage(mid, page) };
+        }
         const nextStrokes = event.strokes.map(toStoreStroke);
         replaceMaterialPageAnnotationStrokesForMaterial(mid, page, nextStrokes, materialScopeLectureId(mid));
         debugMaterialViewport('native-annotation-store-update', { action: 'replacePage', page });
@@ -890,12 +973,32 @@ export default function LectureMaterialWorkspaceScreen() {
       const stroke: MaterialAnnotationStroke = {
         ...toStoreStroke(event.stroke),
       };
+      // One drawn Pencil stroke = one history action.
+      setNativeHistory((h) => pushMaterialHistory(h, { kind: 'stroke-add', pageNumber: page, stroke }));
       addAnnotationStroke(materialReviewMode ? materialScopeLectureId(mid) : lid, mid, page, stroke);
       debugMaterialViewport('native-annotation-store-update', { action: 'add', page, strokeId: stroke.id });
       ensureTrailingBlankPageAfterContent(page);
     },
-    [addAnnotationStroke, ensureTrailingBlankPageAfterContent, materialReviewMode, replaceMaterialPageAnnotationStrokesForMaterial],
+    [addAnnotationStroke, annotationsForMaterialPage, ensureTrailingBlankPageAfterContent, materialReviewMode, replaceMaterialPageAnnotationStrokesForMaterial],
   );
+
+  const handleNativeEraserGestureEnded = useCallback(() => {
+    const mid = nativeMaterialIdRef.current;
+    const before = eraseBatchBeforeRef.current;
+    eraseBatchBeforeRef.current = null;
+    if (mid && before) {
+      const after = annotationsForMaterialPage(mid, before.pageNumber);
+      const beforeIds = new Set(before.strokes.map((s) => s.id));
+      const afterIds = new Set(after.map((s) => s.id));
+      const changed = beforeIds.size !== afterIds.size || [...beforeIds].some((id) => !afterIds.has(id));
+      if (changed) {
+        setNativeHistory((h) => pushMaterialHistory(h, {
+          kind: 'stroke-erase', pageNumber: before.pageNumber, before: before.strokes, after,
+        }));
+      }
+    }
+    restoreNativeTemporaryEraserIfNeeded();
+  }, [annotationsForMaterialPage, restoreNativeTemporaryEraserIfNeeded]);
 
   const addPageStroke = useCallback(
     (stroke: MaterialAnnotationStroke) => {
@@ -939,31 +1042,60 @@ export default function LectureMaterialWorkspaceScreen() {
     );
   }, [addAnnotationStroke, currentPage, lectureId, material?.id, materialReviewMode, redoStack]);
 
+  // Applies one history step's result: strokes go through the stroke store,
+  // text through the text store — never both for a single action, since
+  // every MaterialHistoryAction touches exactly one of the two. Any stroke
+  // ids this step just removed (undo of a stroke-add, or redo of a
+  // stroke-erase) must reach native BEFORE the snapshot that omits them —
+  // see markStrokeRemovalIntent's doc comment for the race this avoids.
+  const applyNativeHistoryStep = useCallback(
+    (action: MaterialHistoryAction, result: MaterialHistoryApplyResult) => {
+      const mid = nativeMaterialIdRef.current;
+      if (!mid) return;
+      if (result.removedStrokeIds.length > 0) {
+        pdfRef.current?.markStrokeRemovalIntent(result.removedStrokeIds);
+      }
+      if (action.kind === 'stroke-add' || action.kind === 'stroke-erase') {
+        replaceMaterialPageAnnotationStrokesForMaterial(mid, action.pageNumber, result.strokes, materialScopeLectureId(mid));
+        return;
+      }
+      saveTextAnnotations(action.pageNumber, result.textAnnotations);
+      // A create/delete undo-or-redo that removes the currently-selected
+      // annotation must not leave a selection pointing at nothing.
+      const affectedId = action.kind === 'text-create' || action.kind === 'text-delete' ? action.annotation.id : action.annotationId;
+      const stillPresent = result.textAnnotations.some((a) => a.id === affectedId);
+      if (!stillPresent && selectedTextAnnotationId === affectedId) {
+        setSelectedTextAnnotationId(undefined);
+      }
+    },
+    [replaceMaterialPageAnnotationStrokesForMaterial, saveTextAnnotations, selectedTextAnnotationId],
+  );
+
   const undoNativeCurrentPage = useCallback(() => {
-    const lid = nativeLectureIdRef.current;
     const mid = nativeMaterialIdRef.current;
     const page = nativeCurrentPageRef.current;
-    if (!lid || !mid || !Number.isFinite(page) || page <= 0) return;
-    const strokes = annotationsForMaterialPage(mid, page);
-    const removeIndex = strokes.map((stroke, index) => ({ stroke, index }))
-      .reverse()
-      .find(({ stroke }) => stroke.coordSpace === 'pdfPage')?.index;
-    if (removeIndex == null) return;
-    const removed = strokes[removeIndex];
-    const next = strokes.filter((_, index) => index !== removeIndex);
-    replaceMaterialPageAnnotationStrokesForMaterial(mid, page, next, materialScopeLectureId(mid));
-    setNativeRedoStack((stack) => [...stack, removed]);
-  }, [annotationsForMaterialPage, replaceMaterialPageAnnotationStrokesForMaterial]);
+    if (!mid || !Number.isFinite(page) || page <= 0) return;
+    const popped = popMaterialHistoryUndo(nativeHistory);
+    if (!popped) return;
+    const strokes = annotationsForMaterialPage(mid, popped.action.pageNumber);
+    const texts = textAnnotationsForMaterialPage(mid, popped.action.pageNumber);
+    const result = applyMaterialHistoryUndo(popped.action, strokes, texts);
+    setNativeHistory(popped.state);
+    applyNativeHistoryStep(popped.action, result);
+  }, [annotationsForMaterialPage, applyNativeHistoryStep, nativeHistory, textAnnotationsForMaterialPage]);
 
   const redoNativeCurrentPage = useCallback(() => {
-    const lid = nativeLectureIdRef.current;
     const mid = nativeMaterialIdRef.current;
     const page = nativeCurrentPageRef.current;
-    if (!lid || !mid || !Number.isFinite(page) || page <= 0 || nativeRedoStack.length === 0) return;
-    const restored = nativeRedoStack[nativeRedoStack.length - 1];
-    setNativeRedoStack((stack) => stack.slice(0, -1));
-    addAnnotationStroke(materialReviewMode ? materialScopeLectureId(mid) : lid, mid, page, restored);
-  }, [addAnnotationStroke, materialReviewMode, nativeRedoStack]);
+    if (!mid || !Number.isFinite(page) || page <= 0) return;
+    const popped = popMaterialHistoryRedo(nativeHistory);
+    if (!popped) return;
+    const strokes = annotationsForMaterialPage(mid, popped.action.pageNumber);
+    const texts = textAnnotationsForMaterialPage(mid, popped.action.pageNumber);
+    const result = applyMaterialHistoryRedo(popped.action, strokes, texts);
+    setNativeHistory(popped.state);
+    applyNativeHistoryStep(popped.action, result);
+  }, [annotationsForMaterialPage, applyNativeHistoryStep, nativeHistory, textAnnotationsForMaterialPage]);
 
   // ---- Empty / error states ----
   if (!material) {
@@ -1034,7 +1166,7 @@ export default function LectureMaterialWorkspaceScreen() {
           onViewportDiagnostic={handleNativeViewportDiagnostic}
           onError={(event) => handlePdfError(new Error(event.message))}
           onAnnotationsChanged={handleNativeAnnotationCommitted}
-          onEraserGestureEnded={restoreNativeTemporaryEraserIfNeeded}
+          onEraserGestureEnded={handleNativeEraserGestureEnded}
           onTextAnnotationAction={handleNativeTextAnnotationAction}
         />
       ) : Pdf ? (
@@ -1177,10 +1309,11 @@ export default function LectureMaterialWorkspaceScreen() {
         <MaterialFloatingToolbar
           mode={nativeAnnotationMode}
           onChangeMode={handleNativeModeChange}
+          showTextTool
           onUndo={undoNativeCurrentPage}
-          canUndo={pageStrokes.some((stroke) => stroke.coordSpace === 'pdfPage')}
+          canUndo={nativeHistory.undo.length > 0}
           onRedo={redoNativeCurrentPage}
-          canRedo={nativeRedoStack.length > 0}
+          canRedo={nativeHistory.redo.length > 0}
           penColors={PEN_COLORS}
           penColor={nativePenColor}
           highlighterColors={HIGHLIGHTER_COLORS}
@@ -1198,7 +1331,12 @@ export default function LectureMaterialWorkspaceScreen() {
       ) : Pdf ? (
         <MaterialFloatingToolbar
           mode={annotationMode}
-          onChangeMode={setAnnotationMode}
+          // showTextTool is omitted (default false) — the legacy JS-overlay
+          // path has no text model, so the toolbar never offers Text here.
+          // This adapter exists only so the shared prop type can stay the
+          // wider MaterialToolMode without narrowing it for the native path;
+          // 'text' can never actually reach setAnnotationMode at runtime.
+          onChangeMode={(next) => { if (next !== 'text') setAnnotationMode(next); }}
           onUndo={undoCurrentPage}
           canUndo={pageStrokes.length > 0}
           onRedo={redoCurrentPage}
@@ -1227,18 +1365,6 @@ export default function LectureMaterialWorkspaceScreen() {
         onGo={handleJumpGo}
       />
 
-      <Modal transparent visible={Boolean(editingText)} animationType="fade" onRequestClose={() => setEditingText(null)}>
-        <KeyboardAvoidingView style={styles.textEditorBackdrop} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-          <View style={styles.textEditorCard}>
-            <Text style={styles.textEditorTitle}>Edit pasted text</Text>
-            <TextInput value={editingTextValue} onChangeText={setEditingTextValue} multiline autoFocus style={styles.textEditorInput} />
-            <View style={styles.textEditorActions}>
-              <Pressable onPress={() => setEditingText(null)} style={styles.softButton}><Text style={styles.softButtonLabel}>Cancel</Text></Pressable>
-              <Pressable onPress={saveEditedText} style={styles.primaryButton}><Text style={styles.primaryButtonLabel}>Save</Text></Pressable>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
     </View>
   );
 }
@@ -1512,13 +1638,6 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.94)', borderWidth: 1, borderColor: colors.border,
     alignItems: 'center', justifyContent: 'center', zIndex: 12,
   },
-  textEditorBackdrop: { flex: 1, backgroundColor: 'rgba(6,27,52,0.35)', alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
-  textEditorCard: { width: '100%', maxWidth: 480, backgroundColor: colors.surface, borderRadius: radius.lg, padding: spacing.lg, gap: spacing.md },
-  textEditorTitle: { fontSize: fontSize.lg, fontWeight: '700', color: colors.textPrimary },
-  textEditorInput: { minHeight: 130, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, color: colors.textPrimary, padding: spacing.md, textAlignVertical: 'top' },
-  textEditorActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: spacing.sm },
-  primaryButton: { backgroundColor: colors.deepNavy, borderRadius: radius.md, paddingHorizontal: spacing.lg, paddingVertical: spacing.sm, justifyContent: 'center' },
-  primaryButtonLabel: { color: colors.surface, fontWeight: '700' },
   // PDF view fills the entire screen (no card, no margins).
   pdfFill: { ...StyleSheet.absoluteFillObject, backgroundColor: colors.background },
   // Legacy JS fallback wrap (only rendered when native isn't available — on

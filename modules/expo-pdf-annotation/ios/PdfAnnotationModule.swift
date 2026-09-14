@@ -82,6 +82,9 @@ public final class ExpoPdfAnnotationModule: Module {
       AsyncFunction("captureViewportAsync") { (view: PdfAnnotationView) -> [String: Any] in
         view.captureViewportPayload()
       }
+      AsyncFunction("markStrokeRemovalIntentAsync") { (view: PdfAnnotationView, ids: [String]) in
+        view.markStrokeRemovalIntent(ids: ids)
+      }
     }
   }
 }
@@ -108,23 +111,49 @@ enum PdfAnnotatedExporter {
         let bounds = page?.bounds(for: .mediaBox) ?? finalBounds
         rendererContext.beginPage(withBounds: bounds, pageInfo: [:])
         let context = rendererContext.cgContext
-        if let page { page.draw(with: .mediaBox, to: context) }
-        drawStrokes(strokes[String(index + 1)] as? [[String: Any]] ?? [], context: context)
+        if let page {
+          // UIGraphicsPDFRenderer hands out a context in the top-left-origin,
+          // y-down (UIKit) coordinate convention. PDFPage.draw(with:to:) draws
+          // assuming the standard PDF bottom-left-origin, y-up convention —
+          // calling it directly here rendered every exported page vertically
+          // mirrored (proven via an isolated fixture export: TOP/BOTTOM swapped,
+          // every glyph upside-down). This flips the context to PDF's own
+          // convention for just this one draw call, then restores it so the
+          // annotation drawing below (already authored for this context's
+          // native y-down convention) is unaffected.
+          context.saveGState()
+          context.translateBy(x: 0, y: bounds.height)
+          context.scaleBy(x: 1, y: -1)
+          page.draw(with: .mediaBox, to: context)
+          context.restoreGState()
+        }
+        drawStrokes(strokes[String(index + 1)] as? [[String: Any]] ?? [], context: context, pageHeight: bounds.height)
         drawText(texts[String(index + 1)] as? [[String: Any]] ?? [], context: context, pageHeight: bounds.height)
       }
     }
     return destination.absoluteString
   }
 
-  private static func drawStrokes(_ strokes: [[String: Any]], context: CGContext) {
+  private static func drawStrokes(_ strokes: [[String: Any]], context: CGContext, pageHeight: CGFloat) {
+    // Stroke points are captured and stored in PDF PAGE space — bottom-left
+    // origin, y-UP (PdfAnnotationView captures them via
+    // `pdfView.convert(viewPoint, to: page)`). The export context supplied by
+    // UIGraphicsPDFRenderer is top-left origin, y-DOWN. The base page above is
+    // flipped to draw correctly, then restored to y-down before annotations
+    // draw — so stroke points must be flipped here to `pageHeight - y`, the
+    // same convention drawText already uses for this same y-down context, or
+    // every stroke renders vertically mirrored relative to the (correct) base
+    // page (physically observed: printed content upright, handwriting
+    // upside-down). Proven by the rendered geometry fixture in
+    // __tests__/pdf_export_annotation_orientation_fixture.swift.
     for stroke in strokes {
       guard let raw = stroke["points"] as? [[Double]], let first = raw.first, first.count >= 2 else { continue }
       context.saveGState()
       if (stroke["tool"] as? String) == "highlighter" { context.setBlendMode(.multiply) }
       context.setStrokeColor(PdfExporterColor(hex: stroke["color"] as? String ?? "#061B34").withAlphaComponent(CGFloat(stroke["opacity"] as? Double ?? ((stroke["tool"] as? String) == "highlighter" ? 0.34 : 1))).cgColor)
       context.setLineWidth(CGFloat(stroke["width"] as? Double ?? 2.4)); context.setLineCap(.round); context.setLineJoin(.round)
-      context.move(to: CGPoint(x: first[0], y: first[1]))
-      for point in raw.dropFirst() where point.count >= 2 { context.addLine(to: CGPoint(x: point[0], y: point[1])) }
+      context.move(to: CGPoint(x: first[0], y: pageHeight - first[1]))
+      for point in raw.dropFirst() where point.count >= 2 { context.addLine(to: CGPoint(x: point[0], y: pageHeight - point[1])) }
       context.strokePath()
       context.restoreGState()
     }

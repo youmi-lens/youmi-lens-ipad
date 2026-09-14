@@ -102,6 +102,7 @@ export default function RecentlyDeletedScreen() {
     deletedCourses,
     deletedLectures,
     restoreCourse,
+    retryCourseDeletion,
     restoreLecture,
     retryLectureDeletion,
     permanentlyDeleteCourse,
@@ -180,7 +181,20 @@ export default function RecentlyDeletedScreen() {
                       title={localizeSystemDefaultTitle(t, course.name)}
                       typeLabel="Course"
                       deletedAt={course.deletedAt ?? null}
-                      onRestore={() => restoreCourse(course.id)}
+                      deletionSyncState={course.deletionSyncState}
+                      onRestore={() => {
+                        void restoreCourse(course.id).then((result) => {
+                          if (!result.ok) {
+                            Alert.alert(
+                              result.reason === 'name_conflict' ? 'Course cannot be restored' : 'Could not restore course',
+                              result.reason === 'name_conflict'
+                                ? 'A course with this name already exists. The deleted course was left unchanged.'
+                                : 'The restore was not confirmed in the cloud. Please try again.',
+                            );
+                          }
+                        });
+                      }}
+                      onRetryDeletion={() => retryCourseDeletion(course.id)}
                       onPermanentDelete={() =>
                         confirmPermanentDelete('course', course.id, course.name)
                       }

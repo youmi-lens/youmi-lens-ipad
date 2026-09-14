@@ -107,13 +107,14 @@ export default function RecordHomeScreen() {
   const startQuickRecording = () => {
     if (guestAllowanceUsedUp) return promptGuestSignIn();
     const preset = COURSE_PRESETS[0];
-    const course = createCourse({
+    const result = createCourse({
       name: 'General Lectures',
       icon: preset.icon,
       tint: preset.tint,
       accent: preset.accent,
     });
-    router.push({ pathname: '/recording', params: { courseId: course.id, lectureTitle: '' } });
+    if (!result.ok) return;
+    router.push({ pathname: '/recording', params: { courseId: result.course.id, lectureTitle: '' } });
   };
   const startRecording = () => {
     if (!selectedCourse) return;
