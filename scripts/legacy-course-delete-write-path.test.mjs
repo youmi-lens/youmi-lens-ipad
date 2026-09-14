@@ -135,14 +135,24 @@ check('legacy name-derivation (step 2) skips any name already reserved by an ACT
   assert.match(mergeStep2, /if \(hasActiveCourseByName\(nameKey\)\) continue;/);
 });
 
-console.log('5 — call sites pass the Course name through, and canonical Course lifecycle is untouched');
-check('deleteCourse resolves the name from local state and passes it to writeCourseDeletion', () => {
-  assert.match(deleteCourseFn, /const courseName = coursesRef\.current\.find\(\(c\) => c\.id === id\)\?\.name/);
-  assert.match(deleteCourseFn, /writeCourseDeletion\(currentUserId, id, courseName, now, now\)/);
+console.log('5 — the explicit delete/restore actions now use the UUID-keyed sync path; writeCourseDeletion stays live for its one remaining caller');
+check('deleteCourse (explicit user action) is UUID-keyed via syncCourseDeletion, not writeCourseDeletion — see course-deletion-confirm-timestamp.test.mjs (#6)', () => {
+  // Release A (#6): deleteCourse/restoreCourse's own confirmation used to be a
+  // byte-identical timestamp compare through writeCourseDeletion, which never
+  // confirmed a real write (Z vs +00:00 — see course-deletion-confirm-timestamp
+  // .test.mjs). syncCourseDeletion supersedes it for these two explicit,
+  // UUID-only actions; this file's sections 1-4 above are untouched — legacy
+  // (synthetic-id) Courses have no UUID and are unaffected by that fix.
+  assert.match(deleteCourseFn, /void syncCourseDeletion\(id, now, now\)/);
+  assert.doesNotMatch(deleteCourseFn, /writeCourseDeletion\(/);
 });
-check('restoreCourse resolves the name from local state and passes it to writeCourseDeletion', () => {
-  assert.match(restoreCourseFn, /const courseName = coursesRef\.current\.find\(\(c\) => c\.id === id\)\?\.name/);
-  assert.match(restoreCourseFn, /writeCourseDeletion\(currentUserId, id, courseName, null, now\)/);
+check('restoreCourse (explicit user action) is UUID-keyed via syncCourseDeletion, not writeCourseDeletion', () => {
+  assert.match(restoreCourseFn, /await syncCourseDeletion\(id, null, now\)/);
+  assert.doesNotMatch(restoreCourseFn, /writeCourseDeletion\(/);
+});
+check('writeCourseDeletion is not dead code: restoreLecture still routes its own course-side-effect through it, unchanged', () => {
+  const restoreLectureFn = store.slice(store.indexOf('const restoreLecture = useCallback'), store.indexOf('const permanentlyDeleteCourse'));
+  assert.match(restoreLectureFn, /writeCourseDeletion\(currentUserId, target\.courseId, course\.name, null, now\)/);
 });
 check('createCourse — the "delete then recreate with the same name" path — is unmodified by this fix', () => {
   assert.match(createCourseFn, /id: makeUuid\(\)/);

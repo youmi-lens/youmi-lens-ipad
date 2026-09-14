@@ -54,7 +54,11 @@ check('2. reconciliation inserts only when no cloud row reserves the local name'
   assert.match(reconcile, /\.from\('courses'\)\s*\.insert\(\{ id: cloudId, user_id: currentUserId, name, icon: course\.icon/);
 });
 check('3. course identity is a stable UUID (reuse local UUID, else mint one)', () => {
-  assert.match(reconcile, /const cloudId = uuidRe\.test\(course\.id\) \? course\.id : makeUuid\(\)/);
+  // Release A (#8): the inline uuidRe.test(course.id) check was hoisted into
+  // isCanonicalCourse, computed once and reused for both the block-suppression
+  // decision and this identity choice — same behavior, named once.
+  assert.match(reconcile, /const isCanonicalCourse = uuidRe\.test\(course\.id\);/);
+  assert.match(reconcile, /const cloudId = isCanonicalCourse \? course\.id : makeUuid\(\)/);
   // merge keys courses by the cloud courses.id.
   assert.match(store, /cloudCourseIds\.add\(cr\.id\);/);
 });
@@ -63,7 +67,15 @@ check('reconciliation is scoped: active, non-Unfiled, non-purged, tombstone-rese
   assert.match(reconcile, /if \(nameKey === UNFILED_COURSE_NAME\.toLowerCase\(\)\) continue;/);
   assert.match(reconcile, /remoteCourses\s*\.map\(/);
   assert.doesNotMatch(reconcile, /remoteCourses\s*\.filter\(\(c\) => !c\.deleted_at\)/);
-  assert.match(reconcile, /if \(knownCloudCourseNames\.has\(nameKey\)\) continue;/);
+  // Release A (#8): canonical (UUID-id) courses are now suppressed by exact
+  // cloud UUID, never by name — a soft-deleted predecessor sharing the name
+  // must never block a new same-name UUID's retry insert (the delete/recreate
+  // race this fix exists for). Legacy name-derived courses (no stable cloud
+  // id of their own) keep the conservative name-based guard.
+  assert.match(reconcile, /if \(isCanonicalCourse\s*\n\s*\? knownCloudCourseIds\.has\(course\.id\)\s*\n\s*: knownCloudCourseNames\.has\(nameKey\)\) continue;/);
+  // A legacy recording's historical course_id may retain this display name
+  // forever — that must not block a different, newly-created canonical UUID.
+  assert.match(reconcile, /if \(!isCanonicalCourse && linkedCourseNames\.has\(nameKey\)\) continue;/);
   // isPurgedCourseName expects a toTombstoneIndex(...) result (index.courseNames
   // is a Set), not the raw tombstones object (courseNames is a plain array).
   // Passing tombstonesRef.current directly threw `courseNames.has is not a
@@ -71,11 +83,20 @@ check('reconciliation is scoped: active, non-Unfiled, non-purged, tombstone-rese
   // caller's try/catch, so the tombstone check was permanently a no-op and the
   // whole reconcile (and therefore every downstream course-list update) never
   // completed. Proven live: real device / simulator session, staging account.
-  assert.match(reconcile, /if \(isPurgedCourseName\(toTombstoneIndex\(tombstonesRef\.current\), name\)\) continue;/);
+  // Release A (#8): also scoped to legacy courses only — a canonical UUID may
+  // legitimately reuse a permanently-deleted display name.
+  assert.match(reconcile, /if \(!isCanonicalCourse && isPurgedCourseName\(toTombstoneIndex\(tombstonesRef\.current\), name\)\) continue;/);
   assert.match(reconcile, /if \(syncingCoursesRef\.current\.has\(nameKey\)\) continue;/);
 });
-check('reconciliation is production-tolerant (retry name-only where icon/tint/accent absent)', () => {
-  assert.match(reconcile, /if \(res\.error\) res = await supabase\.from\('courses'\)\.insert\(\{ id: cloudId, user_id: currentUserId, name \}\)/);
+check('reconciliation retries on a real write failure, but never retries a genuine duplicate-name collision', () => {
+  // Release A: the retry used to drop to a name-only insert unconditionally on
+  // ANY error — which obscured a real 23505 (duplicate active name) behind an
+  // unrelated icon-not-null failure on the current schema, and retrying could
+  // never resolve a genuine name collision anyway. It now keeps the full
+  // visual-field payload on the bounded compatibility retry, and skips
+  // retrying entirely when the error IS the duplicate-name collision.
+  assert.match(reconcile, /if \(res\.error && res\.error\.code !== '23505'\) \{/);
+  assert.match(reconcile, /res = await supabase\s*\n\s*\.from\('courses'\)\s*\n\s*\.insert\(\{ id: cloudId, user_id: currentUserId, name, icon: course\.icon, tint: course\.tint, accent: course\.accent \}\);/);
 });
 
 console.log('B/4/5/6 — course_id association');
