@@ -38,6 +38,14 @@
       "env": {
         "APP_VARIANT": "development"
       }
+    },
+    "recording-reliability-b-dogfood": {
+      "distribution": "internal",
+      "environment": "production",
+      "env": {
+        "APP_VARIANT": "development",
+        "EXPO_PUBLIC_NATIVE_RECORDER_DOGFOOD": "1"
+      }
     }
   },
   "submit": {
