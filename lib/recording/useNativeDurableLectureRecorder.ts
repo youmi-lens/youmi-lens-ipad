@@ -169,23 +169,27 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
     }
   }, [applySession, fail]);
 
-  useEffect(() => () => {
-    const session = sessionRef.current;
-    if (enabled && activeRef.current && session) {
-      void pauseNative({ recordingSessionId: session.recordingSessionId }).catch(() => {});
-      activeRef.current = false;
-    }
-  }, [enabled]);
-
   useEffect(() => {
     if (!enabled) return;
     let mounted = true;
-    void Promise.all([getMicrophonePermissionStatus(), listRecoverableSessions()]).then(([state, sessions]) => {
+    // The Expo native module, not this React hook, owns an active durable
+    // capture. A screen can unmount while the module keeps recording and
+    // checkpointing. On remount, read live native status as well as durable
+    // metadata so the UI reattaches rather than treating navigation as Pause.
+    void Promise.all([
+      getMicrophonePermissionStatus(),
+      listRecoverableSessions(),
+      getRecordingStatus().catch(() => null),
+    ]).then(([state, sessions, liveStatus]) => {
       if (!mounted) return;
       setPermissionStatus(permission(state)); setPermissionChecked(true);
       const match = recoverableSessionsForLecture(sessions, lectureId)[0] ?? null;
       setRecoverableSession(match);
-      if (match) applySession(match);
+      const liveMatch = match && liveStatus?.recordingSessionId === match.recordingSessionId
+        ? liveStatus?.session ?? null
+        : null;
+      if (liveMatch) noteStatusSequence(liveStatus);
+      if (liveMatch ?? match) applySession(liveMatch ?? match);
       logRecordingEvent('recorder_engine_selected', {
         engine: 'nativeDurable',
         hasRecoverableSession: Boolean(match),
@@ -207,7 +211,7 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
       logRecordingEvent('native_initialization_failed', { reason: 'native_storage_unavailable' });
     }).finally(() => { if (mounted) setRecoveryChecked(true); });
     return () => { mounted = false; };
-  }, [applySession, enabled, lectureId]);
+  }, [applySession, enabled, lectureId, noteStatusSequence]);
 
   // Native is authoritative for forced-pause. One listener for the hook lifetime.
   useEffect(() => {
@@ -372,9 +376,12 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
     const session = sessionRef.current; return session ? finishSession(session) : null;
   }, [finishSession]);
   const leaveRecording = useCallback(async () => {
-    if (isRecording) await pauseRecording();
+    // Deliberately no-op for the durable engine. Navigation and React
+    // unmounting are not recording-state transitions; only pauseRecording
+    // and stopRecording may stop native capture. The native module retains
+    // exclusive ownership of this recordingSessionId while the screen is away.
     return null;
-  }, [isRecording, pauseRecording]);
+  }, []);
   const recoverRecording = useCallback(async () => {
     const session = recoverableSession; if (!session) return false;
     try {

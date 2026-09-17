@@ -200,7 +200,14 @@ export default function RecordingScreen() {
   // are shown but the recorder/mic/live captions do NOT start until the user
   // resumes from the existing central Pause/Continue control.
   const [continueRequested, setContinueRequested] = useState(false);
-  const isReviewingResume = isResume && !continueRequested;
+  // A durable session that remains native-recording belongs to the persistent
+  // native module, not to the earlier Recording screen instance. This is a
+  // live reattachment, not the paused review state used for an intentional
+  // reopen of a previously-paused lecture.
+  const isLiveNativeReattachment = recordingEngine === 'nativeDurable'
+    && recoverableSession?.state === 'recording'
+    && isRecording;
+  const isReviewingResume = isResume && !continueRequested && !isLiveNativeReattachment;
   // New content APPENDS to the resumed lecture's id (no duplicate); a fresh
   // recording reserves a new id. Prior caption history / marks / audio are
   // snapshotted once at mount so we can merge new content onto them.
@@ -682,6 +689,15 @@ export default function RecordingScreen() {
     if (!isGuest && !finishedRef.current) {
       stopMicStream();
       stopLiveCaptions();
+      // A nativeDurable recording is owned by the persistent native module,
+      // so returning to Course must not be translated into Pause. Persist the
+      // product-side lecture shell, then let this same native session keep
+      // checkpointing until the owner explicitly presses Pause or Finish.
+      if (recordingEngine === 'nativeDurable' && isRecording) {
+        persistProgress();
+        router.back();
+        return;
+      }
       let uri: string | null = null;
       try {
         uri = await leaveRecording();
@@ -1414,7 +1430,7 @@ export default function RecordingScreen() {
           </Modal>
 
           <Modal
-            visible={Boolean(recoverableSession) && !recoveryDismissed}
+            visible={Boolean(recoverableSession) && !recoveryDismissed && !isLiveNativeReattachment}
             transparent
             animationType="fade"
             onRequestClose={() => { setRecoveryDismissed(true); dismissRecovery(); }}
