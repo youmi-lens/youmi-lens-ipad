@@ -27,7 +27,12 @@ type LectureStatusDisplay = {
 
 function lectureStatus(lecture: Lecture, t: (key: string) => string): LectureStatusDisplay {
   if (lecture.status === 'in_progress') return { label: t('status.inProgress'), variant: 'recording' };
-  if (lecture.processingStatus === 'ready' || (lecture.transcript && (lecture.summaryEn || lecture.summaryZh))) {
+  // A partial transcript/summary can arrive while the backend is still
+  // processing (for example, before the translated pair or final summary is
+  // complete). The Processing gate and Lecture Detail both use the canonical
+  // `isLectureComplete` predicate, so the list must use it too. Otherwise the
+  // same persisted lecture can say READY here but route to Processing on tap.
+  if (isLectureComplete(lecture)) {
     return { label: t('status.ready'), variant: 'done' };
   }
   if (lecture.processingStatus === 'processing') return { label: t('status.processing'), variant: 'processing' };

@@ -66,6 +66,16 @@ check('navigation gating (course list, home list) routes on the SAME isLectureCo
   assert.match(homeScreen, /isLectureComplete\(lecture\)/);
 });
 
+check('Course list READY pill uses the same canonical predicate as its navigation gate — partial artifacts alone never promote a lecture to READY', () => {
+  const statusFn = courseScreen.slice(courseScreen.indexOf('function lectureStatus'), courseScreen.indexOf('export default function CourseDetailScreen'));
+  assert.match(statusFn, /if \(isLectureComplete\(lecture\)\) \{/);
+  assert.doesNotMatch(
+    statusFn,
+    /lecture\.transcript\s*&&\s*\(lecture\.summaryEn\s*\|\|\s*lecture\.summaryZh\)/,
+    'only processingStatus === ready may render READY',
+  );
+});
+
 console.log('\nTerminal completion actually stops polling (does not keep loading forever)');
 
 check('the poll loop stops as soon as the merged patch reaches a terminal status (ready or failed) — it does not keep ticking past completion', () => {
