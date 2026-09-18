@@ -2340,6 +2340,15 @@ final class AnnotationOverlay: UIView {
       }
       if !annotations.isEmpty { loaded[pageNumber] = annotations }
     }
+    // The JS-side prop can be resent with byte-identical content on a
+    // cadence tied to unrelated app activity (recording autosave, any other
+    // unrelated store update — see the JS caller's own doc comment). Without
+    // this check, every resend redraws every committed text annotation even
+    // though nothing about it changed — the exact mechanism behind pasted/
+    // committed text visually flashing independent of anything the user did
+    // on this screen. Defense-in-depth: correct even if a future caller ever
+    // sends this prop unmemoized.
+    if loaded == pagedTextAnnotations { return }
     pagedTextAnnotations = loaded
     setNeedsDisplay()
   }
@@ -2669,7 +2678,7 @@ struct AnnotationStroke {
   let createdAt: String
 }
 
-struct TextAnnotation {
+struct TextAnnotation: Equatable {
   let id: String
   let text: String
   let x: Double

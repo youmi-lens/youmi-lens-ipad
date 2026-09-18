@@ -44,7 +44,7 @@ import {
 import { NativePdfAnnotationView, type NativePdfAnnotationViewRef } from '@/components/NativePdfAnnotationView';
 import { colors, fontSize, radius, spacing } from '@/constants/theme';
 import { resolveMaterialUri } from '@/lib/importMaterial';
-import { clampedMaterialResumePage, compositePageCount, appendedPageCountAfterFinalPageContent } from '@/lib/materialWorkspace';
+import { clampedMaterialResumePage, compositePageCount, appendedPageCountAfterFinalPageContent, textAnnotationsByPageEqual } from '@/lib/materialWorkspace';
 import { materialViewportEqual, normalizeMaterialViewport } from '@/lib/materialViewport';
 import {
   EMPTY_MATERIAL_HISTORY,
@@ -750,6 +750,17 @@ export default function LectureMaterialWorkspaceScreen() {
     return grouped;
   }, [annotationsForMaterialPage, lectureId, material?.id, material?.pageCount, totalPages, useNativePdfViewer]);
 
+  // `textAnnotationsForMaterialPage`'s reference changes on every unrelated
+  // DataContext update (recording autosave, an unrelated lecture edit —
+  // see nativeAnnotationsByPage's own doc comment above for the sibling,
+  // stroke-side version of this same churn), which would otherwise rebuild
+  // this grouped object from scratch and hand the native overlay a "new"
+  // prop even when no text annotation actually changed — and native
+  // unconditionally reloads + redraws on every prop set (see
+  // PdfAnnotationView.swift's loadTextAnnotations). textAnnotationsByPageEqual
+  // lets an unrelated recompute keep returning the SAME object identity, so
+  // committed/pasted text only ever re-renders when its own content did.
+  const lastTextAnnotationsByPageRef = useRef<NativePdfTextAnnotationsByPage>({});
   const nativeTextAnnotationsByPage = useMemo<NativePdfTextAnnotationsByPage>(() => {
     const grouped: NativePdfTextAnnotationsByPage = {};
     if (!useNativePdfViewer || !material?.id) return grouped;
@@ -758,6 +769,10 @@ export default function LectureMaterialWorkspaceScreen() {
       const annotations = textAnnotationsForMaterialPage(material.id, page);
       if (annotations.length > 0) grouped[String(page)] = annotations;
     }
+    if (textAnnotationsByPageEqual(lastTextAnnotationsByPageRef.current, grouped)) {
+      return lastTextAnnotationsByPageRef.current;
+    }
+    lastTextAnnotationsByPageRef.current = grouped;
     return grouped;
   }, [material?.id, material?.pageCount, textAnnotationsForMaterialPage, totalPages, useNativePdfViewer]);
 
