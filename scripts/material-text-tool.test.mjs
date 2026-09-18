@@ -223,13 +223,16 @@ const commitFn = materialScreen.slice(
   materialScreen.indexOf('const handleNativeEraserGestureEnded = useCallback('),
 );
 
-check('replacePage captures the "before" snapshot only on the FIRST event since the last committed batch (not every event)', () => {
-  assert.match(commitFn, /if \(!eraseBatchBeforeRef\.current \|\| eraseBatchBeforeRef\.current\.pageNumber !== page\) \{\s*\n\s*eraseBatchBeforeRef\.current = \{ pageNumber: page, strokes: annotationsForMaterialPage\(mid, page\) \};\s*\n\s*\}/);
+check('replacePage captures its before snapshot and the native final payload in the same callback, before the async store update', () => {
+  const replacePageBranch = commitFn.slice(commitFn.indexOf("if (event.action === 'replacePage')"), commitFn.indexOf('if (!event.stroke)'));
+  assert.match(replacePageBranch, /const before = annotationsForMaterialPage\(mid, page\)/);
+  assert.match(replacePageBranch, /const nextStrokes = event\.strokes\.map\(toStoreStroke\)/);
+  assert.ok(replacePageBranch.indexOf('const before =') < replacePageBranch.indexOf('replaceMaterialPageAnnotationStrokesForMaterial'), 'history input is captured before the store mutates');
 });
 
-check('replacePage itself never pushes history — that is deferred to the gesture-end batching boundary', () => {
+check('replacePage pushes exactly one stroke-erase action for the native gesture-final replacement', () => {
   const replacePageBranch = commitFn.slice(commitFn.indexOf("if (event.action === 'replacePage')"), commitFn.indexOf('if (!event.stroke)'));
-  assert.doesNotMatch(replacePageBranch, /pushMaterialHistory/);
+  assert.match(replacePageBranch, /pushMaterialHistory\(h, \{\s*\n\s*kind: 'stroke-erase', pageNumber: page, before, after: nextStrokes,/);
 });
 
 check('a single drawn stroke still pushes exactly one stroke-add action (unchanged from STAGE 1 intent)', () => {
@@ -239,16 +242,12 @@ check('a single drawn stroke still pushes exactly one stroke-add action (unchang
 
 const eraserEndedFn = materialScreen.slice(
   materialScreen.indexOf('const handleNativeEraserGestureEnded = useCallback('),
-  materialScreen.indexOf('}, [annotationsForMaterialPage, restoreNativeTemporaryEraserIfNeeded]);'),
+  materialScreen.indexOf('const addPageStroke = useCallback('),
 );
 
-check('the batch ref is cleared immediately at gesture end (so the NEXT erase gesture starts a fresh batch)', () => {
-  assert.match(eraserEndedFn, /const before = eraseBatchBeforeRef\.current;\s*\n\s*eraseBatchBeforeRef\.current = null;/);
-});
-
-check('pushes exactly one stroke-erase action covering the whole gesture, only if something actually changed', () => {
-  assert.match(eraserEndedFn, /kind: 'stroke-erase', pageNumber: before\.pageNumber, before: before\.strokes, after,/);
-  assert.match(eraserEndedFn, /const changed = beforeIds\.size !== afterIds\.size \|\| \[\.\.\.beforeIds\]\.some\(\(id\) => !afterIds\.has\(id\)\);/);
+check('gesture-end no longer reads an asynchronously-updated store; it only restores temporary eraser state', () => {
+  assert.doesNotMatch(eraserEndedFn, /annotationsForMaterialPage/);
+  assert.doesNotMatch(eraserEndedFn, /pushMaterialHistory/);
 });
 
 check('still restores the temporary-eraser tool state afterward — existing double-tap-eraser behavior is preserved', () => {

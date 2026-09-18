@@ -69,9 +69,11 @@ check('the gesture handlers drive the live-ink ref, never a parent state setter,
   assert.doesNotMatch(addPointFn, /setCurrentPoints/, 'addPoint must never call a parent state setter (that is the re-render-per-point regression)');
 });
 
-check('committed strokes are memoized on the strokes prop alone — never recomputed while only the live stroke changes', () => {
-  assert.match(overlay, /const highlighterStrokes = useMemo\(\(\) => strokes\.filter\(.*\), \[strokes\]\)/, 'highlighterStrokes recomputes only when strokes actually changes');
-  assert.match(overlay, /const penStrokes = useMemo\(\(\) => strokes\.filter\(.*\), \[strokes\]\)/, 'penStrokes recomputes only when strokes actually changes');
+check('committed strokes are memoized, with only a local erased-id suppression layer during an erase gesture', () => {
+  assert.match(overlay, /const visibleStrokes = useMemo\(/, 'visual suppression is derived once per erase acknowledgement, not per Pencil point');
+  assert.match(overlay, /strokes\.filter\(\(stroke\) => !suppressedEraseIds\.has\(stroke\.id\)\)/);
+  assert.match(overlay, /const highlighterStrokes = useMemo\(\(\) => visibleStrokes\.filter/, 'highlighter partition remains memoized');
+  assert.match(overlay, /const penStrokes = useMemo\(\(\) => visibleStrokes\.filter/, 'pen partition remains memoized');
 });
 
 console.log('\nSaved-stroke compatibility (must not change persisted shape)');

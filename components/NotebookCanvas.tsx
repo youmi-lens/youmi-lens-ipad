@@ -72,6 +72,7 @@ import Svg, {
 import Reanimated, { runOnJS, useAnimatedScrollHandler, useAnimatedStyle, useSharedValue } from 'react-native-reanimated';
 
 import { colors, fontSize, radius, shadows, spacing } from '@/constants/theme';
+import { strokeBounds, strokeNearSweep, sweepMayReachBounds } from '@/lib/inkEraser.mjs';
 import type { NoteImage, NotePoint, NoteStroke } from '@/lib/models';
 import { useT } from '@/lib/i18n';
 import { PressableScale } from '@/components/PressableScale';
@@ -450,32 +451,6 @@ function resizeImageFromCorner(
     canvasWidth,
     canvasHeight,
   );
-}
-
-function distancePointToSegment(point: NotePoint, a: NotePoint, b: NotePoint): number {
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  const lengthSquared = dx * dx + dy * dy;
-  if (lengthSquared <= 0.0001) return Math.hypot(point.x - a.x, point.y - a.y);
-  const t = Math.max(0, Math.min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / lengthSquared));
-  const projection = { x: a.x + t * dx, y: a.y + t * dy };
-  return Math.hypot(point.x - projection.x, point.y - projection.y);
-}
-
-function strokeNearPoint(stroke: NoteStroke, x: number, y: number, eraserRadius: number): boolean {
-  const points = stroke.points;
-  if (points.length === 0) return false;
-  const threshold = eraserRadius + Math.max(1, stroke.width / 2);
-  const eraserPoint = { x, y };
-  if (points.length === 1) {
-    return Math.hypot(points[0].x - x, points[0].y - y) <= threshold;
-  }
-  for (let i = 0; i < points.length - 1; i += 1) {
-    if (distancePointToSegment(eraserPoint, points[i], points[i + 1]) <= threshold) {
-      return true;
-    }
-  }
-  return false;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -1363,7 +1338,11 @@ export const NotebookCanvas = memo(function NotebookCanvas({
   const [toolbarPreferencesLoaded, setToolbarPreferencesLoaded] = useState(false);
   const eraserRadius = ERASER_SIZES.find((option) => option.key === eraserSizeKey)?.radius ?? 26;
   const [, setTemporaryEraser] = useState(false);
-  const [erasedIds, setErasedIds] = useState<string[]>([]);
+  // Suppressed ids are visual-only during an erase. They are committed to the
+  // parent document at gesture end, but remain hidden until that committed
+  // snapshot acknowledges their absence so a stale render cannot flash ink
+  // back into view.
+  const [erasedIds, setErasedIds] = useState<Set<string>>(() => new Set());
   const [erasePoint, setErasePoint] = useState<NotePoint | null>(null);
   /**
    * Snapshot-based undo/redo history. Each completed content action pushes the
@@ -1439,7 +1418,36 @@ export const NotebookCanvas = memo(function NotebookCanvas({
   const previousDrawingToolRef = useRef<DrawingMode>('write');
   const temporaryEraserRef = useRef(false);
   /** Strokes erased during the current erase drag (committed on release). */
-  const erasedIdsRef = useRef<string[]>([]);
+  const erasedIdsRef = useRef<Set<string>>(new Set());
+  /** All visual suppressions awaiting the parent stroke snapshot. */
+  const suppressedEraseIdsRef = useRef<Set<string>>(new Set());
+  const lastErasePointRef = useRef<NotePoint | null>(null);
+  const eraseRenderFrameRef = useRef<number | null>(null);
+  const eraseCursorFrameRef = useRef<number | null>(null);
+  const pendingEraseCursorPointRef = useRef<NotePoint | null>(null);
+  const strokeHitIndex = useMemo(
+    () => strokes.map((stroke) => ({ stroke, bounds: strokeBounds(stroke.points) })),
+    [strokes],
+  );
+  const strokeHitIndexRef = useRef(strokeHitIndex);
+  strokeHitIndexRef.current = strokeHitIndex;
+
+  // A committed parent snapshot is the acknowledgement that makes a visual
+  // erase durable. Until then, keep the stroke suppressed even if an older
+  // render arrives first; Undo explicitly clears this state through
+  // applySnapshot above.
+  useEffect(() => {
+    if (suppressedEraseIdsRef.current.size === 0) return;
+    const present = new Set(strokes.map((stroke) => stroke.id));
+    let changed = false;
+    for (const id of suppressedEraseIdsRef.current) {
+      if (!present.has(id)) {
+        suppressedEraseIdsRef.current.delete(id);
+        changed = true;
+      }
+    }
+    if (changed) setErasedIds(new Set(suppressedEraseIdsRef.current));
+  }, [strokes]);
   /** True between a Pencil touch-down and the drawing gesture finishing. */
   const drawingRef = useRef(false);
   /**
@@ -2306,8 +2314,16 @@ export const NotebookCanvas = memo(function NotebookCanvas({
     onTextChangeRef.current(snap.text);
     selectedIdsRef.current = new Set();
     setSelectedIds(new Set());
-    erasedIdsRef.current = [];
-    setErasedIds([]);
+    erasedIdsRef.current.clear();
+    suppressedEraseIdsRef.current.clear();
+    lastErasePointRef.current = null;
+    if (eraseRenderFrameRef.current !== null) cancelAnimationFrame(eraseRenderFrameRef.current);
+    eraseRenderFrameRef.current = null;
+    if (eraseCursorFrameRef.current !== null) cancelAnimationFrame(eraseCursorFrameRef.current);
+    eraseCursorFrameRef.current = null;
+    pendingEraseCursorPointRef.current = null;
+    setErasedIds(new Set());
+    setErasePoint(null);
   }, []);
 
   const undo = useCallback(() => {
@@ -2587,31 +2603,71 @@ export const NotebookCanvas = memo(function NotebookCanvas({
     activeInkRef.current?.clear();
   }, [recordHistory]);
 
-  // Erase any not-yet-erased stroke whose path passes within the eraser
-  // radius of (x, y). Changes are kept local until the drag ends.
-  const eraseAt = useCallback((x: number, y: number) => {
-    // Whole-stroke erase: mark each touched stroke for removal on release.
+  const publishEraseSuppression = useCallback((immediate = false) => {
+    const publish = () => {
+      eraseRenderFrameRef.current = null;
+      setErasedIds(new Set(suppressedEraseIdsRef.current));
+    };
+    if (immediate) {
+      if (eraseRenderFrameRef.current !== null) cancelAnimationFrame(eraseRenderFrameRef.current);
+      publish();
+      return;
+    }
+    if (eraseRenderFrameRef.current === null) {
+      eraseRenderFrameRef.current = requestAnimationFrame(publish);
+    }
+  }, []);
+
+  // The cursor is decorative. Coalesce it to a frame so high-frequency Pencil
+  // samples never re-render the full SVG merely to move this ring.
+  const publishEraseCursor = useCallback((point: NotePoint | null, immediate = false) => {
+    const publish = () => {
+      eraseCursorFrameRef.current = null;
+      setErasePoint(pendingEraseCursorPointRef.current);
+    };
+    pendingEraseCursorPointRef.current = point;
+    if (immediate) {
+      if (eraseCursorFrameRef.current !== null) cancelAnimationFrame(eraseCursorFrameRef.current);
+      eraseCursorFrameRef.current = null;
+      publish();
+      return;
+    }
+    if (eraseCursorFrameRef.current === null) {
+      eraseCursorFrameRef.current = requestAnimationFrame(publish);
+    }
+  }, []);
+
+  // Each sampled movement represents a swept capsule, not a discrete point.
+  // Bounds are precomputed only when committed strokes change; the expensive
+  // segment test therefore runs only for nearby candidates during a drag.
+  const eraseAt = useCallback((from: NotePoint, to: NotePoint) => {
     let changed = false;
-    for (const stroke of strokesRef.current) {
-      if (erasedIdsRef.current.includes(stroke.id)) continue;
-      if (strokeNearPoint(stroke, x, y, eraserRadiusRef.current)) {
-        erasedIdsRef.current.push(stroke.id);
+    for (const { stroke, bounds } of strokeHitIndexRef.current) {
+      if (erasedIdsRef.current.has(stroke.id)) continue;
+      const threshold = eraserRadiusRef.current + Math.max(1, stroke.width / 2);
+      if (!sweepMayReachBounds(from, to, bounds, threshold)) continue;
+      if (strokeNearSweep(stroke, from, to, eraserRadiusRef.current)) {
+        erasedIdsRef.current.add(stroke.id);
+        suppressedEraseIdsRef.current.add(stroke.id);
         changed = true;
       }
     }
-    if (changed) setErasedIds([...erasedIdsRef.current]);
-  }, []);
+    if (changed) publishEraseSuppression();
+  }, [publishEraseSuppression]);
 
   const commitErase = useCallback(() => {
-    if (erasedIdsRef.current.length > 0) {
+    if (erasedIdsRef.current.size > 0) {
       const removed = new Set(erasedIdsRef.current);
       recordHistory();
       onStrokesChangeRef.current(strokesRef.current.filter((s) => !removed.has(s.id)));
     }
-    erasedIdsRef.current = [];
-    setErasedIds([]);
-    setErasePoint(null);
-  }, [recordHistory]);
+    erasedIdsRef.current.clear();
+    lastErasePointRef.current = null;
+    // Do NOT clear visual suppression here. The parent/cache update is
+    // asynchronous; clearing first was the one-frame resurrection path.
+    publishEraseSuppression(true);
+    publishEraseCursor(null, true);
+  }, [publishEraseCursor, publishEraseSuppression, recordHistory]);
 
   /**
    * End the live stroke: commit whichever drag was in progress (the other
@@ -2653,7 +2709,10 @@ export const NotebookCanvas = memo(function NotebookCanvas({
     drawingRef.current = false;
     activeTouchIdRef.current = null;
     activeInkRef.current?.clear();
-    erasedIdsRef.current = [];
+    const abortedEraseIds = new Set(erasedIdsRef.current);
+    erasedIdsRef.current.clear();
+    for (const id of abortedEraseIds) suppressedEraseIdsRef.current.delete(id);
+    lastErasePointRef.current = null;
     selectActionRef.current = 'idle';
     lassoPointsRef.current = [];
     selectionRectStartRef.current = null;
@@ -2661,12 +2720,12 @@ export const NotebookCanvas = memo(function NotebookCanvas({
     selectionMoveOffsetRef.current = { x: 0, y: 0 };
     imageGestureStartRef.current = null;
     endStylusScrollLock({ grace: false });
-    setErasePoint(null);
-    setErasedIds([]);
+    publishEraseCursor(null, true);
+    publishEraseSuppression(true);
     setLassoPoints([]);
     setSelectionRect(null);
     setSelectionMoveOffset({ x: 0, y: 0 });
-  }, [endStylusScrollLock]);
+  }, [endStylusScrollLock, publishEraseCursor, publishEraseSuppression]);
 
   const touchToCanvasPoint = useCallback((touchX: number, touchY: number) => {
     return screenToCanvasPoint(
@@ -2904,9 +2963,10 @@ export const NotebookCanvas = memo(function NotebookCanvas({
             strokeStartedOverImageRef.current = hitImageForInkRouting?.id ?? null;
             activeInkRef.current?.begin(point);
           } else {
-            erasedIdsRef.current = [];
-            setErasePoint(point);
-            eraseAt(point.x, point.y);
+            erasedIdsRef.current.clear();
+            lastErasePointRef.current = point;
+            publishEraseCursor(point);
+            eraseAt(point, point);
           }
         })
         .onTouchesMove((event) => {
@@ -2943,8 +3003,10 @@ export const NotebookCanvas = memo(function NotebookCanvas({
             strokeMoveSampleCountRef.current += 1;
             activeInkRef.current?.append(point);
           } else if (modeRef.current === 'erase') {
-            setErasePoint(point);
-            eraseAt(point.x, point.y);
+            const previous = lastErasePointRef.current ?? point;
+            lastErasePointRef.current = point;
+            publishEraseCursor(point);
+            eraseAt(previous, point);
           }
         })
         .onTouchesUp((event) => {
@@ -2962,7 +3024,7 @@ export const NotebookCanvas = memo(function NotebookCanvas({
         .onFinalize(() => {
           endStroke();
         }),
-    [beginStylusScrollLock, endStroke, eraseAt, findImageAtPoint, touchToCanvasPoint],
+    [beginStylusScrollLock, endStroke, eraseAt, findImageAtPoint, publishEraseCursor, touchToCanvasPoint],
   );
 
   const beginPageZoom = useCallback(() => {
@@ -3381,7 +3443,7 @@ export const NotebookCanvas = memo(function NotebookCanvas({
   // Committed strokes split into unselected (stable) and selected (rendered in a transform group).
   const { unselectedShapes, selectedShapes } = useMemo(
     () => {
-      const visible = strokes.filter((s) => !erasedIds.includes(s.id));
+      const visible = strokes.filter((s) => !erasedIds.has(s.id));
       const unsel = [
         ...visible.filter((s) => s.tool === 'highlighter' && !selectedIds.has(s.id)).map((s) => <StrokeShape key={s.id} stroke={s} />),
         ...visible.filter((s) => s.tool !== 'highlighter' && !selectedIds.has(s.id)).map((s) => <StrokeShape key={s.id} stroke={s} />),

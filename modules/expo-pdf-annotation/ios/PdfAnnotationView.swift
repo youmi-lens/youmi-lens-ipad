@@ -637,6 +637,15 @@ public final class PdfAnnotationView: ExpoView {
     }
   }
 
+  /// Counterpart to `markStrokeRemovalIntent`: an Undo of a native erase
+  /// intentionally restores these ids, so it must clear the erase tombstone
+  /// before React sends the restored page snapshot back to this view.
+  func markStrokeRestorationIntent(ids: [String]) {
+    DispatchQueue.main.async { [weak self] in
+      self?.annotationOverlay.markStrokeRestorationIntent(ids: ids)
+    }
+  }
+
   // MARK: - Document loading
 
   private func loadDocumentIfNeeded() {
@@ -1089,15 +1098,10 @@ public final class PdfAnnotationView: ExpoView {
       print("[PdfAnnotationView] pencil .began at pdfViewPoint=\(p)")
       #endif
       if annotationMode == "eraser" {
-        #if DEBUG
-        print("[PdfAnnotationView] eraser began location=\(p) overlayLocation=\(overlayPoint)")
-        #endif
         // The erase hit-test uses PDFView coordinates, while the preview is
         // drawn directly by the overlay in its own coordinate space.
         annotationOverlay.showEraserPreview(at: overlayPoint)
-        if let replacement = annotationOverlay.eraseStroke(at: p) {
-          emitPageReplacement(replacement.strokes, pageNumber: replacement.pageNumber)
-        }
+        annotationOverlay.beginErase(at: p)
       } else if annotationMode == "highlighter" {
         annotationOverlay.beginStroke(
           at: p,
@@ -1113,13 +1117,8 @@ public final class PdfAnnotationView: ExpoView {
       let p = recognizer.location(in: pdfView)
       let overlayPoint = recognizer.location(in: annotationOverlay)
       if annotationMode == "eraser" {
-        #if DEBUG
-        print("[PdfAnnotationView] eraser changed location=\(p) overlayLocation=\(overlayPoint)")
-        #endif
         annotationOverlay.showEraserPreview(at: overlayPoint)
-        if let replacement = annotationOverlay.eraseStroke(at: p) {
-          emitPageReplacement(replacement.strokes, pageNumber: replacement.pageNumber)
-        }
+        annotationOverlay.continueErase(at: p)
       } else {
         #if DEBUG
         if !strokeFirstSampleSeen {
@@ -1140,9 +1139,9 @@ public final class PdfAnnotationView: ExpoView {
       armPostStrokeWatch(reason: "pencil gesture \(recognizer.state.rawValue)")
       #endif
       if annotationMode == "eraser" {
-        #if DEBUG
-        print("[PdfAnnotationView] eraser ended")
-        #endif
+        for replacement in annotationOverlay.endErase() {
+          emitPageReplacement(replacement.strokes, pageNumber: replacement.pageNumber)
+        }
         annotationOverlay.cancelStroke()
         annotationOverlay.hideEraserPreview()
         emitEraserGestureEnded(at: recognizer.location(in: pdfView))
@@ -1171,9 +1170,9 @@ public final class PdfAnnotationView: ExpoView {
       armPostStrokeWatch(reason: "pencil gesture \(recognizer.state.rawValue)")
       #endif
       if annotationMode == "eraser" {
-        #if DEBUG
-        print("[PdfAnnotationView] eraser ended state=\(recognizer.state.rawValue)")
-        #endif
+        for replacement in annotationOverlay.endErase() {
+          emitPageReplacement(replacement.strokes, pageNumber: replacement.pageNumber)
+        }
         emitEraserGestureEnded(at: recognizer.location(in: pdfView))
       }
       annotationOverlay.cancelStroke()
@@ -1937,6 +1936,12 @@ final class AnnotationOverlay: UIView {
   /// Once a snapshot DOES contain the id, JS becomes canonical again for it
   /// (including a real edit or delete), and the id is dropped from this set.
   private var pendingLocalStrokeIds: Set<String> = []
+  /// Native erases are visually immediate, while JS receives the final page
+  /// replacement asynchronously. Suppress an older prop snapshot that still
+  /// contains one of these ids until a snapshot acknowledges its absence.
+  /// Without this deletion-side counterpart to pendingLocalStrokeIds, erased
+  /// ink can flash back for one frame during dense Pencil erasing.
+  private var pendingLocalEraseIds: Set<String> = []
   private var pageInkLayers: [Int: CALayer] = [:]
   private var savedInkLayers: [String: PageInkStrokeLayer] = [:]
   private var liveInkLayer: PageInkStrokeLayer?
@@ -1976,6 +1981,8 @@ final class AnnotationOverlay: UIView {
   /// eraser is and how large its hit area is. Pure presentation: never
   /// persisted, never emitted to JS, never read by the eraser hit-test path.
   private var eraserPreviewPoint: CGPoint?
+  private var lastEraserViewPoint: CGPoint?
+  private var eraseChangedPages: Set<Int> = []
 
   init(pdfView: PDFView) {
     self.pdfView = pdfView
@@ -2132,9 +2139,6 @@ final class AnnotationOverlay: UIView {
   /// mode (manual or temporary).
   func showEraserPreview(at viewPoint: CGPoint) {
     eraserPreviewPoint = viewPoint
-    #if DEBUG
-    print("[AnnotationOverlay] showEraserPreview point=\(viewPoint) radius=\(eraserRadius) bounds=\(bounds) hidden=\(isHidden) alpha=\(alpha)")
-    #endif
     setNeedsDisplay()
   }
 
@@ -2147,27 +2151,73 @@ final class AnnotationOverlay: UIView {
     setNeedsDisplay()
   }
 
-  func eraseStroke(at viewPoint: CGPoint) -> (pageNumber: Int, strokes: [AnnotationStroke])? {
-    guard let pdfView, let document = pdfView.document else { return nil }
-    guard let page = pdfView.page(for: viewPoint, nearest: true) else { return nil }
-    let pageNumber = document.index(for: page) + 1
-    guard pageNumber > 0, var strokes = pagedStrokes[pageNumber], !strokes.isEmpty else { return nil }
+  /// Start a native-only erase gesture. Ink is removed from Core Animation at
+  /// once; the one final JS/store replacement is emitted by `endErase()`.
+  func beginErase(at viewPoint: CGPoint) {
+    eraseChangedPages.removeAll()
+    lastEraserViewPoint = viewPoint
+    eraseSweep(from: viewPoint, to: viewPoint)
+  }
 
-    let radius = CGFloat(max(4, eraserRadius))
-    guard let eraseIndex = strokes.lastIndex(where: { stroke in
-      strokeHitsEraser(stroke, page: page, eraserPoint: viewPoint, radius: radius)
-    }) else {
-      return nil
+  /// Evaluate the entire swept Pencil segment. Gesture recognizers can
+  /// coalesce samples, so checking only `to` would let a fast eraser jump
+  /// over narrow handwriting.
+  func continueErase(at viewPoint: CGPoint) {
+    let previous = lastEraserViewPoint ?? viewPoint
+    lastEraserViewPoint = viewPoint
+    eraseSweep(from: previous, to: viewPoint)
+  }
+
+  /// Final page snapshots for one gesture. There is deliberately no bridge
+  /// traffic or AsyncStorage/store write for every Pencil move.
+  func endErase() -> [(pageNumber: Int, strokes: [AnnotationStroke])] {
+    defer {
+      eraseChangedPages.removeAll()
+      lastEraserViewPoint = nil
     }
+    return eraseChangedPages.sorted().map { pageNumber in
+      (pageNumber: pageNumber, strokes: pagedStrokes[pageNumber] ?? [])
+    }
+  }
 
-    // An intentional erase must win even if the erased stroke was itself
-    // still pending JS acknowledgement — otherwise the reconciliation in
-    // loadAnnotations would "protect" it right back into existence.
-    pendingLocalStrokeIds.remove(strokes[eraseIndex].id)
-    strokes.remove(at: eraseIndex)
-    pagedStrokes[pageNumber] = strokes
-    setNeedsDisplay()
-    return (pageNumber, strokes)
+  private func eraseSweep(from start: CGPoint, to end: CGPoint) {
+    guard let pdfView, let document = pdfView.document else { return }
+    let startPage = pdfView.page(for: start, nearest: true)
+    let endPage = pdfView.page(for: end, nearest: true)
+    let startPageNumber = startPage.map { document.index(for: $0) + 1 }
+    let endPageNumber = endPage.map { document.index(for: $0) + 1 }
+    let candidatePages = [startPage, endPage].compactMap { $0 }
+    var seenPages = Set<Int>()
+    for page in candidatePages {
+      let pageNumber = document.index(for: page) + 1
+      guard pageNumber > 0, seenPages.insert(pageNumber).inserted,
+            var strokes = pagedStrokes[pageNumber], !strokes.isEmpty
+      else { continue }
+      // PDFKit's cross-page coordinate conversion can project an endpoint far
+      // beyond this page. A sweep is meaningful only when both samples are
+      // on the same page; on a page boundary we test each local endpoint
+      // independently so an erase gesture cannot reach ink on another page.
+      let pageStart = pageNumber == startPageNumber ? start : end
+      let pageEnd = pageNumber == endPageNumber ? end : start
+      let usesSinglePoint = startPageNumber != endPageNumber
+      let localEnd = usesSinglePoint ? pageStart : pageEnd
+      let radius = CGFloat(max(4, eraserRadius))
+      let removedIds = strokes
+        .filter { strokeHitsEraser($0, page: page, eraserStart: pageStart, eraserEnd: localEnd, radius: radius) }
+        .map(\.id)
+      guard !removedIds.isEmpty else { continue }
+
+      // Intentional erase wins over both an unacknowledged local add and an
+      // older JS prop snapshot. The latter stays suppressed until JS echoes a
+      // page that omits it, preventing the physical one-frame resurrection.
+      pendingLocalStrokeIds.subtract(removedIds)
+      pendingLocalEraseIds.formUnion(removedIds)
+      let removed = Set(removedIds)
+      strokes.removeAll { removed.contains($0.id) }
+      pagedStrokes[pageNumber] = strokes
+      eraseChangedPages.insert(pageNumber)
+    }
+    if !eraseChangedPages.isEmpty { setNeedsDisplay() }
   }
 
   /// The JS-initiated counterpart to the erase-path fix directly above.
@@ -2192,6 +2242,15 @@ final class AnnotationOverlay: UIView {
   func markStrokeRemovalIntent(ids: [String]) {
     guard !ids.isEmpty else { return }
     pendingLocalStrokeIds.subtract(ids)
+  }
+
+  /// JS calls this immediately before an Undo restores strokes removed by a
+  /// native eraser gesture. This is deliberately a command rather than an
+  /// inference from the next prop snapshot: a stale snapshot must remain
+  /// suppressed, while an intentional Undo must be allowed to redraw.
+  func markStrokeRestorationIntent(ids: [String]) {
+    guard !ids.isEmpty else { return }
+    pendingLocalEraseIds.subtract(ids)
   }
 
   // MARK: - Loading committed strokes from JS
@@ -2231,6 +2290,20 @@ final class AnnotationOverlay: UIView {
     // intentional erase removes the id from pendingLocalStrokeIds first).
     let loadedIds = Set(loaded.values.flatMap { $0.map(\.id) })
     pendingLocalStrokeIds.subtract(loadedIds)
+
+    // The deletion-side equivalent is intentionally asymmetric: while an
+    // older React snapshot still contains an erased id, that id remains
+    // suppressed. Its absence acknowledges the final page replacement and
+    // clears the tombstone. This prevents native ink from flashing back
+    // between immediate removal and the one final JS/store update.
+    let acknowledgedEraseIds = pendingLocalEraseIds.subtracting(loadedIds)
+    pendingLocalEraseIds.subtract(acknowledgedEraseIds)
+    if !pendingLocalEraseIds.isEmpty {
+      for pageNumber in Array(loaded.keys) {
+        loaded[pageNumber] = loaded[pageNumber]?.filter { !pendingLocalEraseIds.contains($0.id) }
+      }
+    }
+
     if !pendingLocalStrokeIds.isEmpty {
       for (pageNumber, strokes) in pagedStrokes {
         let survivors = strokes.filter { pendingLocalStrokeIds.contains($0.id) }
@@ -2472,20 +2545,25 @@ final class AnnotationOverlay: UIView {
   private func strokeHitsEraser(
     _ stroke: AnnotationStroke,
     page: PDFPage,
-    eraserPoint: CGPoint,
+    eraserStart: CGPoint,
+    eraserEnd: CGPoint,
     radius: CGFloat
   ) -> Bool {
     guard let pdfView, !stroke.points.isEmpty else { return false }
-    let viewPoints = stroke.points.map { pdfView.convert($0, from: page) }
-    let strokeHalfWidth = max(1, CGFloat(stroke.width) * pdfView.scaleFactor / 2)
-    let threshold = radius + strokeHalfWidth
+    // Convert the two eraser endpoints once. The previous implementation
+    // converted every point of every candidate stroke back into view space on
+    // every sample, creating substantial allocation/work in dense pages.
+    let start = pdfView.convert(eraserStart, to: page)
+    let end = pdfView.convert(eraserEnd, to: page)
+    let scale = max(0.0001, pdfView.scaleFactor)
+    let threshold = radius / scale + max(1, CGFloat(stroke.width) / 2)
 
-    if viewPoints.count == 1 {
-      return AnnotationOverlay.distance(eraserPoint, viewPoints[0]) <= threshold
+    if stroke.points.count == 1 {
+      return AnnotationOverlay.distanceFromPoint(stroke.points[0], toSegmentStart: start, end: end) <= threshold
     }
 
-    for i in 0..<(viewPoints.count - 1) {
-      if AnnotationOverlay.distanceFromPoint(eraserPoint, toSegmentStart: viewPoints[i], end: viewPoints[i + 1]) <= threshold {
+    for i in 0..<(stroke.points.count - 1) {
+      if AnnotationOverlay.distanceBetweenSegments(start, end, stroke.points[i], stroke.points[i + 1]) <= threshold {
         return true
       }
     }
@@ -2539,6 +2617,43 @@ final class AnnotationOverlay: UIView {
     let t = max(0, min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / lengthSquared))
     let projection = CGPoint(x: a.x + t * dx, y: a.y + t * dy)
     return distance(p, projection)
+  }
+
+  private static func orientation(_ a: CGPoint, _ b: CGPoint, _ c: CGPoint) -> CGFloat {
+    (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+  }
+
+  private static func point(_ point: CGPoint, liesOnSegmentFrom a: CGPoint, to b: CGPoint) -> Bool {
+    let epsilon: CGFloat = 0.0001
+    return abs(orientation(a, b, point)) <= epsilon
+      && point.x >= min(a.x, b.x) - epsilon && point.x <= max(a.x, b.x) + epsilon
+      && point.y >= min(a.y, b.y) - epsilon && point.y <= max(a.y, b.y) + epsilon
+  }
+
+  private static func segmentsIntersect(_ a: CGPoint, _ b: CGPoint, _ c: CGPoint, _ d: CGPoint) -> Bool {
+    let abC = orientation(a, b, c)
+    let abD = orientation(a, b, d)
+    let cdA = orientation(c, d, a)
+    let cdB = orientation(c, d, b)
+    let epsilon: CGFloat = 0.0001
+    if ((abC > epsilon && abD < -epsilon) || (abC < -epsilon && abD > epsilon))
+      && ((cdA > epsilon && cdB < -epsilon) || (cdA < -epsilon && cdB > epsilon)) {
+      return true
+    }
+    return point(c, liesOnSegmentFrom: a, to: b)
+      || point(d, liesOnSegmentFrom: a, to: b)
+      || point(a, liesOnSegmentFrom: c, to: d)
+      || point(b, liesOnSegmentFrom: c, to: d)
+  }
+
+  private static func distanceBetweenSegments(_ a: CGPoint, _ b: CGPoint, _ c: CGPoint, _ d: CGPoint) -> CGFloat {
+    if segmentsIntersect(a, b, c, d) { return 0 }
+    return min(
+      distanceFromPoint(a, toSegmentStart: c, end: d),
+      distanceFromPoint(b, toSegmentStart: c, end: d),
+      distanceFromPoint(c, toSegmentStart: a, end: b),
+      distanceFromPoint(d, toSegmentStart: a, end: b)
+    )
   }
 }
 

@@ -85,6 +85,9 @@ public final class ExpoPdfAnnotationModule: Module {
       AsyncFunction("markStrokeRemovalIntentAsync") { (view: PdfAnnotationView, ids: [String]) in
         view.markStrokeRemovalIntent(ids: ids)
       }
+      AsyncFunction("markStrokeRestorationIntentAsync") { (view: PdfAnnotationView, ids: [String]) in
+        view.markStrokeRestorationIntent(ids: ids)
+      }
     }
   }
 }

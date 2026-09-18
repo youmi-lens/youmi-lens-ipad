@@ -924,16 +924,6 @@ export default function LectureMaterialWorkspaceScreen() {
     setNativeAnnotationMode(restored);
   }, []);
 
-  // Batching boundary for one eraser gesture (drag). A single continuous
-  // erase can cross multiple strokes, each firing its own "replacePage"
-  // commit (see PdfAnnotationView's eraseStroke call sites) — those already
-  // update the store live, unchanged, one at a time. This ref only captures
-  // the page's stroke array as it stood BEFORE the first replacePage of the
-  // in-progress gesture, so onEraserGestureEnded can push ONE stroke-erase
-  // history action covering the whole gesture (before → after), matching
-  // "one drag = one action" instead of one entry per stroke crossed.
-  const eraseBatchBeforeRef = useRef<{ pageNumber: number; strokes: MaterialAnnotationStroke[] } | null>(null);
-
   const handleNativeAnnotationCommitted = useCallback(
     (event: NativePdfAnnotationsChangedEvent) => {
       const lid = nativeLectureIdRef.current;
@@ -960,10 +950,20 @@ export default function LectureMaterialWorkspaceScreen() {
       });
 
       if (event.action === 'replacePage') {
-        if (!eraseBatchBeforeRef.current || eraseBatchBeforeRef.current.pageNumber !== page) {
-          eraseBatchBeforeRef.current = { pageNumber: page, strokes: annotationsForMaterialPage(mid, page) };
-        }
+        // Native batches an entire Pencil erase gesture and emits exactly one
+        // final page snapshot. Build the history item from that payload now,
+        // rather than waiting for the async store/React round-trip triggered
+        // below, which could otherwise observe a stale page.
+        const before = annotationsForMaterialPage(mid, page);
         const nextStrokes = event.strokes.map(toStoreStroke);
+        const beforeIds = new Set(before.map((stroke) => stroke.id));
+        const afterIds = new Set(nextStrokes.map((stroke) => stroke.id));
+        const changed = beforeIds.size !== afterIds.size || [...beforeIds].some((id) => !afterIds.has(id));
+        if (changed) {
+          setNativeHistory((h) => pushMaterialHistory(h, {
+            kind: 'stroke-erase', pageNumber: page, before, after: nextStrokes,
+          }));
+        }
         replaceMaterialPageAnnotationStrokesForMaterial(mid, page, nextStrokes, materialScopeLectureId(mid));
         debugMaterialViewport('native-annotation-store-update', { action: 'replacePage', page });
         return;
@@ -983,22 +983,8 @@ export default function LectureMaterialWorkspaceScreen() {
   );
 
   const handleNativeEraserGestureEnded = useCallback(() => {
-    const mid = nativeMaterialIdRef.current;
-    const before = eraseBatchBeforeRef.current;
-    eraseBatchBeforeRef.current = null;
-    if (mid && before) {
-      const after = annotationsForMaterialPage(mid, before.pageNumber);
-      const beforeIds = new Set(before.strokes.map((s) => s.id));
-      const afterIds = new Set(after.map((s) => s.id));
-      const changed = beforeIds.size !== afterIds.size || [...beforeIds].some((id) => !afterIds.has(id));
-      if (changed) {
-        setNativeHistory((h) => pushMaterialHistory(h, {
-          kind: 'stroke-erase', pageNumber: before.pageNumber, before: before.strokes, after,
-        }));
-      }
-    }
     restoreNativeTemporaryEraserIfNeeded();
-  }, [annotationsForMaterialPage, restoreNativeTemporaryEraserIfNeeded]);
+  }, [restoreNativeTemporaryEraserIfNeeded]);
 
   const addPageStroke = useCallback(
     (stroke: MaterialAnnotationStroke) => {
@@ -1056,6 +1042,15 @@ export default function LectureMaterialWorkspaceScreen() {
         pdfRef.current?.markStrokeRemovalIntent(result.removedStrokeIds);
       }
       if (action.kind === 'stroke-add' || action.kind === 'stroke-erase') {
+        if (action.kind === 'stroke-erase') {
+          const afterIds = new Set(action.after.map((stroke) => stroke.id));
+          const restoredIds = result.strokes
+            .filter((stroke) => !afterIds.has(stroke.id))
+            .map((stroke) => stroke.id);
+          if (restoredIds.length > 0) {
+            pdfRef.current?.markStrokeRestorationIntent(restoredIds);
+          }
+        }
         replaceMaterialPageAnnotationStrokesForMaterial(mid, action.pageNumber, result.strokes, materialScopeLectureId(mid));
         return;
       }

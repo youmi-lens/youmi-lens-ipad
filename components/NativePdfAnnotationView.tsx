@@ -38,6 +38,8 @@ export type NativePdfAnnotationViewRef = {
    * race this closes.
    */
   markStrokeRemovalIntent: (ids: string[]) => void;
+  /** Allow an intentional Undo to restore ink previously removed natively. */
+  markStrokeRestorationIntent: (ids: string[]) => void;
 };
 
 export type NativePdfAnnotationViewProps = {
@@ -115,6 +117,11 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
       markStrokeRemovalIntent(ids: string[]) {
         nativeRef.current?.markStrokeRemovalIntentAsync?.(ids).catch((error: unknown) => {
           if (__DEV__) console.warn('[native-pdf] markStrokeRemovalIntentAsync failed', error);
+        });
+      },
+      markStrokeRestorationIntent(ids: string[]) {
+        nativeRef.current?.markStrokeRestorationIntentAsync?.(ids).catch((error: unknown) => {
+          if (__DEV__) console.warn('[native-pdf] markStrokeRestorationIntentAsync failed', error);
         });
       },
     }), []);
