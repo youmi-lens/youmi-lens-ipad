@@ -14,7 +14,10 @@ import { I18nProvider } from '@/lib/i18n';
 import { LiveCaptionsProvider } from '@/lib/liveCaptions';
 import { useProcessingOrchestrator } from '@/lib/useProcessingOrchestrator';
 import { RecordingNotesProvider } from '@/lib/recordingNotes';
-import { setDeveloperRecordingEngineOverride } from '@/lib/recording/featureGate';
+import {
+  resolveRecordingEngineOwnershipDecisionForRuntime,
+  setDeveloperRecordingEngineOverride,
+} from '@/lib/recording/featureGate';
 import { isNativeDurableRecorderDevForceEnabled } from '@/lib/recording/nativeDurableDevForce';
 import { isR6SimulatorVerifyEnabled } from '@/lib/recording/r6VerifyGate';
 import { DataProvider } from '@/lib/store';
@@ -32,6 +35,20 @@ export const unstable_settings = {
 // all of which stay on 'legacy'.
 if (isNativeDurableRecorderDevForceEnabled()) {
   setDeveloperRecordingEngineOverride('nativeDurable');
+}
+
+// Explicit, DEV-only physical-test observability. It evaluates the same single
+// engine decision used by useLectureRecorder for a new lecture with no durable
+// recovery media. It neither creates a session nor requests microphone access.
+if (__DEV__ && process.env.EXPO_PUBLIC_RECORDING_ENGINE_DIAGNOSTIC === '1') {
+  const decision = resolveRecordingEngineOwnershipDecisionForRuntime({
+    hasDurableEvidence: false,
+  });
+  console.info('[recorder] runtime_engine_selection', {
+    engine: decision.engine,
+    source: decision.source,
+    fallbackReason: decision.fallbackReason,
+  });
 }
 
 /**
