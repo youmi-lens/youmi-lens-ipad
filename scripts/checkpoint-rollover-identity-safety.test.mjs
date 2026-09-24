@@ -26,7 +26,12 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-import { finalizedDurationMillis, recoverableSessionsForLecture, unresolvedRecoverableSessions } from '../lib/recording/policy.mjs';
+import {
+  finalizedDurationMillis,
+  ownedUnresolvedRecoverableSessions,
+  recoverableSessionsForLecture,
+  unresolvedRecoverableSessions,
+} from '../lib/recording/policy.mjs';
 
 const read = (path) => readFile(new URL(path, import.meta.url), 'utf8');
 const recordingScreen = await read('../app/recording.tsx');
@@ -179,7 +184,7 @@ check('the paused-specific caption copy exists and does not claim recording is s
 console.log('\nFIX C — a recoverable, unresolved durable session must never be silently orphaned by a fresh param-less recording');
 
 check('the guard is only consulted for the param-less path — an explicit lectureId (isResume) is always authoritative and bypasses it entirely', () => {
-  assert.match(recordingScreen, /useUnresolvedRecordingGuard\(!isResume && !isGuest && !visualFixture, pendingLectureId\)/);
+  assert.match(recordingScreen, /useUnresolvedRecordingGuard\(\s*dataLoaded && !isResume && !isGuest && !visualFixture,\s*pendingLectureId,\s*activeRecoveryLectureIds,/);
 });
 
 check('exactly one real unresolved match redirects to it via the SAME existing /recording route with an explicit lectureId — reusing the existing recovery UI, not inventing a new one', () => {
@@ -190,12 +195,13 @@ check('exactly one real unresolved match redirects to it via the SAME existing /
   assert.match(effectBody, /router\.replace\(\{ pathname: '\/recording', params: \{ lectureId: matchedLectureId \} \}\)/);
 });
 
-check('a matched lectureId is cross-checked against the local lecture record — never resurrecting a deleted or already-finished lecture by blind reattachment', () => {
+check('a matched lectureId is cross-checked against the current active lecture record — unknown historical sessions are never adopted by blind reattachment', () => {
   const effectBody = recordingScreen.slice(
     recordingScreen.indexOf('useEffect(() => {\n    if (isResume || isGuest || visualFixture) return;'),
     recordingScreen.indexOf('useEffect(() => {\n    if (isResume || isGuest || visualFixture) return;') + 1600,
   );
-  assert.match(effectBody, /!matchedLecture\.deletedAt && matchedLecture\.status === 'in_progress'/);
+  assert.match(effectBody, /if \(matchedLecture\?\.status === 'in_progress'\)/);
+  assert.doesNotMatch(effectBody, /!matchedLecture \|\|/);
 });
 
 check('ambiguous (more than one real unresolved session) blocks the fresh recording with a choice, never guessing', () => {
@@ -215,13 +221,13 @@ check('auto-start itself is gated on the guard resolving cleanly — it never fi
   );
   assert.match(
     autoStartEffect,
-    /if \(!isResume && \(!unresolvedGuard\.checked \|\| unresolvedGuard\.singleMatch \|\| unresolvedGuard\.ambiguous\)\) return;/,
+    /if \(!isResume && \(!dataLoaded \|\| !unresolvedGuard\.checked \|\| unresolvedGuard\.singleMatch \|\| unresolvedGuard\.ambiguous\)\) return;/,
   );
 });
 
-check('the guard hook queries the durable store directly (native ground truth), never the persisted lecture list, and fails OPEN (never permanently blocks recording on a lookup hiccup)', () => {
+check('the guard hook queries the durable store directly but admits only current active lecture IDs, and fails OPEN (never permanently blocks recording on a lookup hiccup)', () => {
   assert.match(guardHook, /listRecoverableSessions\(\)/);
-  assert.match(guardHook, /unresolvedRecoverableSessions\(sessions, excludeLectureId\)/);
+  assert.match(guardHook, /ownedUnresolvedRecoverableSessions\(sessions, excludeLectureId, activeRecoveryLectureIds\)/);
   const catchBlock = guardHook.slice(guardHook.indexOf('.catch('));
   assert.match(catchBlock, /setState\(\{ checked: true, singleMatch: null, ambiguous: false \}\)/);
 });

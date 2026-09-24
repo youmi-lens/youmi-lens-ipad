@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 
 import { listRecoverableSessions, type DurableRecordingSession } from '@/modules/expo-durable-recorder';
 
-import { unresolvedRecoverableSessions } from './policy.mjs';
+import { ownedUnresolvedRecoverableSessions } from './policy.mjs';
 
 export type UnresolvedRecordingGuard = {
   /** Whether the lookup has resolved (or was skipped because `enabled` is false). */
@@ -28,7 +28,11 @@ export type UnresolvedRecordingGuard = {
  * (useDurableMediaOwnership / useNativeDurableLectureRecorder's own init
  * effect). This guard exists only for the param-less "start fresh" path.
  */
-export function useUnresolvedRecordingGuard(enabled: boolean, excludeLectureId: string): UnresolvedRecordingGuard {
+export function useUnresolvedRecordingGuard(
+  enabled: boolean,
+  excludeLectureId: string,
+  activeRecoveryLectureIds: readonly string[],
+): UnresolvedRecordingGuard {
   const [state, setState] = useState<UnresolvedRecordingGuard>({ checked: false, singleMatch: null, ambiguous: false });
 
   useEffect(() => {
@@ -41,7 +45,11 @@ export function useUnresolvedRecordingGuard(enabled: boolean, excludeLectureId: 
     void listRecoverableSessions()
       .then((sessions) => {
         if (!mounted) return;
-        const matches = unresolvedRecoverableSessions(sessions, excludeLectureId);
+        // Native sessions live at the app-container level.  Only the caller's
+        // current-account, active lecture IDs are authoritative ownership;
+        // unknown, deleted, and cross-account sessions stay preserved but
+        // cannot block or be adopted by this fresh-recording flow.
+        const matches = ownedUnresolvedRecoverableSessions(sessions, excludeLectureId, activeRecoveryLectureIds);
         if (matches.length === 0) setState({ checked: true, singleMatch: null, ambiguous: false });
         else if (matches.length === 1) setState({ checked: true, singleMatch: matches[0], ambiguous: false });
         else setState({ checked: true, singleMatch: null, ambiguous: true });
@@ -56,7 +64,7 @@ export function useUnresolvedRecordingGuard(enabled: boolean, excludeLectureId: 
     return () => {
       mounted = false;
     };
-  }, [enabled, excludeLectureId]);
+  }, [enabled, excludeLectureId, activeRecoveryLectureIds]);
 
   return state;
 }

@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Animated,
@@ -74,6 +74,7 @@ export default function RecordingScreen() {
   const rollout = useRolloutEligibility({ userId: user?.id ?? null, authLoading });
   const {
     getCourse,
+    loaded: dataLoaded,
     createLecture,
     saveInProgressLecture,
     updateLecture,
@@ -126,8 +127,18 @@ export default function RecordingScreen() {
   // P0 identity-safety guard: only meaningful for the param-less "start
   // fresh" path (no explicit lectureId) — an explicit reopen is always
   // authoritative and already goes through the normal per-lecture recovery
-  // lookup below. See useUnresolvedRecordingGuard's own doc comment for why.
-  const unresolvedGuard = useUnresolvedRecordingGuard(!isResume && !isGuest && !visualFixture, pendingLectureId);
+  // lookup below.  `lectures` is already the DataContext's current-account,
+  // non-deleted-course/non-deleted-lecture view; requiring in_progress here
+  // makes that exact ID set the sole authority for automatic recovery.
+  const activeRecoveryLectureIds = useMemo(
+    () => lectures.filter((lecture) => lecture.status === 'in_progress').map((lecture) => lecture.id),
+    [lectures],
+  );
+  const unresolvedGuard = useUnresolvedRecordingGuard(
+    dataLoaded && !isResume && !isGuest && !visualFixture,
+    pendingLectureId,
+    activeRecoveryLectureIds,
+  );
   const unresolvedGuardHandledRef = useRef(false);
   useEffect(() => {
     if (isResume || isGuest || visualFixture) return;
@@ -135,12 +146,10 @@ export default function RecordingScreen() {
     if (unresolvedGuard.singleMatch) {
       const matchedLectureId = unresolvedGuard.singleMatch.lectureId;
       const matchedLecture = lectures.find((l) => l.id === matchedLectureId);
-      // Never resurrect a deleted or already-finished lecture by reattaching
-      // to it — only redirect when the matched lectureId is either not yet
-      // known locally (the durable session predates its first JS-side
-      // autosave) or is a genuinely still-in-progress, non-deleted lecture.
-      const safeToRedirect = !matchedLecture || (!matchedLecture.deletedAt && matchedLecture.status === 'in_progress');
-      if (safeToRedirect) {
+      // The guard only returns current-account active IDs. Keep this local
+      // check as a defensive boundary too: an unknown historical session must
+      // remain an orphaned recovery artifact, never be adopted by a new route.
+      if (matchedLecture?.status === 'in_progress') {
         unresolvedGuardHandledRef.current = true;
         router.replace({ pathname: '/recording', params: { lectureId: matchedLectureId } });
         return;
@@ -594,7 +603,7 @@ export default function RecordingScreen() {
     // resolve, and never proceed if it found something (the effect above
     // handles redirecting/blocking in that case). See
     // useUnresolvedRecordingGuard.
-    if (!isResume && (!unresolvedGuard.checked || unresolvedGuard.singleMatch || unresolvedGuard.ambiguous)) return;
+    if (!isResume && (!dataLoaded || !unresolvedGuard.checked || unresolvedGuard.singleMatch || unresolvedGuard.ambiguous)) return;
     autoStarted.current = true;
     void startRecording().then((started) => {
       if (__DEV__) console.info('[recording] automatic local recording result', { started });
@@ -605,7 +614,7 @@ export default function RecordingScreen() {
     });
   // The recorder and caption starters intentionally run once after permission resolves.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visualFixture, granted, isGuest, isResume, continueRequested, contentPreferencesLoaded, recoveryChecked, recoverableSession, unresolvedGuard]);
+  }, [visualFixture, granted, isGuest, isResume, continueRequested, contentPreferencesLoaded, recoveryChecked, recoverableSession, dataLoaded, unresolvedGuard]);
 
   // Keep this fresh for the mount-once AppState listener below.
   isRecordingRef.current = isRecording;
