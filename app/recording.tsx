@@ -45,7 +45,12 @@ import {
   captionsToTranscript,
   hasMeaningfulRecordingContent,
 } from '@/lib/recordingPersistence.mjs';
-import { persistLectureLocalAudio, persistLectureResumeSegment } from '@/lib/lectureLocalAudio';
+import {
+  isVerifiedDurableLectureAudio,
+  localAudioFileHasBytes,
+  persistLectureLocalAudio,
+  persistLectureResumeSegment,
+} from '@/lib/lectureLocalAudio';
 import {
   LEGACY_RESUME_ASSEMBLY_REQUIRED,
   planLegacyResumeFinalization,
@@ -329,7 +334,9 @@ export default function RecordingScreen() {
         ...priorMarksRef.current,
         ...marksRef.current.map((mark) => mark.timestampMillis),
       ];
-      const nextAudio = audioUri ?? priorAudioUriRef.current;
+      // `null` explicitly clears an unsafe live/cache URI. `undefined` means
+      // retain a previously verified canonical asset during ordinary autosave.
+      const nextAudio = audioUri === null ? null : audioUri ?? priorAudioUriRef.current;
       const currentLinks = materialLinksForLectureRef.current(pendingLectureId);
       const currentAnnotations = materialAnnotationsRef.current.filter(
         (annotation) => annotation.lectureId === pendingLectureId && !annotation.deletedAt,
@@ -373,7 +380,7 @@ export default function RecordingScreen() {
       lastProgressSaveRef.current = Date.now();
       return true;
     },
-    [isGuest, pendingLectureId, saveInProgressLecture, sourceLanguage, translationLanguage],
+    [isGuest, pendingLectureId, recordingEngine, saveInProgressLecture, sourceLanguage, translationLanguage],
   );
   const persistProgressRef = useRef(persistProgress);
   persistProgressRef.current = persistProgress;
@@ -428,7 +435,13 @@ export default function RecordingScreen() {
       return;
     }
     if (!progressCreatedRef.current || Date.now() - lastProgressSaveRef.current > 5000) {
-      persistProgress();
+      // A resumed session with prior audio to protect must never let this
+      // autosave carry the CURRENT (in-flight, still-growing) file into
+      // localAudioUri — that would replace the earlier, longer canonical
+      // audio, the exact CS111 truncation mechanism. A fresh legacy session
+      // also must not make its cache file the recovery authority: Pause
+      // promotes a verified Documents checkpoint synchronously instead.
+      persistProgress(recordingEngine === 'legacy' || legacyResumeHasPriorAudio ? undefined : liveFileUri);
     }
   }, [
     captionLines.length,
@@ -443,6 +456,9 @@ export default function RecordingScreen() {
     materialAnnotations,
     pendingLectureId,
     isGuest,
+    recordingEngine,
+    legacyResumeHasPriorAudio,
+    liveFileUri,
     isReviewingResume,
     persistProgress,
   ]);
@@ -658,11 +674,35 @@ export default function RecordingScreen() {
       // Reconnect captions/mic only — never wipe accumulated live history.
       if (!isGuest) await startCaptionPipeline({ preserveHistory: true });
     } else {
-      await pauseRecording();
+      const paused = await pauseRecording();
+      if (!paused) return;
       stopMicStream();
       stopLiveCaptions();
-      // Pausing keeps the session — persist so it survives a later exit.
-      if (!isGuest && !finishedRef.current) persistProgress();
+      // A legacy recorder writes under Caches/ExpoAudio. A paused recorder can
+      // outlive this JS screen only if its current bytes are promoted now;
+      // saving the cache URI alone made lock/process-restart Finish point at a
+      // file iOS was free to evict. Do this synchronously at the Pause boundary.
+      const pausedLegacyAudio = recordingEngine === 'legacy' && liveFileUri
+        ? await persistLectureLocalAudio(liveFileUri, pendingLectureId)
+        : null;
+      const verifiedPausedLegacyAudio = pausedLegacyAudio && isVerifiedDurableLectureAudio(pausedLegacyAudio)
+        ? pausedLegacyAudio
+        : null;
+      if (recordingEngine === 'legacy' && !verifiedPausedLegacyAudio) {
+        // Do not make an ephemeral cache URI the recovery authority. The source
+        // is left untouched for forensic recovery, but the user must not be
+        // led to believe this paused recording is safely persisted.
+        Alert.alert(
+          'Pause was not completed safely',
+          'The captured audio could not be verified in durable storage. Keep Youmi Lens open and use the main control to retry saving the paused audio.',
+        );
+        return;
+      }
+      // Pausing keeps the session — persist only a verified legacy checkpoint
+      // so a later remount owns a Documents asset, never a cache-only URI.
+      if (!isGuest && !finishedRef.current) {
+        persistProgress(legacyResumeHasPriorAudio ? undefined : verifiedPausedLegacyAudio);
+      }
     }
   };
 
@@ -735,7 +775,13 @@ export default function RecordingScreen() {
           }
         }
       } else {
-        persistProgress(uri);
+        const persistedExitAudio = recordingEngine === 'legacy' && uri
+          ? await persistLectureLocalAudio(uri, pendingLectureId)
+          : uri;
+        const verifiedExitAudio = recordingEngine === 'legacy'
+          ? isVerifiedDurableLectureAudio(persistedExitAudio)
+          : localAudioFileHasBytes(persistedExitAudio);
+        persistProgress(verifiedExitAudio ? persistedExitAudio : null);
       }
     }
     router.back();
@@ -810,13 +856,26 @@ export default function RecordingScreen() {
         return;
       }
       const durableGuestAudio = await persistLectureLocalAudio(uri, pendingLectureId);
+      const verifiedGuestAudio = recordingEngine === 'legacy'
+        ? isVerifiedDurableLectureAudio(durableGuestAudio)
+        : localAudioFileHasBytes(durableGuestAudio);
+      if (!verifiedGuestAudio) {
+        finishedRef.current = false;
+        guestAutoStopped.current = false;
+        setFinishing(false);
+        Alert.alert(
+          t('recording.notSavedTitle'),
+          'The final audio could not be verified on this device. The original file was left untouched for recovery.',
+        );
+        return;
+      }
       createLecture({
         id: pendingLectureId,
         courseId: params.courseId ?? '',
         title: (params.lectureTitle ?? '').trim() || 'Untitled Lecture',
         durationMillis: finalDuration,
         recordingEngine,
-        localAudioUri: durableGuestAudio ?? uri,
+        localAudioUri: durableGuestAudio,
         markedTimestamps: marks.map((mark) => mark.timestampMillis),
         liveTranscript: '',
         notes: draftNotes,
@@ -915,8 +974,24 @@ export default function RecordingScreen() {
 
     const rawFinalAudio = uri ?? priorAudioUriRef.current;
     const finalAudio = rawFinalAudio
-      ? (await persistLectureLocalAudio(rawFinalAudio, pendingLectureId)) ?? rawFinalAudio
+      ? await persistLectureLocalAudio(rawFinalAudio, pendingLectureId)
       : null;
+    const verifiedFinalAudio = recordingEngine === 'legacy'
+      ? isVerifiedDurableLectureAudio(finalAudio)
+      : localAudioFileHasBytes(finalAudio);
+    // Captions and duration are valuable recovery evidence, but they cannot
+    // turn a missing recording file into a "Recording Saved" result. Keep the
+    // screen mounted and leave every candidate untouched if final ownership is
+    // not proven.
+    if (finalDuration > 0 && !verifiedFinalAudio) {
+      finishedRef.current = false;
+      setFinishing(false);
+      Alert.alert(
+        t('recording.notSavedTitle'),
+        'The final audio could not be verified in durable storage. No upload was started and original audio candidates were left untouched for recovery.',
+      );
+      return;
+    }
     const savedDuration = Math.max(existing?.durationMillis ?? 0, finalDuration);
     const currentLinks = materialLinksForLecture(pendingLectureId);
     const currentAnnotations = materialAnnotations.filter(
@@ -924,7 +999,7 @@ export default function RecordingScreen() {
     );
     const meaningful = hasMeaningfulRecordingContent({
       durationMillis: savedDuration,
-      hasAudio: Boolean(finalAudio),
+      hasAudio: Boolean(verifiedFinalAudio),
       captionCount: lines.length,
       markCount: mergedMarks.length,
       transcriptLength: en.length,
