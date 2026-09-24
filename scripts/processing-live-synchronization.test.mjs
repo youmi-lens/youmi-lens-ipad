@@ -65,9 +65,10 @@ check('all three surfaces use the same terminal ready field after an update', ()
 
 check('a live processing-to-ready poll writes ready then stops, so mounted screens receive one terminal update', () => {
   const tick = orchestrator.slice(orchestrator.indexOf('const tick = async () => {'), orchestrator.indexOf('void tick();'));
-  assert.match(tick, /const patch = mergeProcessingSnapshot\(reference, remote\);/);
-  assert.match(tick, /updateLecture\(lectureId, \{ \.\.\.patch, lastSyncedAt: new Date\(\)\.toISOString\(\) \}\)/);
-  assert.match(tick, /if \(patch\.processingStatus === 'ready' \|\| patch\.processingStatus === 'failed'\) \{\s*stop\(\);/);
+  assert.match(tick, /const merged = mergeProcessingSnapshot\(reference, remote\);/);
+  assert.match(tick, /const result = resolvePollTick\(merged, state\.attempts, MAX_POLL_ATTEMPTS\);/);
+  assert.match(tick, /updateLecture\(lectureId, \{ \.\.\.result\.patch, lastSyncedAt: new Date\(\)\.toISOString\(\) \}\)/);
+  assert.match(tick, /if \(result\.action === 'stop'\) \{\s*stop\(\);/);
 });
 
 check('relaunch rehydrates the same persisted lectures collection and cannot promote partial artifacts to ready', () => {
