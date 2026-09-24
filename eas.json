@@ -27,6 +27,18 @@
         "simulator": false
       }
     },
+    "integrated-physical-validation-release": {
+      "distribution": "internal",
+      "environment": "production",
+      "env": {
+        "APP_VARIANT": "development",
+        "EXPO_PUBLIC_SUBSCRIPTIONS_LIVE": "true",
+        "EXPO_PUBLIC_USE_REAL_IAP": "true"
+      },
+      "ios": {
+        "simulator": false
+      }
+    },
     "development-simulator": {
       "developmentClient": true,
       "distribution": "internal",
