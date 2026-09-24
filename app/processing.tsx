@@ -64,6 +64,7 @@ export default function ProcessingScreen() {
 
   const uploadStatus = lecture?.uploadStatus ?? 'not_uploaded';
   const assemblyRequired = lecture?.audioAssemblyStatus === 'required';
+  const assemblySourceInvalid = lecture?.mediaIntegrityStatus === 'legacy_source_invalid';
   const processingStatus = lecture?.processingStatus ?? 'not_started';
   const processingDone = processingStatus === 'ready';
   const remoteStepState: IndicatorState =
@@ -196,8 +197,8 @@ export default function ProcessingScreen() {
               <StepIndicator state={assembling ? 'active' : assemblyRequired || uploadStatus === 'upload_failed' ? 'failed' : uploadStatus === 'uploaded' ? 'done' : uploadStatus === 'uploading' ? 'active' : 'pending'} />
               <View style={styles.stepText}>
                 <Text style={styles.stepTitle}>{assembling ? t('recording.assemblingAudio') : assemblyRequired ? 'Audio assembly required' : uploadStatus === 'uploaded' ? t('processing.step.audioUploaded') : uploadStatus === 'uploading' ? t('processing.step.uploadingAudio') : uploadStatus === 'upload_failed' ? t('processing.step.uploadFailed') : t('processing.step.waitingUpload')}</Text>
-                <Text style={styles.stepSubtitle}>{assembling ? 'Your original audio and resumed segment are preserved. Composing them into one verified file…' : assemblyRequired ? (assemblyError ? t('processing.step.assemblyFailed') : 'Your original audio and resumed segment are preserved. Upload is blocked until a complete audio file is verified.') : uploadStatus === 'uploaded' ? t('processing.step.sentSecure') : uploadStatus === 'upload_failed' ? lecture?.uploadError ?? t('processing.step.tryAgain') : t('processing.step.sendingSecure')}</Text>
-                {assemblyRequired && !assembling ? <SecondaryButton label={t('processing.step.retryRecovery')} icon="refresh-outline" onPress={retryAssembly} style={styles.retryButton} /> : null}
+                <Text style={styles.stepSubtitle}>{assembling ? 'Your original audio and resumed segment are preserved. Composing them into one verified file…' : assemblyRequired ? (assemblySourceInvalid ? 'An original audio segment is incomplete and cannot be recovered by retrying. Available audio remains preserved; upload stays blocked.' : assemblyError ? t('processing.step.assemblyFailed') : 'Your original audio and resumed segment are preserved. Upload is blocked until a complete audio file is verified.') : uploadStatus === 'uploaded' ? t('processing.step.sentSecure') : uploadStatus === 'upload_failed' ? lecture?.uploadError ?? t('processing.step.tryAgain') : t('processing.step.sendingSecure')}</Text>
+                {assemblyRequired && !assembling && !assemblySourceInvalid ? <SecondaryButton label={t('processing.step.retryRecovery')} icon="refresh-outline" onPress={retryAssembly} style={styles.retryButton} /> : null}
                 {uploadStatus === 'upload_failed' && !assemblyRequired ? <SecondaryButton label={t('processing.step.retryUpload')} icon="refresh-outline" onPress={() => { if (lecture) updateLecture(lecture.id, { uploadStatus: 'not_uploaded', uploadError: undefined }); }} style={styles.retryButton} /> : null}
               </View>
             </View>

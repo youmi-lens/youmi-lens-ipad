@@ -35,6 +35,23 @@ check('the legacy hook exposes the native in-flight URI before a graceful stop',
   assert.match(legacyRecorder, /setLiveFileUri\(recorder\.uri \|\| null\);/);
   assert.match(legacyRecorder, /durationMillis: recorderState\.durationMillis, recordingUri, liveFileUri, error, errorDetail,/);
 });
+check('legacy Pause finalizes its M4A before promotion; Resume starts a distinct segment', () => {
+  const pause = legacyRecorder.slice(legacyRecorder.indexOf('const pauseRecording = useCallback'), legacyRecorder.indexOf('const resumeRecording = useCallback'));
+  const resume = legacyRecorder.slice(legacyRecorder.indexOf('const resumeRecording = useCallback'), legacyRecorder.indexOf('const stopRecording = useCallback'));
+  assert.match(pause, /await recorder\.stop\(\)/);
+  assert.doesNotMatch(pause, /recorder\.pause\(\)/);
+  assert.match(resume, /await recorder\.prepareToRecordAsync\(\)/);
+  assert.match(resume, /recorder\.record\(\)/);
+});
+check('Documents promotion requires native AVAudioFile validation, not only a non-zero byte count', () => {
+  assert.match(localAudio, /async function verifyFinalizedLectureAudio/);
+  assert.match(localAudio, /await persistLegacyAudioSources\(lectureId, \[\{ role: 'prior_canonical', uri \}\]\)/);
+  const persist = localAudio.slice(localAudio.indexOf('export async function persistLectureLocalAudio'), localAudio.indexOf('export async function persistLectureResumeSegment'));
+  assert.match(persist, /await verifyFinalizedLectureAudio\(target\.uri, lectureId\)/);
+  const resume = localAudio.slice(localAudio.indexOf('export async function persistLectureResumeSegment'), localAudio.indexOf('/**\n * Resolve a stored localAudioUri'));
+  assert.match(resume, /await verifyFinalizedLectureAudio\(target\.uri, lectureId\)/);
+  assert.doesNotMatch(resume, /return localAudioFileExists\(src\)/);
+});
 check('Pause creates a lecture-owned durable checkpoint before in-progress persistence', () => {
   const block = pauseBlock();
   const copy = block.indexOf('await persistLectureLocalAudio(liveFileUri, pendingLectureId)');

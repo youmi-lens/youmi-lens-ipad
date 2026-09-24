@@ -153,7 +153,7 @@ export type Lecture = {
    * uploading an incomplete subset, and this records why — auditable even
    * though nothing was lost (every source stays exactly where it was).
    */
-  mediaIntegrityStatus?: 'ambiguous_overlap' | 'durable_export_failed' | 'legacy_persist_failed' | 'no_sources';
+  mediaIntegrityStatus?: 'ambiguous_overlap' | 'durable_export_failed' | 'legacy_persist_failed' | 'legacy_source_invalid' | 'no_sources';
   mediaIntegrityDetail?: string;
   mediaIntegrityCheckedAt?: string;
   /**

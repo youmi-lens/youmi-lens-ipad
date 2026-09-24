@@ -12,6 +12,7 @@ import {
   shouldShowAudioPlayer,
   shouldShowLocalAudioPlayer,
 } from './lectureLocalAudio.mjs';
+import { persistLegacyAudioSources } from '@/modules/expo-durable-recorder';
 
 export {
   classifyLectureAudioPlayback,
@@ -120,6 +121,24 @@ export function isVerifiedDurableLectureAudio(uri: string | null | undefined): b
   }
 }
 
+/**
+ * Proves that a lecture-owned Documents M4A is a finalized, readable asset.
+ * File size alone is explicitly insufficient: a paused AVAudioRecorder has
+ * bytes but no M4A moov atom until it is stopped.  The native assembler uses
+ * AVAudioFile inspection and copies only after this exact validation; this
+ * call therefore validates the Documents target itself and adds an
+ * independent, non-destructive native recovery copy.
+ */
+async function verifyFinalizedLectureAudio(uri: string, lectureId: string): Promise<boolean> {
+  if (!isVerifiedDurableLectureAudio(uri)) return false;
+  try {
+    const result = await persistLegacyAudioSources(lectureId, [{ role: 'prior_canonical', uri }]);
+    return result.sourceCount === 1 && result.sources[0]?.durationMs > 0 && result.sources[0]?.byteLength > 0;
+  } catch {
+    return false;
+  }
+}
+
 /** A final native-durable asset may live outside Documents, but must have bytes. */
 export function localAudioFileHasBytes(uri: string | null | undefined): boolean {
   const FileSystemNS = loadFileSystem();
@@ -164,7 +183,7 @@ export async function persistLectureLocalAudio(
   const src = typeof sourceUri === 'string' ? sourceUri.trim() : '';
   if (!src) return null;
   if (isVerifiedDurableLectureAudio(src)) {
-    return src;
+    return (await verifyFinalizedLectureAudio(src, lectureId)) ? src : null;
   }
 
   const FileSystemNS = loadFileSystem();
@@ -188,7 +207,7 @@ export async function persistLectureLocalAudio(
     const target = new FileSystemNS.File(dir, targetName);
     const sourceFile = new FileSystemNS.File(src);
     sourceFile.copy(target);
-    if (isVerifiedDurableLectureAudio(target.uri)) {
+    if (await verifyFinalizedLectureAudio(target.uri, lectureId)) {
       return target.uri;
     }
   } catch (err) {
@@ -227,10 +246,13 @@ export async function persistLectureResumeSegment(
     const target = new FileSystemNS.File(segmentsDir, `resume-${nonce}${extension.startsWith('.') ? extension : `.${extension}`}`);
     if (target.exists) return null;
     new FileSystemNS.File(src).copy(target);
-    return target.exists && typeof target.size === 'number' && target.size > 0 ? target.uri : null;
+    return (await verifyFinalizedLectureAudio(target.uri, lectureId)) ? target.uri : null;
   } catch (err) {
     if (__DEV__) console.warn('[lectureLocalAudio] resume segment preservation failed', err);
-    return localAudioFileExists(src) ? src : null;
+    // Do not fall back to the source URI here. A cache file can be non-empty
+    // yet still be an open/unfinalized M4A; returning it would recreate the
+    // exact assembly-required retry loop this helper is meant to prevent.
+    return null;
   }
 }
 

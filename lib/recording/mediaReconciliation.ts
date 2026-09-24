@@ -104,6 +104,7 @@ export type MediaReconciliationFailureReason =
   | 'ambiguous_overlap'
   | 'durable_export_failed'
   | 'legacy_persist_failed'
+  | 'legacy_source_invalid'
   | 'no_sources'
   | 'composition_failed';
 

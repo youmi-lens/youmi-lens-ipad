@@ -219,6 +219,10 @@ export default function RecordingScreen() {
   // are shown but the recorder/mic/live captions do NOT start until the user
   // resumes from the existing central Pause/Continue control.
   const [continueRequested, setContinueRequested] = useState(false);
+  // A legacy Pause finalizes a first segment.  If it is then resumed, the
+  // next capture is a distinct M4A and must be assembled rather than replacing
+  // the already-verified first segment.
+  const [legacyResumeAfterCheckpoint, setLegacyResumeAfterCheckpoint] = useState(false);
   // A durable session that remains native-recording belongs to the persistent
   // native module, not to the earlier Recording screen instance. This is a
   // live reattachment, not the paused review state used for an intentional
@@ -268,10 +272,10 @@ export default function RecordingScreen() {
   const granted = permissionStatus === 'granted';
   const sessionDurationMillis = recordingEngine === 'nativeDurable'
     ? durationMillis
-    : isResume
+    : isResume || legacyResumeAfterCheckpoint
     ? priorDurationMillisRef.current + (isReviewingResume ? 0 : durationMillis)
     : durationMillis;
-  const legacyResumeHasPriorAudio = isResume
+  const legacyResumeHasPriorAudio = (isResume || legacyResumeAfterCheckpoint)
     && recordingEngine === 'legacy'
     && Boolean(priorAudioUriRef.current);
   const seconds = Math.floor(sessionDurationMillis / 1000);
@@ -702,7 +706,8 @@ export default function RecordingScreen() {
       return;
     }
     if (isPaused) {
-      await resumeRecording();
+      const resumed = await resumeRecording();
+      if (resumed && recordingEngine === 'legacy') setLegacyResumeAfterCheckpoint(true);
       // Reconnect captions/mic only — never wipe accumulated live history.
       if (!isGuest) await startCaptionPipeline({ preserveHistory: true });
     } else {
@@ -710,6 +715,43 @@ export default function RecordingScreen() {
       if (!paused) return;
       stopMicStream();
       stopLiveCaptions();
+      // The current capture is now finalized by the legacy hook.  A resumed
+      // legacy lecture already owns a first canonical segment, so preserve
+      // this new segment separately and enter the existing safe assembly
+      // gate.  Never overwrite the first segment merely because Pause was
+      // pressed a second time.
+      if (recordingEngine === 'legacy' && legacyResumeHasPriorAudio && liveFileUri) {
+        const segmentUri = await persistLectureResumeSegment(liveFileUri, pendingLectureId);
+        const plan = planLegacyResumeFinalization({
+          priorCanonicalUri: priorAudioUriRef.current,
+          resumedSegmentUri: segmentUri,
+          existingSegments: resumeLecture?.audioSegments,
+          priorCreatedAt: resumeLecture?.date,
+          now: new Date().toISOString(),
+        });
+        if (plan.kind === 'assembly_required') {
+          persistProgress();
+          updateLecture(pendingLectureId, {
+            recordingEngine,
+            localAudioUri: plan.canonicalUri,
+            audioAssemblyStatus: 'required',
+            audioAssemblyReason: plan.reason,
+            audioSegments: plan.segments,
+            uploadStatus: 'upload_failed',
+            uploadError: 'Audio segments were preserved. Final assembly is required before upload.',
+          });
+          void preserveLegacyAudioSourcesEarly(pendingLectureId, plan.segments).then((preserved) => {
+            if (__DEV__ && !preserved.ok) {
+              console.warn('[AudioAssembly] early-preservation-failed', { lectureId: pendingLectureId, error: preserved.error });
+            }
+          });
+          router.replace({ pathname: '/processing', params: { lectureId: pendingLectureId } });
+          return;
+        }
+        setPauseDurabilityError('durable_copy_failed');
+        Alert.alert('Pause was not completed safely', 'The resumed audio could not be verified as a separate durable segment. Keep Youmi Lens open and do not retry this recording.');
+        return;
+      }
       // A legacy recorder writes under Caches/ExpoAudio. A paused recorder can
       // outlive this JS screen only if its current bytes are promoted now;
       // saving the cache URI alone made lock/process-restart Finish point at a
@@ -733,6 +775,12 @@ export default function RecordingScreen() {
         return;
       }
       setPauseDurabilityError(null);
+      if (recordingEngine === 'legacy' && verifiedPausedLegacyAudio) {
+        // The legacy hook stopped the AVAudioRecorder before this copy, so
+        // this is a finalized, native-validated Documents checkpoint.
+        priorAudioUriRef.current = verifiedPausedLegacyAudio;
+        priorDurationMillisRef.current = sessionDurationMillis;
+      }
       // Pausing keeps the session — persist only a verified legacy checkpoint
       // so a later remount owns a Documents asset, never a cache-only URI.
       if (!isGuest && !finishedRef.current) {
