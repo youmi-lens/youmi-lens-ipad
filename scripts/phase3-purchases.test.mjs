@@ -167,7 +167,11 @@ assert.ok(restoreBody.includes('usedStoreKitRecovery: true'));
 // Recovery re-verifies through the same idempotent backend verify endpoint.
 assert.match(purchases, /getUnfinishedStudentPassPurchases\(\)/);
 assert.match(purchases, /verifyPurchaseWithBackend\(purchase, accessToken\)/);
-assert.match(subscriptions, /finishTransaction\(\{ purchase, isConsumable: false \}\)/);
+// finishTransaction is called through a bounded wrapper (see purchase-stall-fix
+// tests) so a hung native call can never leave the purchase/restore spinner
+// stuck — but the underlying StoreKit call still happens with the same args.
+assert.match(subscriptions, /finishTransactionBounded\(purchase, false\)/);
+assert.match(subscriptions, /finishTransaction\(\{ purchase, isConsumable \}\)/);
 
 // 14. Required product language is present and prohibited paywall language is absent.
 assert.match(plans, /plans\.subtitle/);

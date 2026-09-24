@@ -18,6 +18,7 @@ import { AppState, Platform } from 'react-native';
 
 import { API_BASE_URL } from './config';
 import { boundedFetch, isBoundedFetchTimeout } from './boundedFetch';
+import { boundedVoidTask } from './boundedTask';
 import { logDiag } from './iapDiag';
 import { logIap } from './iapLog';
 import type { BackendEntitlement, EntitlementResponse } from './purchases';
@@ -78,10 +79,36 @@ type VerifyResponse = {
 };
 
 const PURCHASE_TIMEOUT_MS = 120_000;
+// finishTransaction is a native StoreKit bridge call with no bound of its own
+// (ExpoIapModule.finishTransaction). By the time it's called here the backend
+// has ALREADY granted (or definitively rejected) the entitlement, so nothing
+// about correctness depends on this call finishing promptly — it only tells
+// StoreKit's local queue "done". If it hangs, awaiting it unbounded would keep
+// `purchaseInFlight`/`busy` stuck forever on an otherwise-complete purchase.
+// A transaction that doesn't finish in time stays unfinished in the StoreKit
+// queue and replays on next launch (see expo-iap finishTransaction docs) or
+// gets swept up by a later restore — it is never silently dropped.
+const FINISH_TRANSACTION_TIMEOUT_MS = 10_000;
 const ALL_RESTORABLE_IDS = new Set<string>([
   ...SUBSCRIPTION_PRODUCT_IDS,
   ...LEGACY_STUDENT_ACCESS_PRODUCT_IDS,
 ]);
+
+/**
+ * Calls finishTransaction but never lets the caller wait on it past
+ * FINISH_TRANSACTION_TIMEOUT_MS. Never rejects: a slow/failed finish is
+ * logged and left for StoreKit to redeliver/replay, not surfaced as a
+ * purchase failure (the purchase itself already succeeded or failed via the
+ * backend verify result before this is ever called).
+ */
+function finishTransactionBounded(purchase: Purchase, isConsumable: boolean): Promise<void> {
+  return boundedVoidTask(
+    () => finishTransaction({ purchase, isConsumable }),
+    FINISH_TRANSACTION_TIMEOUT_MS,
+    () => logIap('finishTransaction timed out; transaction left unfinished for replay/restore'),
+    (error) => logIap('finishTransaction failed', error instanceof Error ? error.name : 'unknown'),
+  );
+}
 
 function purchaseToken(purchase: Purchase): string | null {
   return purchase.purchaseToken && purchase.purchaseToken.length > 0 ? purchase.purchaseToken : null;
@@ -319,7 +346,7 @@ class SubscriptionService {
     }
     const payload = response.payload ?? {};
     if (shouldFinishSubscriptionTransaction(payload)) {
-      await finishTransaction({ purchase, isConsumable: false });
+      await finishTransactionBounded(purchase, false);
     }
     if (response.status >= 200 && response.status < 300 && payload.ok && payload.granted) {
       return { ...result('success'), entitlement: payload.entitlement ?? null };
@@ -354,10 +381,7 @@ class SubscriptionService {
       for (const purchase of eligible) {
         const id = transactionId(purchase);
         if (id && verifiedIds.has(id)) {
-          await finishTransaction({
-            purchase,
-            isConsumable: purchase.productId === LEGACY_STUDENT_ACCESS_PRODUCT_IDS[0],
-          });
+          await finishTransactionBounded(purchase, purchase.productId === LEGACY_STUDENT_ACCESS_PRODUCT_IDS[0]);
         }
       }
       if (payload.alreadyLinked) return { ...result('already_linked'), restoredCount: payload.restoredCount ?? 0 };
