@@ -35,6 +35,24 @@ check('Pause creates a lecture-owned durable checkpoint before in-progress persi
   assert.ok(copy >= 0 && persist > copy);
   assert.match(block, /isVerifiedDurableLectureAudio\(pausedLegacyAudio\)/);
 });
+check('a durable-copy failure is an explicit retryable state, never a falsely safe Paused state', () => {
+  const block = pauseBlock();
+  assert.match(block, /if \(recordingEngine === 'legacy' && !verifiedPausedLegacyAudio\)/);
+  const failure = block.indexOf("setPauseDurabilityError('durable_copy_failed')");
+  assert.ok(failure >= 0);
+  assert.match(block.slice(failure), /persistProgress\(null\)/);
+  assert.match(block.slice(failure), /Pause was not completed safely/);
+  assert.match(block.slice(failure), /return;/);
+  assert.match(recording, /pauseDurabilityError \? 'Audio needs saving'/);
+  assert.match(recording, /Retry saving paused audio/);
+});
+check('the retry path accepts only a verified lecture-owned durable copy', () => {
+  const block = pauseBlock();
+  const retry = block.slice(block.indexOf('if (pauseDurabilityError)'), block.indexOf('if (isPaused)'));
+  assert.match(retry, /await persistLectureLocalAudio\(liveFileUri, pendingLectureId\)/);
+  assert.match(retry, /isVerifiedDurableLectureAudio\(retriedAudio\)/);
+  assert.match(retry, /setPauseDurabilityError\(null\)/);
+});
 check('ordinary legacy autosave cannot reintroduce a cache URI before or after background/foreground', () => {
   assert.match(recording, /persistProgress\(recordingEngine === 'legacy' \|\| legacyResumeHasPriorAudio \? undefined : liveFileUri\);/);
 });

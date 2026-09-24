@@ -294,7 +294,7 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
   }, [applySession, enabled, fail, lectureId, noteStatusSequence, recoverableSession]);
 
   const pauseRecording = useCallback(async () => {
-    const session = sessionRef.current; if (!session || !isRecording) return;
+    const session = sessionRef.current; if (!session || !isRecording) return false;
     try {
       const status = await pauseNative({ recordingSessionId: session.recordingSessionId });
       noteStatusSequence(status);
@@ -302,11 +302,12 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
       logRecordingEvent('native_recording_paused', {
         segmentCount: status.session?.segments.length ?? session.segments.length,
       });
-    } catch (failure) { fail('Could not pause the recording.', failure); }
+      return true;
+    } catch (failure) { fail('Could not pause the recording.', failure); return false; }
   }, [applySession, fail, isRecording, noteStatusSequence]);
 
   const resumeRecording = useCallback(async () => {
-    const session = sessionRef.current; if (!session) return;
+    const session = sessionRef.current; if (!session) return false;
     try {
       const status = session.state === 'paused'
         ? await resumeNative({ recordingSessionId: session.recordingSessionId })
@@ -329,6 +330,7 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
       logRecordingEvent('native_recording_resumed', {
         segmentCount: (status.session ?? session).segments.length,
       });
+      return true;
     } catch (failure) {
       fail(
         isRecorderBusyError(failure)
@@ -336,6 +338,7 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
           : 'Could not resume the recording.',
         failure,
       );
+      return false;
     }
   }, [fail, noteStatusSequence]);
 

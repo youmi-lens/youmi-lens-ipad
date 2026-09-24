@@ -198,6 +198,10 @@ export default function RecordingScreen() {
   const [micStreamError, setMicStreamError] = useState<string | null>(null);
   const [startFailed, setStartFailed] = useState(false);
   const [finishing, setFinishing] = useState(false);
+  // A legacy recorder is physically paused while its cache file is promoted.
+  // Until that promotion verifies, this state prevents the UI from claiming
+  // the pause is safe and exposes a retry that never adopts an unknown file.
+  const [pauseDurabilityError, setPauseDurabilityError] = useState<string | null>(null);
   const [recoveryDismissed, setRecoveryDismissed] = useState(false);
   const [materialPickerVisible, setMaterialPickerVisible] = useState(false);
   const [importingMaterial, setImportingMaterial] = useState(false);
@@ -262,6 +266,7 @@ export default function RecordingScreen() {
     && Boolean(priorAudioUriRef.current);
   const seconds = Math.floor(sessionDurationMillis / 1000);
   const recordingSessionActive = isRecording || isPaused || durationMillis > 0;
+  const safelyPaused = isPaused && !pauseDurabilityError;
   // Reliable "audio is genuinely capturing" signal — the recorder's own state,
   // not just permission. Controls and caption copy derive from this so the UI
   // never claims recording is active when startup failed.
@@ -572,8 +577,8 @@ export default function RecordingScreen() {
   }, [sessionDurationMillis, setCurrentDurationMillis]);
 
   useEffect(() => {
-    setLectureSessionPaused(isReviewingResume || isPaused);
-  }, [isPaused, isReviewingResume, setLectureSessionPaused]);
+    setLectureSessionPaused(isReviewingResume || safelyPaused);
+  }, [isReviewingResume, safelyPaused, setLectureSessionPaused]);
 
   // Begin recording automatically when the screen opens with permission
   // granted. The local recorder starts first so it owns the audio session;
@@ -669,6 +674,23 @@ export default function RecordingScreen() {
       setContinueRequested(true);
       return;
     }
+    if (pauseDurabilityError) {
+      const retriedAudio = recordingEngine === 'legacy' && liveFileUri
+        ? await persistLectureLocalAudio(liveFileUri, pendingLectureId)
+        : null;
+      if (retriedAudio && isVerifiedDurableLectureAudio(retriedAudio)) {
+        setPauseDurabilityError(null);
+        if (!isGuest && !finishedRef.current) {
+          persistProgress(legacyResumeHasPriorAudio ? undefined : retriedAudio);
+        }
+        return;
+      }
+      Alert.alert(
+        'Paused recording is not yet safe',
+        'Its audio could not be verified in durable storage. Keep Youmi Lens open and use this control to retry saving it.',
+      );
+      return;
+    }
     if (isPaused) {
       await resumeRecording();
       // Reconnect captions/mic only — never wipe accumulated live history.
@@ -692,12 +714,15 @@ export default function RecordingScreen() {
         // Do not make an ephemeral cache URI the recovery authority. The source
         // is left untouched for forensic recovery, but the user must not be
         // led to believe this paused recording is safely persisted.
+        setPauseDurabilityError('durable_copy_failed');
+        if (!isGuest && !finishedRef.current) persistProgress(null);
         Alert.alert(
           'Pause was not completed safely',
           'The captured audio could not be verified in durable storage. Keep Youmi Lens open and use the main control to retry saving the paused audio.',
         );
         return;
       }
+      setPauseDurabilityError(null);
       // Pausing keeps the session — persist only a verified legacy checkpoint
       // so a later remount owns a Documents asset, never a cache-only URI.
       if (!isGuest && !finishedRef.current) {
@@ -715,6 +740,7 @@ export default function RecordingScreen() {
   }, [
     registerLectureSessionPauseToggle,
     isPaused,
+    pauseDurabilityError,
     isReviewingResume,
     isGuest,
     resumeRecording,
@@ -1166,8 +1192,8 @@ export default function RecordingScreen() {
 
         {granted ? (
           <StatusPill
-            label={isReviewingResume ? t('recording.pausedShort') : isPaused ? t('recording.pausedShort') : t('recording.recordingShort')}
-            variant={isReviewingResume || isPaused ? 'paused' : 'recording'}
+            label={pauseDurabilityError ? 'Audio needs saving' : isReviewingResume ? t('recording.pausedShort') : safelyPaused ? t('recording.pausedShort') : t('recording.recordingShort')}
+            variant={pauseDurabilityError || isReviewingResume || safelyPaused ? 'paused' : 'recording'}
           />
         ) : null}
         <View style={[styles.courseChip, isCompact && styles.courseChipCompact]}>
@@ -1296,17 +1322,19 @@ export default function RecordingScreen() {
               {visualGuest ? (
                 <GlassCard padding={spacing.xl} style={styles.guestCard}>
                   <View style={styles.stateHeader}>
-                    <View style={[styles.stateIcon, isPaused && styles.stateIconPaused]}>
+                    <View style={[styles.stateIcon, safelyPaused && styles.stateIconPaused]}>
                       <Ionicons
-                        name={isPaused ? 'pause' : 'mic'}
+                        name={safelyPaused ? 'pause' : 'mic'}
                         size={20}
-                        color={isPaused ? colors.mutedBlueGray : colors.deepNavy}
+                        color={safelyPaused ? colors.mutedBlueGray : colors.deepNavy}
                       />
                     </View>
                     <View style={styles.stateHeaderText}>
                       <Text style={styles.stateTitle}>{t('recording.localRecording')}</Text>
                       <Text style={styles.stateStatus}>
-                        {isPaused
+                        {pauseDurabilityError
+                          ? 'Audio needs saving'
+                          : safelyPaused
                           ? t('recording.paused')
                           : recordingSessionActive
                             ? t('recording.recordingToDevice')
@@ -1412,14 +1440,14 @@ export default function RecordingScreen() {
 
             <PressableScale
               accessibilityRole="button"
-              accessibilityLabel={isReviewingResume || isPaused ? t('recording.resume') : t('recording.pause')}
+              accessibilityLabel={pauseDurabilityError ? 'Retry saving paused audio' : isReviewingResume || safelyPaused ? t('recording.resume') : t('recording.pause')}
               accessibilityState={{ disabled: !centralControlEnabled }}
               disabled={!centralControlEnabled}
               onPress={() => { void togglePause(); }}
               style={[styles.roundBtn, !centralControlEnabled && styles.disabled]}
             >
               <Ionicons
-                name={isReviewingResume || isPaused ? 'play' : 'pause'}
+                name={pauseDurabilityError ? 'refresh' : isReviewingResume || safelyPaused ? 'play' : 'pause'}
                 size={32}
                 color={colors.pearlWhite}
               />

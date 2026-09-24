@@ -95,12 +95,12 @@ export function useLegacyLectureRecorder(enabled: boolean): LectureRecorder {
   }, [enabled, recorder]);
 
   const pauseRecording = useCallback(async () => {
-    try { recorder.pause(); setIsPaused(true); }
-    catch { setError('Could not pause the recording.'); }
+    try { recorder.pause(); setIsPaused(true); return true; }
+    catch { setError('Could not pause the recording.'); return false; }
   }, [recorder]);
   const resumeRecording = useCallback(async () => {
-    try { recorder.record(); setIsPaused(false); }
-    catch { setError('Could not resume the recording.'); }
+    try { recorder.record(); setIsPaused(false); return true; }
+    catch { setError('Could not resume the recording.'); return false; }
   }, [recorder]);
   const stopRecording = useCallback(async () => {
     try {

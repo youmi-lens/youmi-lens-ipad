@@ -28,8 +28,9 @@ export type LectureRecorder = {
   errorDetail: string | null;
   requestPermission: () => Promise<boolean>;
   startRecording: () => Promise<boolean>;
-  pauseRecording: () => Promise<void>;
-  resumeRecording: () => Promise<void>;
+  /** True only when the recorder completed the requested state transition. */
+  pauseRecording: () => Promise<boolean>;
+  resumeRecording: () => Promise<boolean>;
   stopRecording: () => Promise<string | null>;
   leaveRecording: () => Promise<string | null>;
   recoverRecording: () => Promise<boolean>;
