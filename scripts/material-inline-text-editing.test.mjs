@@ -179,15 +179,15 @@ check('textViewDidEndEditing commits — covers dismissal paths that don\'t go t
 
 console.log('\nNative: editor tracks scroll AND zoom while active (KVO contentOffset/bounds + PDFViewScaleChanged)');
 
-check('the scale-change handler repositions the editor and delete button only while each is actually active', () => {
+check('the scale-change handler requests a settled editor reposition and repositions the delete button only while each is actually active', () => {
   const fn = pdfAnnotationView.slice(pdfAnnotationView.indexOf('@objc private func handleAnnotationLayoutChange()'), pdfAnnotationView.indexOf('private func startObservingScroll()'));
-  assert.match(fn, /if inlineTextEditingContext != nil \{ repositionInlineTextEditor\(\) \}/);
+  assert.match(fn, /if inlineTextEditingContext != nil \{ scheduleInlineTextEditorReposition\(\) \}/);
   assert.match(fn, /if selectedTextAnnotationId != nil \{ repositionTextDeleteButton\(\) \}/);
 });
 
-check('the contentOffset/bounds KVO handler does the same for scroll', () => {
+check('the contentOffset/bounds KVO handler requests the same settled reposition for scroll', () => {
   const fn = pdfAnnotationView.slice(pdfAnnotationView.indexOf('public override func observeValue('), pdfAnnotationView.indexOf('public override func observeValue(') + 900);
-  assert.match(fn, /if inlineTextEditingContext != nil \{ repositionInlineTextEditor\(\) \}/);
+  assert.match(fn, /if inlineTextEditingContext != nil \{ scheduleInlineTextEditorReposition\(\) \}/);
   assert.match(fn, /if selectedTextAnnotationId != nil \{ repositionTextDeleteButton\(\) \}/);
 });
 

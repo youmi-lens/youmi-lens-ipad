@@ -2,6 +2,23 @@ import ExpoModulesCore
 import PDFKit
 import UIKit
 
+/// Bounded, release-safe physical-QA tracing for Course Material text only.
+/// It is compiled into the native module but can run solely when the Dev
+/// variant's Info.plist explicitly sets `YoumiMaterialTextTrace=true`; normal
+/// Dev and every production build leave it disabled. It observes state and
+/// geometry only — it never changes annotation ownership, rendering, gestures,
+/// persistence, or recorder behavior.
+private enum MaterialTextTrace {
+  private static let enabled = (Bundle.main.object(forInfoDictionaryKey: "YoumiMaterialTextTrace") as? Bool) == true
+  private static var remaining = 96
+
+  static func log(_ event: String, _ fields: () -> String) {
+    guard enabled, remaining > 0 else { return }
+    remaining -= 1
+    print("[material-text-trace] event=\(event) \(fields())")
+  }
+}
+
 /// Native PDFKit viewer + Pencil annotation overlay for Youmi Lens.
 ///
 /// Phase 1 gave us native PDFKit scroll + pinch zoom. Phase 2 adds an
@@ -136,6 +153,14 @@ public final class PdfAnnotationView: ExpoView {
   /// the anchor (matches drawTextAnnotation's existing bottom-anchored
   /// convention, so paste/created/edited text all render identically).
   private var inlineTextEditingContext: (id: String?, pageNumber: Int, originX: Double, originY: Double, fontSize: Double, width: Double)?
+  /// PDFKit sends contentOffset/bounds KVO while its internal page transform
+  /// is still transient (the physical trace captured a valid editor frame,
+  /// then y=-75893, then the same valid frame again at identical PDF coords).
+  /// Coalesce those notifications to the end of THIS main-runloop layout turn
+  /// before asking PDFKit to convert the stable document anchor. This is not a
+  /// timed debounce: it merely avoids making the UITextView own a frame from
+  /// an in-progress PDFKit transform.
+  private var inlineEditorRepositionScheduled = false
 
   private var document: PDFDocument?
   private var sourceDocument: PDFDocument?
@@ -436,7 +461,12 @@ public final class PdfAnnotationView: ExpoView {
   }
 
   var textAnnotationsByPage: [String: Any]? {
-    didSet { annotationOverlay.loadTextAnnotations(textAnnotationsByPage) }
+    didSet {
+      MaterialTextTrace.log("prop-text-annotations") {
+        "pages=\(textAnnotationsByPage?.keys.sorted() ?? [])"
+      }
+      annotationOverlay.loadTextAnnotations(textAnnotationsByPage)
+    }
   }
 
   var selectedTextAnnotationId: String? {
@@ -1202,7 +1232,7 @@ public final class PdfAnnotationView: ExpoView {
     traceViewportMutation("annotation-layout-change", reason: "PDFKit scale/visible pages notification")
     #endif
     annotationOverlay.setNeedsDisplay()
-    if inlineTextEditingContext != nil { repositionInlineTextEditor() }
+    if inlineTextEditingContext != nil { scheduleInlineTextEditorReposition() }
     if selectedTextAnnotationId != nil { repositionTextDeleteButton() }
     scheduleViewportSnapshot()
   }
@@ -1343,7 +1373,7 @@ public final class PdfAnnotationView: ExpoView {
     annotationOverlay.setNeedsDisplay()
     if keyPath == "contentOffset" || keyPath == "bounds" {
       scheduleViewportSnapshot()
-      if inlineTextEditingContext != nil { repositionInlineTextEditor() }
+      if inlineTextEditingContext != nil { scheduleInlineTextEditorReposition() }
       if selectedTextAnnotationId != nil { repositionTextDeleteButton() }
     }
     #if DEBUG
@@ -1551,6 +1581,9 @@ public final class PdfAnnotationView: ExpoView {
       originX: Double(pagePoint.x), originY: Double(pagePoint.y),
       fontSize: fontSize, width: Double(availableWidth)
     )
+    MaterialTextTrace.log("editor-create-begin") {
+      "page=\(pageNumber) pdfX=\(pagePoint.x) pdfY=\(pagePoint.y) width=\(availableWidth) scale=\(pdfView.scaleFactor)"
+    }
     inlineTextEditor.text = ""
     showInlineTextEditorAndFocus()
   }
@@ -1563,6 +1596,9 @@ public final class PdfAnnotationView: ExpoView {
     inlineTextEditingContext = (id: hit.id, pageNumber: hit.pageNumber, originX: hit.x, originY: hit.y, fontSize: hit.fontSize, width: hit.width)
     annotationOverlay.editingTextAnnotationId = hit.id
     inlineTextEditor.text = hit.text
+    MaterialTextTrace.log("editor-edit-begin") {
+      "id=\(hit.id) page=\(hit.pageNumber) pdfX=\(hit.x) pdfY=\(hit.y) width=\(hit.width) font=\(hit.fontSize) scale=\(pdfView.scaleFactor)"
+    }
     showInlineTextEditorAndFocus()
   }
 
@@ -1571,6 +1607,21 @@ public final class PdfAnnotationView: ExpoView {
     inlineTextEditor.isHidden = false
     bringSubviewToFront(inlineTextEditor)
     inlineTextEditor.becomeFirstResponder()
+  }
+
+  /// Keeps one transient editing surface anchored to one persisted PDF-page
+  /// coordinate. KVO may fire repeatedly during a single PDFKit layout pass;
+  /// a single next-main-turn conversion observes the settled transform without
+  /// introducing an arbitrary timer or retaining a second render owner.
+  private func scheduleInlineTextEditorReposition() {
+    guard inlineTextEditingContext != nil, !inlineEditorRepositionScheduled else { return }
+    inlineEditorRepositionScheduled = true
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      self.inlineEditorRepositionScheduled = false
+      guard self.inlineTextEditingContext != nil else { return }
+      self.repositionInlineTextEditor()
+    }
   }
 
   /// Recomputes the editor's frame from `inlineTextEditingContext` and the
@@ -1602,6 +1653,9 @@ public final class PdfAnnotationView: ExpoView {
     // never moving the anchor the final commit reuses unchanged.
     let origin = pdfView.convert(CGPoint(x: context.originX, y: context.originY), from: page)
     inlineTextEditor.frame = CGRect(x: origin.x, y: origin.y - height, width: width, height: height)
+    MaterialTextTrace.log("editor-frame") {
+      "id=\(context.id ?? "new") page=\(context.pageNumber) pdfX=\(context.originX) pdfY=\(context.originY) viewX=\(origin.x) viewY=\(origin.y) frame=\(inlineTextEditor.frame) scale=\(scale)"
+    }
   }
 
   /// Commits whatever is currently in the editor (if any is open) and hides
@@ -1624,6 +1678,9 @@ public final class PdfAnnotationView: ExpoView {
     annotationOverlay.editingTextAnnotationId = nil
     inlineTextEditingContext = nil
     if inlineTextEditor.isFirstResponder { inlineTextEditor.resignFirstResponder() }
+    MaterialTextTrace.log(context.id == nil ? "editor-create-commit" : "editor-edit-commit") {
+      "id=\(context.id ?? "new") page=\(context.pageNumber) pdfX=\(context.originX) pdfY=\(context.originY) width=\(context.width) font=\(context.fontSize)"
+    }
     if let id = context.id {
       onTextAnnotationAction(["action": "edit", "pageNumber": context.pageNumber, "annotationId": id, "text": finalText])
     } else if !finalText.isEmpty {
@@ -2348,6 +2405,13 @@ final class AnnotationOverlay: UIView {
     // committed text visually flashing independent of anything the user did
     // on this screen. Defense-in-depth: correct even if a future caller ever
     // sends this prop unmemoized.
+    let textLoadEqual = loaded == pagedTextAnnotations
+    MaterialTextTrace.log(textLoadEqual ? "native-text-load-skip-equal" : "native-text-load-apply") {
+      let entries = loaded.flatMap { page, annotations in
+        annotations.map { "id=\($0.id),p=\(page),x=\($0.x),y=\($0.y),w=\($0.width),f=\($0.fontSize)" }
+      }.sorted().joined(separator: ";")
+      return "count=\(loaded.values.reduce(0) { $0 + $1.count }) equal=\(textLoadEqual) [\(entries)]"
+    }
     if loaded == pagedTextAnnotations { return }
     pagedTextAnnotations = loaded
     setNeedsDisplay()
@@ -2538,6 +2602,9 @@ final class AnnotationOverlay: UIView {
     let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.label, .paragraphStyle: paragraph]
     let textSize = (annotation.text as NSString).boundingRect(with: CGSize(width: width, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: attributes, context: nil).size
     let rect = CGRect(x: origin.x, y: origin.y - textSize.height, width: width, height: textSize.height + 4)
+    MaterialTextTrace.log("native-text-render") {
+      "id=\(annotation.id) pdfX=\(drawX) pdfY=\(drawY) viewX=\(origin.x) viewY=\(origin.y) rect=\(rect) scale=\(scale) liveDrag=\(liveOverride != nil) editing=\(editingTextAnnotationId == annotation.id) selected=\(selectedTextAnnotationId == annotation.id)"
+    }
     ctx.saveGState()
     if selectedTextAnnotationId == annotation.id {
       ctx.setStrokeColor(UIColor.systemBlue.withAlphaComponent(0.9).cgColor)
