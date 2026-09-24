@@ -23,6 +23,7 @@ export function useLegacyLectureRecorder(enabled: boolean): LectureRecorder {
   const [permissionStatus, setPermissionStatus] = useState<RecorderPermission>('undetermined');
   const [isPaused, setIsPaused] = useState(false);
   const [recordingUri, setRecordingUri] = useState<string | null>(null);
+  const [liveFileUri, setLiveFileUri] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
   const activeRef = useRef(false);
@@ -75,6 +76,9 @@ export function useLegacyLectureRecorder(enabled: boolean): LectureRecorder {
       await recorder.prepareToRecordAsync();
       recorder.record();
       activeRef.current = true; setIsPaused(false); setRecordingUri(null);
+      // expo-audio assigns its output URI at preparation time. Pause durability
+      // must copy these current bytes before a stop/leave lifecycle boundary.
+      setLiveFileUri(recorder.uri || null);
       return true;
     } catch (startError) {
       const detail = startError instanceof Error ? startError.message : String(startError);
@@ -106,6 +110,7 @@ export function useLegacyLectureRecorder(enabled: boolean): LectureRecorder {
     try {
       await recorder.stop(); activeRef.current = false; setIsPaused(false);
       const uri = recorder.uri ?? null; setRecordingUri(uri);
+      setLiveFileUri(null);
       await setAudioModeAsync({
         playsInSilentMode: true,
         allowsRecording: false,
@@ -123,7 +128,7 @@ export function useLegacyLectureRecorder(enabled: boolean): LectureRecorder {
     engine: 'legacy', permissionChecked, permissionStatus, recoveryChecked: true,
     recoverableSession: null, isRecording: recorderState.isRecording, isPaused,
     degradedReason: null,
-    durationMillis: recorderState.durationMillis, recordingUri, error, errorDetail,
+    durationMillis: recorderState.durationMillis, recordingUri, liveFileUri, error, errorDetail,
     requestPermission, startRecording, pauseRecording, resumeRecording, stopRecording,
     leaveRecording: stopRecording,
     recoverRecording: async () => false,

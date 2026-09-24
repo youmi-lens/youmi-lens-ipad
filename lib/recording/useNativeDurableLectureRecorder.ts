@@ -452,7 +452,7 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
 
   return {
     engine: 'nativeDurable', permissionChecked, permissionStatus, recoveryChecked, recoverableSession,
-    isRecording, isPaused, degradedReason, durationMillis, recordingUri, error, errorDetail,
+    isRecording, isPaused, degradedReason, durationMillis, recordingUri, liveFileUri: null, error, errorDetail,
     requestPermission, startRecording, pauseRecording, resumeRecording, stopRecording, leaveRecording,
     recoverRecording, finishRecoverableRecording, discardRecoverableRecording,
     acknowledgeFinalizedOutput,

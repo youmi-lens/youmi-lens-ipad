@@ -66,7 +66,7 @@ export function useLectureRecorder(options: {
   const fixture: LectureRecorder = {
     engine: 'legacy', permissionChecked: true, permissionStatus: 'granted', recoveryChecked: true,
     recoverableSession: null, isRecording: true, isPaused: fixturePaused, degradedReason: null, durationMillis: fixtureMillis,
-    recordingUri: null, error: null, errorDetail: null,
+    recordingUri: null, liveFileUri: null, error: null, errorDetail: null,
     requestPermission: async () => true, startRecording: async () => true,
     pauseRecording: async () => { setFixturePaused(true); return true; },
     resumeRecording: async () => { setFixturePaused(false); return true; },

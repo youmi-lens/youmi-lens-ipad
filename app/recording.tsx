@@ -168,6 +168,7 @@ export default function RecordingScreen() {
     isRecording,
     isPaused,
     durationMillis,
+    liveFileUri,
     error,
     startRecording,
     pauseRecording,

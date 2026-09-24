@@ -13,6 +13,8 @@ import { fileURLToPath } from 'node:url';
 const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
 const recording = read('../app/recording.tsx');
 const localAudio = read('../lib/lectureLocalAudio.ts');
+const legacyRecorder = read('../lib/recording/useLegacyLectureRecorder.ts');
+const recorderTypes = read('../lib/recording/types.ts');
 let passed = 0;
 const check = (label, fn) => { fn(); passed += 1; console.log(`  ok  ${label}`); };
 
@@ -28,6 +30,11 @@ const finishBlock = () => {
 };
 
 console.log('Pause ownership — immediate finish, background/foreground, process restart, and long idle');
+check('the legacy hook exposes the native in-flight URI before a graceful stop', () => {
+  assert.match(recorderTypes, /liveFileUri: string \| null;/);
+  assert.match(legacyRecorder, /setLiveFileUri\(recorder\.uri \|\| null\);/);
+  assert.match(legacyRecorder, /durationMillis: recorderState\.durationMillis, recordingUri, liveFileUri, error, errorDetail,/);
+});
 check('Pause creates a lecture-owned durable checkpoint before in-progress persistence', () => {
   const block = pauseBlock();
   const copy = block.indexOf('await persistLectureLocalAudio(liveFileUri, pendingLectureId)');

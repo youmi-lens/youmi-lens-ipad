@@ -24,6 +24,12 @@ export type LectureRecorder = {
   degradedReason: string | null;
   durationMillis: number;
   recordingUri: string | null;
+  /**
+   * Legacy recorder's current in-flight file. It is available immediately
+   * after native preparation, before a graceful stop produces recordingUri.
+   * Native durable sessions keep their own durable recovery state instead.
+   */
+  liveFileUri: string | null;
   error: string | null;
   errorDetail: string | null;
   requestPermission: () => Promise<boolean>;
