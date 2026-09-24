@@ -79,8 +79,14 @@ check('Course list READY pill uses the same canonical predicate as its navigatio
 console.log('\nTerminal completion actually stops polling (does not keep loading forever)');
 
 check('the poll loop stops as soon as the merged patch reaches a terminal status (ready or failed) — it does not keep ticking past completion', () => {
+  // The terminal-stop decision itself now lives in resolvePollTick
+  // (lib/processingResume.mjs) — see processing-poll-timeout-not-failure
+  // .test.mjs for its full executed coverage (both 'ready' and 'failed' stop
+  // polling regardless of elapsed attempts). This just proves the orchestrator
+  // still acts on that decision rather than ignoring it.
   const tickFn = orchestrator.slice(orchestrator.indexOf('const tick = async () => {'), orchestrator.indexOf('void tick();'));
-  assert.match(tickFn, /if \(patch\.processingStatus === 'ready' \|\| patch\.processingStatus === 'failed'\) \{\s*stop\(\);\s*return;\s*\}/);
+  assert.match(tickFn, /const result = resolvePollTick\(merged, state\.attempts, MAX_POLL_ATTEMPTS\);/);
+  assert.match(tickFn, /if \(result\.action === 'stop'\) \{\s*stop\(\);\s*return;\s*\}/);
 });
 
 check('once processingStatus is ready, the orchestrator will not even start a new poll for that lecture (nextProcessingAction returns none)', () => {

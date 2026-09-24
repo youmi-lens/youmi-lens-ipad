@@ -206,7 +206,7 @@ export default function ProcessingScreen() {
               <StepIndicator state={remoteStepState} />
               <View style={styles.stepText}>
                 <Text style={styles.stepTitle}>{processingStatus === 'failed' ? t('processing.remote.failed') : t(remoteStatusKey(lecture?.remoteAiStatus))}</Text>
-                <Text style={styles.stepSubtitle}>{processingStatus === 'failed' ? lecture?.processingError ?? t('processing.step.retryProcessingBody') : processingStatus === 'ready' ? t('processing.step.readyBody') : lecture?.remoteAiError ?? t('processing.step.waitingUpdates')}</Text>
+                <Text style={styles.stepSubtitle}>{processingStatus === 'failed' ? lecture?.processingError ?? t('processing.step.retryProcessingBody') : processingStatus === 'ready' ? t('processing.step.readyBody') : processingStatus === 'processing' && lecture?.processingSlow ? t('processing.step.stillProcessingSlow') : lecture?.remoteAiError ?? t('processing.step.waitingUpdates')}</Text>
                 {processingStatus === 'failed' ? <SecondaryButton label={t('processing.step.retryProcessing')} icon="refresh-outline" onPress={() => { if (lecture) updateLecture(lecture.id, { processingStatus: 'not_started', processingError: undefined }); }} style={styles.retryButton} /> : null}
               </View>
             </View>

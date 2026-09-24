@@ -195,6 +195,15 @@ export type Lecture = {
   uploadedAt?: string;
   processingStatus?: LectureProcessingStatus;
   processingError?: string;
+  /**
+   * True only while processingStatus is still 'processing' AND the client has
+   * either crossed its fast-polling window or just had a status check fail —
+   * i.e. "we don't have fresh confirmation this is done, but nothing says it
+   * failed either." Never implies failure; a genuine backend failure is
+   * expressed by processingStatus === 'failed', not by this flag. Cleared the
+   * moment a real server response resolves the lecture to 'ready' or 'failed'.
+   */
+  processingSlow?: boolean;
   remoteAiStatus?: string;
   remoteAiError?: string;
   lastSyncedAt?: string;
