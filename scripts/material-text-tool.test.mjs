@@ -174,14 +174,15 @@ check('.cancelled/.failed drops the live override without emitting any mutation 
 
 console.log('\nLive drag rendering never touches the committed store');
 
-check('liveDraggedTextPosition is purely a drawing override — drawTextAnnotation reads it, nothing else writes pagedTextAnnotations from it', () => {
-  const overlayDrawFn = pdfAnnotationView.slice(
-    pdfAnnotationView.indexOf('private func drawTextAnnotation('),
-    pdfAnnotationView.indexOf('private func strokeHitsEraser'),
+check('liveDraggedTextPosition is purely a document-layer rendering override — nothing writes pagedTextAnnotations from it', () => {
+  const documentText = pdfAnnotationView.slice(
+    pdfAnnotationView.indexOf('private func syncPageText()'),
+    pdfAnnotationView.indexOf('// MARK: - Stroke API'),
   );
-  assert.match(overlayDrawFn, /let liveOverride = liveDraggedTextPosition\?\.id == annotation\.id \? liveDraggedTextPosition : nil/);
-  assert.match(overlayDrawFn, /let drawX = liveOverride\?\.x \?\? annotation\.x/);
-  assert.match(overlayDrawFn, /let drawY = liveOverride\?\.y \?\? annotation\.y/);
+  assert.match(documentText, /guard liveDraggedTextPosition\?\.id == annotation\.id else \{ return annotation \}/);
+  assert.match(documentText, /x: liveDraggedTextPosition\?\.x \?\? annotation\.x/);
+  assert.match(documentText, /y: liveDraggedTextPosition\?\.y \?\? annotation\.y/);
+  assert.doesNotMatch(documentText, /pagedTextAnnotations\s*=/);
 });
 
 console.log('\nJS wiring: create/deselect/paste/delete/edit/move all push exactly the right history action');

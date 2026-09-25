@@ -17,6 +17,7 @@ private enum MaterialTextTrace {
     remaining -= 1
     print("[material-text-trace] event=\(event) \(fields())")
   }
+
 }
 
 /// Native PDFKit viewer + Pencil annotation overlay for Youmi Lens.
@@ -1966,6 +1967,87 @@ final class PageInkStrokeLayer: CALayer {
   }
 }
 
+/// Committed material text belongs to the PDF document, not to the viewer's
+/// viewport.  This page-local layer receives the same PDF-page ->
+/// `PDFView.documentView` transform as Pencil ink, so PDFKit owns the scroll,
+/// pinch, continuous-page, and rotation motion.  UIKit views are reserved for
+/// the one temporary inline editor only.
+final class PageTextAnnotationLayer: CALayer {
+  private var renderedSignature = ""
+
+  override init() {
+    super.init()
+    anchorPoint = .zero
+    masksToBounds = false
+    contentsScale = UIScreen.main.scale
+  }
+
+  override init(layer: Any) {
+    super.init(layer: layer)
+  }
+
+  required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+  func render(_ annotations: [TextAnnotation], selectedId: String?) {
+    let signature = annotations.map {
+      "\($0.id)|\($0.text)|\($0.x)|\($0.y)|\($0.width)|\($0.fontSize)|\(selectedId == $0.id)"
+    }.joined(separator: "\u{1f}")
+    guard signature != renderedSignature else { return }
+    renderedSignature = signature
+
+    sublayers?.forEach { $0.removeFromSuperlayer() }
+    for annotation in annotations {
+      let font = UIFont.systemFont(ofSize: CGFloat(annotation.fontSize))
+      let attributes: [NSAttributedString.Key: Any] = [
+        .font: font,
+        .paragraphStyle: paragraphStyle,
+      ]
+      let height = (annotation.text as NSString).boundingRect(
+        with: CGSize(width: CGFloat(annotation.width), height: .greatestFiniteMagnitude),
+        options: [.usesLineFragmentOrigin, .usesFontLeading],
+        attributes: attributes,
+        context: nil
+      ).height
+      let frame = CGRect(
+        x: annotation.x,
+        y: annotation.y - Double(height),
+        width: annotation.width,
+        height: Double(height) + 4
+      )
+
+      if selectedId == annotation.id {
+        let selection = CAShapeLayer()
+        selection.frame = frame.insetBy(dx: -4, dy: -3)
+        selection.path = CGPath(rect: selection.bounds, transform: nil)
+        selection.fillColor = UIColor.systemBlue.withAlphaComponent(0.10).cgColor
+        selection.strokeColor = UIColor.systemBlue.withAlphaComponent(0.9).cgColor
+        selection.lineWidth = 1
+        selection.actions = ["path": NSNull(), "position": NSNull(), "bounds": NSNull()]
+        addSublayer(selection)
+      }
+
+      let text = CATextLayer()
+      text.frame = frame
+      text.contentsScale = UIScreen.main.scale
+      text.foregroundColor = UIColor.label.cgColor
+      text.font = font
+      text.fontSize = CGFloat(annotation.fontSize)
+      text.alignmentMode = .left
+      text.truncationMode = .none
+      text.isWrapped = true
+      text.string = annotation.text
+      text.actions = ["position": NSNull(), "bounds": NSNull(), "contents": NSNull()]
+      addSublayer(text)
+    }
+  }
+
+  private var paragraphStyle: NSParagraphStyle {
+    let style = NSMutableParagraphStyle()
+    style.lineBreakMode = .byWordWrapping
+    return style
+  }
+}
+
 /// Transparent UIView that draws committed + in-progress strokes on top of
 /// the PDF. NOT a touch surface — `isUserInteractionEnabled = false`. The
 /// owning `PdfAnnotationView` calls beginStroke / appendPoint / endStroke
@@ -2003,6 +2085,8 @@ final class AnnotationOverlay: UIView {
   private var savedInkLayers: [String: PageInkStrokeLayer] = [:]
   private var liveInkLayer: PageInkStrokeLayer?
   private weak var inkDocumentView: UIView?
+  private var pageTextLayers: [Int: PageTextAnnotationLayer] = [:]
+  private weak var textDocumentView: UIView?
   private var pagedTextAnnotations: [Int: [TextAnnotation]] = [:]
   var selectedTextAnnotationId: String? { didSet { setNeedsDisplay() } }
 
@@ -2102,6 +2186,63 @@ final class AnnotationOverlay: UIView {
     if let number = inProgressPageNumber, let liveInkLayer, let pageLayer = pageInkLayer(number),
        liveInkLayer.superlayer !== pageLayer { pageLayer.addSublayer(liveInkLayer) }
     CATransaction.commit()
+  }
+
+  /// Mirrors `syncPageInk`, but keeps static text out of the fixed
+  /// `AnnotationOverlay` viewport.  It deliberately has no scroll-offset
+  /// arithmetic: the owning document view is transformed by PDFKit itself.
+  private func pageTextLayer(_ pageNumber: Int) -> PageTextAnnotationLayer? {
+    guard let pdfView, let host = pdfView.documentView,
+          let page = pdfView.document?.page(at: pageNumber - 1) else { return nil }
+    if textDocumentView !== host {
+      pageTextLayers.values.forEach { $0.removeFromSuperlayer() }
+      pageTextLayers.removeAll()
+      textDocumentView = host
+    }
+    let layer = pageTextLayers[pageNumber] ?? PageTextAnnotationLayer()
+    if layer.superlayer == nil {
+      host.layer.addSublayer(layer)
+      pageTextLayers[pageNumber] = layer
+    }
+    func mapped(_ point: CGPoint) -> CGPoint {
+      host.convert(pdfView.convert(point, from: page), from: pdfView)
+    }
+    let origin = mapped(.zero)
+    let x = mapped(CGPoint(x: 1, y: 0))
+    let y = mapped(CGPoint(x: 0, y: 1))
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    layer.setAffineTransform(CGAffineTransform(
+      a: x.x - origin.x, b: x.y - origin.y,
+      c: y.x - origin.x, d: y.y - origin.y,
+      tx: origin.x, ty: origin.y
+    ))
+    CATransaction.commit()
+    return layer
+  }
+
+  private func syncPageText() {
+    guard pdfView?.documentView != nil else { return }
+    let retainedPages = Set(pagedTextAnnotations.keys)
+    for pageNumber in Array(pageTextLayers.keys) where !retainedPages.contains(pageNumber) {
+      pageTextLayers.removeValue(forKey: pageNumber)?.removeFromSuperlayer()
+    }
+    for (pageNumber, annotations) in pagedTextAnnotations {
+      let rendered = annotations.compactMap { annotation -> TextAnnotation? in
+        guard annotation.id != editingTextAnnotationId else { return nil }
+        guard liveDraggedTextPosition?.id == annotation.id else { return annotation }
+        return TextAnnotation(
+          id: annotation.id,
+          text: annotation.text,
+          x: liveDraggedTextPosition?.x ?? annotation.x,
+          y: liveDraggedTextPosition?.y ?? annotation.y,
+          width: annotation.width,
+          fontSize: annotation.fontSize
+        )
+      }
+      guard let layer = pageTextLayer(pageNumber) else { continue }
+      layer.render(rendered, selectedId: selectedTextAnnotationId)
+    }
   }
 
   // MARK: - Stroke API (called by PdfAnnotationView's gesture handler)
@@ -2467,15 +2608,7 @@ final class AnnotationOverlay: UIView {
     else { return }
 
     syncPageInk()
-
-    for (pageNumber, annotations) in pagedTextAnnotations {
-      guard pageNumber > 0, pageNumber <= document.pageCount,
-            let page = document.page(at: pageNumber - 1)
-      else { continue }
-      for annotation in annotations where annotation.id != editingTextAnnotationId {
-        drawTextAnnotation(annotation, page: page, in: ctx)
-      }
-    }
+    syncPageText()
 
 
     // Eraser cursor sits on top of everything else so it's always readable.
@@ -2584,37 +2717,6 @@ final class AnnotationOverlay: UIView {
       if let last = viewPoints.last { ctx.addLine(to: last) }
     }
     ctx.strokePath()
-    ctx.restoreGState()
-  }
-
-  private func drawTextAnnotation(_ annotation: TextAnnotation, page: PDFPage, in ctx: CGContext) {
-    guard let pdfView else { return }
-    // A live drag in progress overrides only the drawn POSITION for this one
-    // annotation — text/width/fontSize and the committed store are untouched.
-    let liveOverride = liveDraggedTextPosition?.id == annotation.id ? liveDraggedTextPosition : nil
-    let drawX = liveOverride?.x ?? annotation.x
-    let drawY = liveOverride?.y ?? annotation.y
-    let origin = pdfView.convert(CGPoint(x: drawX, y: drawY), from: page)
-    let scale = max(0.01, pdfView.scaleFactor)
-    let width = CGFloat(annotation.width) * scale
-    let font = UIFont.systemFont(ofSize: CGFloat(annotation.fontSize) * scale)
-    let paragraph = NSMutableParagraphStyle(); paragraph.lineBreakMode = .byWordWrapping
-    let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.label, .paragraphStyle: paragraph]
-    let textSize = (annotation.text as NSString).boundingRect(with: CGSize(width: width, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: attributes, context: nil).size
-    let rect = CGRect(x: origin.x, y: origin.y - textSize.height, width: width, height: textSize.height + 4)
-    MaterialTextTrace.log("native-text-render") {
-      "id=\(annotation.id) pdfX=\(drawX) pdfY=\(drawY) viewX=\(origin.x) viewY=\(origin.y) rect=\(rect) scale=\(scale) liveDrag=\(liveOverride != nil) editing=\(editingTextAnnotationId == annotation.id) selected=\(selectedTextAnnotationId == annotation.id)"
-    }
-    ctx.saveGState()
-    if selectedTextAnnotationId == annotation.id {
-      ctx.setStrokeColor(UIColor.systemBlue.withAlphaComponent(0.9).cgColor)
-      ctx.setFillColor(UIColor.systemBlue.withAlphaComponent(0.10).cgColor)
-      ctx.setLineWidth(1 / scale)
-      ctx.fill(rect.insetBy(dx: -4, dy: -3)); ctx.stroke(rect.insetBy(dx: -4, dy: -3))
-    }
-    UIGraphicsPushContext(ctx)
-    (annotation.text as NSString).draw(in: rect, withAttributes: attributes)
-    UIGraphicsPopContext()
     ctx.restoreGState()
   }
 

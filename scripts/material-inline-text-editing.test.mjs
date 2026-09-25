@@ -195,8 +195,9 @@ console.log('\nNative: an annotation being edited is suppressed from BOTH drawin
 
 check('AnnotationOverlay.editingTextAnnotationId exists and drives both suppressions', () => {
   assert.match(pdfAnnotationView, /var editingTextAnnotationId: String\? \{ didSet \{ setNeedsDisplay\(\) \} \}/);
-  const drawLoop = pdfAnnotationView.slice(pdfAnnotationView.indexOf('for annotation in annotations where annotation.id != editingTextAnnotationId'));
-  assert.ok(drawLoop.startsWith('for annotation in annotations where annotation.id != editingTextAnnotationId'));
+  const documentText = pdfAnnotationView.slice(pdfAnnotationView.indexOf('private func syncPageText()'));
+  assert.match(documentText, /let rendered = annotations\.compactMap/);
+  assert.match(documentText, /guard annotation\.id != editingTextAnnotationId else \{ return nil \}/);
   const hitTest = pdfAnnotationView.slice(pdfAnnotationView.indexOf('func textAnnotation(at viewPoint: CGPoint)'));
   assert.match(hitTest, /if annotation\.id == editingTextAnnotationId \{ continue \}/);
 });

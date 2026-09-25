@@ -31,9 +31,9 @@ const scale = source.slice(
   source.indexOf('private func handleAnnotationLayoutChange()'),
   source.indexOf('private func startObservingScroll()'),
 );
-const render = source.slice(
-  source.indexOf('private func drawTextAnnotation('),
-  source.indexOf('private func strokeHitsEraser('),
+const documentText = source.slice(
+  source.indexOf('final class PageTextAnnotationLayer:'),
+  source.indexOf('// MARK: - Stroke API'),
 );
 
 check('the coordinator is explicitly main-runloop coalesced, not timer/debounce based', () => {
@@ -61,9 +61,22 @@ check('the final editor conversion still uses only the immutable PDF-page editin
   assert.doesNotMatch(reposition, /contentOffset|liveDraggedTextPosition/);
 });
 
-check('static committed text remains rendered once by AnnotationOverlay from its PDF-page position', () => {
-  assert.match(render, /let drawX = liveOverride\?\.x \?\? annotation\.x/);
-  assert.match(render, /let origin = pdfView\.convert\(CGPoint\(x: drawX, y: drawY\), from: page\)/);
+check('static committed text is hosted by the PDF document, not drawn into the fixed viewport overlay', () => {
+  assert.match(documentText, /final class PageTextAnnotationLayer: CALayer/);
+  assert.match(documentText, /guard let pdfView, let host = pdfView\.documentView/);
+  assert.match(documentText, /host\.layer\.addSublayer\(layer\)/);
+  assert.match(documentText, /private func syncPageText\(\)/);
+  assert.match(documentText, /syncPageText\(\)/);
+  assert.doesNotMatch(source, /private func drawTextAnnotation\(/);
+});
+
+check('text and Pencil share the authoritative PDF-page -> document-view transform path', () => {
+  const ink = source.slice(source.indexOf('private func pageInkLayer('), source.indexOf('private func syncPageInk()'));
+  const text = source.slice(source.indexOf('private func pageTextLayer('), source.indexOf('private func syncPageText()'));
+  for (const path of [ink, text]) {
+    assert.match(path, /host\.convert\(pdfView\.convert\((p|point), from: page\), from: pdfView\)/);
+    assert.match(path, /layer\.setAffineTransform/);
+  }
 });
 
 console.log(`material-text-coordinate-stability: ${passed} checks passed`);
