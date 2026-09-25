@@ -79,4 +79,12 @@ check('text and Pencil share the authoritative PDF-page -> document-view transfo
   }
 });
 
+check('the page-space Y reflection is countered only for glyph rendering, preserving the document anchor', () => {
+  assert.match(documentText, /text\.setAffineTransform\(CGAffineTransform\(scaleX: 1, y: -1\)\)/);
+  assert.match(documentText, /MaterialTextTrace\.log\("document-text-transform"/);
+  assert.match(documentText, /rotation=\\\(page\.rotation\)/);
+  assert.match(documentText, /determinant=/);
+  assert.doesNotMatch(documentText, /contentOffset/);
+});
+
 console.log(`material-text-coordinate-stability: ${passed} checks passed`);

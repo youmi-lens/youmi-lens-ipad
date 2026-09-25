@@ -2036,6 +2036,15 @@ final class PageTextAnnotationLayer: CALayer {
       text.truncationMode = .none
       text.isWrapped = true
       text.string = annotation.text
+      // `PageTextAnnotationLayer` is intentionally in PDF-page coordinates.
+      // Its parent transform has a reflected Y basis because PDF page space is
+      // y-up while the document view is UIKit y-down. Geometry-only Pencil
+      // paths are unaffected by that handedness change, but glyph rasterization
+      // is not: without this local counter-flip CATextLayer inherits the page
+      // reflection and every committed character is upside-down. Flipping only
+      // this child around its center preserves its document-space frame and
+      // lets the page's existing rotation/zoom transform remain authoritative.
+      text.setAffineTransform(CGAffineTransform(scaleX: 1, y: -1))
       text.actions = ["position": NSNull(), "bounds": NSNull(), "contents": NSNull()]
       addSublayer(text)
     }
@@ -2212,12 +2221,17 @@ final class AnnotationOverlay: UIView {
     let y = mapped(CGPoint(x: 0, y: 1))
     CATransaction.begin()
     CATransaction.setDisableActions(true)
-    layer.setAffineTransform(CGAffineTransform(
+    let transform = CGAffineTransform(
       a: x.x - origin.x, b: x.y - origin.y,
       c: y.x - origin.x, d: y.y - origin.y,
       tx: origin.x, ty: origin.y
-    ))
+    )
+    layer.setAffineTransform(transform)
     CATransaction.commit()
+    MaterialTextTrace.log("document-text-transform") {
+      let bounds = page.bounds(for: .mediaBox)
+      return "page=\(pageNumber) rotation=\(page.rotation) pageBounds=\(bounds) layerBounds=\(layer.bounds) anchor=\(layer.anchorPoint) affine=(a:\(transform.a),b:\(transform.b),c:\(transform.c),d:\(transform.d),tx:\(transform.tx),ty:\(transform.ty)) determinant=\(transform.a * transform.d - transform.b * transform.c)"
+    }
     return layer
   }
 
@@ -2604,7 +2618,7 @@ final class AnnotationOverlay: UIView {
   override func draw(_ rect: CGRect) {
     guard let ctx = UIGraphicsGetCurrentContext(),
           let pdfView,
-          let document = pdfView.document
+          pdfView.document != nil
     else { return }
 
     syncPageInk()
