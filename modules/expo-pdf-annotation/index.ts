@@ -104,13 +104,13 @@ export type NativePdfTextAnnotationActionEvent = {
    * clipboard content already attached; move/copy/delete act on an
    * existing annotation.
    */
-  action: 'paste' | 'select' | 'deselect' | 'create' | 'move' | 'edit' | 'copy' | 'delete';
+  action: 'paste' | 'select' | 'deselect' | 'create' | 'move' | 'resize' | 'edit' | 'copy' | 'delete';
   pageNumber: number;
   annotationId?: string;
   text?: string;
   x?: number;
   y?: number;
-  /** Only ever populated on 'create', from the native inline editor's own sizing. */
+  /** Populated on 'create' and 'resize', in PDF-page points. */
   width?: number;
   fontSize?: number;
 };

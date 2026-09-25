@@ -102,7 +102,7 @@ public final class PdfAnnotationView: ExpoView {
   /// `startPagePoint` and applies it to the ORIGINAL origin, rather than
   /// accumulating per-frame deltas, so rounding never drifts across a long
   /// drag.
-  private var textDragContext: (id: String, pageNumber: Int, startPagePoint: CGPoint, originX: Double, originY: Double)?
+  private var textDragContext: (id: String, pageNumber: Int, startPagePoint: CGPoint, originX: Double, originY: Double, originWidth: Double, resizing: Bool)?
 
   /// Native inline text editing — replaces the old "tap → JS opens a modal"
   /// flow. A UITextView positioned directly over the PDF page at the
@@ -1532,29 +1532,37 @@ public final class PdfAnnotationView: ExpoView {
       else { return }
       let pageNumber = document.index(for: page) + 1
       let pagePoint = pdfView.convert(point, to: page)
-      textDragContext = (id: hit.id, pageNumber: pageNumber, startPagePoint: pagePoint, originX: hit.x, originY: hit.y)
+      let resizing = annotationOverlay.isTextResizeHandle(at: point, id: hit.id)
+      textDragContext = (id: hit.id, pageNumber: pageNumber, startPagePoint: pagePoint, originX: hit.x, originY: hit.y, originWidth: hit.width, resizing: resizing)
       annotationOverlay.liveDraggedTextPosition = (id: hit.id, x: hit.x, y: hit.y)
 
     case .changed:
       guard let context = textDragContext, let page = document?.page(at: context.pageNumber - 1) else { return }
       let currentPagePoint = pdfView.convert(point, to: page)
-      let dx = currentPagePoint.x - context.startPagePoint.x
-      let dy = currentPagePoint.y - context.startPagePoint.y
-      annotationOverlay.liveDraggedTextPosition = (id: context.id, x: context.originX + dx, y: context.originY + dy)
+      if context.resizing {
+        annotationOverlay.liveResizedTextWidth = (id: context.id, width: max(80, currentPagePoint.x - context.originX))
+      } else {
+        let dx = currentPagePoint.x - context.startPagePoint.x
+        let dy = currentPagePoint.y - context.startPagePoint.y
+        annotationOverlay.liveDraggedTextPosition = (id: context.id, x: context.originX + dx, y: context.originY + dy)
+      }
 
     case .ended:
       guard let context = textDragContext, let page = document?.page(at: context.pageNumber - 1) else {
-        textDragContext = nil; annotationOverlay.liveDraggedTextPosition = nil
+        textDragContext = nil; annotationOverlay.liveDraggedTextPosition = nil; annotationOverlay.liveResizedTextWidth = nil
         return
       }
       let currentPagePoint = pdfView.convert(point, to: page)
-      let dx = currentPagePoint.x - context.startPagePoint.x
-      let dy = currentPagePoint.y - context.startPagePoint.y
-      let finalX = context.originX + dx
-      let finalY = context.originY + dy
       textDragContext = nil
       annotationOverlay.liveDraggedTextPosition = nil
-      onTextAnnotationAction(["action": "move", "pageNumber": context.pageNumber, "annotationId": context.id, "x": finalX, "y": finalY])
+      annotationOverlay.liveResizedTextWidth = nil
+      if context.resizing {
+        onTextAnnotationAction(["action": "resize", "pageNumber": context.pageNumber, "annotationId": context.id, "width": max(80, currentPagePoint.x - context.originX)])
+      } else {
+        let dx = currentPagePoint.x - context.startPagePoint.x
+        let dy = currentPagePoint.y - context.startPagePoint.y
+        onTextAnnotationAction(["action": "move", "pageNumber": context.pageNumber, "annotationId": context.id, "x": context.originX + dx, "y": context.originY + dy])
+      }
 
     case .cancelled, .failed:
       // Abandoned mid-drag (e.g. a second touch interrupts it) — drop back to
@@ -1562,6 +1570,7 @@ public final class PdfAnnotationView: ExpoView {
       // nothing to undo; the overlay simply stops showing the live override.
       textDragContext = nil
       annotationOverlay.liveDraggedTextPosition = nil
+      annotationOverlay.liveResizedTextWidth = nil
 
     default:
       break
@@ -1998,22 +2007,7 @@ final class PageTextAnnotationLayer: CALayer {
     sublayers?.forEach { $0.removeFromSuperlayer() }
     for annotation in annotations {
       let font = UIFont.systemFont(ofSize: CGFloat(annotation.fontSize))
-      let attributes: [NSAttributedString.Key: Any] = [
-        .font: font,
-        .paragraphStyle: paragraphStyle,
-      ]
-      let height = (annotation.text as NSString).boundingRect(
-        with: CGSize(width: CGFloat(annotation.width), height: .greatestFiniteMagnitude),
-        options: [.usesLineFragmentOrigin, .usesFontLeading],
-        attributes: attributes,
-        context: nil
-      ).height
-      let frame = CGRect(
-        x: annotation.x,
-        y: annotation.y - Double(height),
-        width: annotation.width,
-        height: Double(height) + 4
-      )
+      let frame = Self.annotationFrame(annotation, font: font)
 
       if selectedId == annotation.id {
         let selection = CAShapeLayer()
@@ -2024,6 +2018,16 @@ final class PageTextAnnotationLayer: CALayer {
         selection.lineWidth = 1
         selection.actions = ["path": NSNull(), "position": NSNull(), "bounds": NSNull()]
         addSublayer(selection)
+        let handle = CAShapeLayer()
+        let handleSize: CGFloat = 10
+        // PDF y-up: rect.minY maps to the visible bottom edge.
+        handle.frame = CGRect(x: frame.maxX - handleSize / 2, y: frame.minY - handleSize / 2, width: handleSize, height: handleSize)
+        handle.path = CGPath(ellipseIn: handle.bounds, transform: nil)
+        handle.fillColor = UIColor.systemBlue.cgColor
+        handle.strokeColor = UIColor.systemBackground.cgColor
+        handle.lineWidth = 1.5
+        handle.actions = ["path": NSNull(), "position": NSNull(), "bounds": NSNull()]
+        addSublayer(handle)
       }
 
       let text = CATextLayer()
@@ -2050,10 +2054,26 @@ final class PageTextAnnotationLayer: CALayer {
     }
   }
 
-  private var paragraphStyle: NSParagraphStyle {
+  /// The exact PDF-page-local frame passed to CATextLayer. Kept centralized so
+  /// physical QA can compare this frame with the editor and final PDFView
+  /// position without a second, approximate height calculation.
+  static func annotationFrame(_ annotation: TextAnnotation, font: UIFont? = nil) -> CGRect {
+    let resolvedFont = font ?? UIFont.systemFont(ofSize: CGFloat(annotation.fontSize))
     let style = NSMutableParagraphStyle()
     style.lineBreakMode = .byWordWrapping
-    return style
+    let attributes: [NSAttributedString.Key: Any] = [.font: resolvedFont, .paragraphStyle: style]
+    let height = (annotation.text as NSString).boundingRect(
+      with: CGSize(width: CGFloat(annotation.width), height: .greatestFiniteMagnitude),
+      options: [.usesLineFragmentOrigin, .usesFontLeading],
+      attributes: attributes,
+      context: nil
+    ).height
+    return CGRect(
+      x: annotation.x,
+      y: annotation.y,
+      width: annotation.width,
+      height: Double(height) + 4
+    )
   }
 }
 
@@ -2107,6 +2127,7 @@ final class AnnotationOverlay: UIView {
   /// ever changes via the normal loadTextAnnotations path, once JS echoes back
   /// the single "move" mutation this drag emits at `.ended`.
   var liveDraggedTextPosition: (id: String, x: Double, y: Double)? { didSet { setNeedsDisplay() } }
+  var liveResizedTextWidth: (id: String, width: Double)? { didSet { setNeedsDisplay() } }
 
   /// Id of the text annotation currently open in the native inline editor
   /// (PdfAnnotationView.inlineTextEditor), if any. Suppressed from BOTH
@@ -2244,13 +2265,13 @@ final class AnnotationOverlay: UIView {
     for (pageNumber, annotations) in pagedTextAnnotations {
       let rendered = annotations.compactMap { annotation -> TextAnnotation? in
         guard annotation.id != editingTextAnnotationId else { return nil }
-        guard liveDraggedTextPosition?.id == annotation.id else { return annotation }
+        guard liveDraggedTextPosition?.id == annotation.id || liveResizedTextWidth?.id == annotation.id else { return annotation }
         return TextAnnotation(
           id: annotation.id,
           text: annotation.text,
           x: liveDraggedTextPosition?.x ?? annotation.x,
           y: liveDraggedTextPosition?.y ?? annotation.y,
-          width: annotation.width,
+          width: liveResizedTextWidth?.width ?? annotation.width,
           fontSize: annotation.fontSize
         )
       }
@@ -2582,8 +2603,7 @@ final class AnnotationOverlay: UIView {
       // the live UITextView is the sole interactive surface for it until commit,
       // so a drag/tap can never act on its stale pre-edit position underneath.
       if annotation.id == editingTextAnnotationId { continue }
-      let height = annotation.estimatedHeight
-      if CGRect(x: annotation.x, y: annotation.y - height, width: annotation.width, height: height + 8).contains(pagePoint) {
+      if PageTextAnnotationLayer.annotationFrame(annotation).insetBy(dx: -3, dy: -3).contains(pagePoint) {
         return TextAnnotationHit(
           id: annotation.id, text: annotation.text, pageNumber: pageNumber,
           x: annotation.x, y: annotation.y, width: annotation.width, fontSize: annotation.fontSize
@@ -2603,14 +2623,20 @@ final class AnnotationOverlay: UIView {
     return nil
   }
 
-  /// Current PDF-page-space rect for a text annotation, in the SAME
-  /// (x, y - height, width, height + 8) convention textAnnotation(at:) hit-
-  /// tests against — used to position the delete button at its actual
-  /// on-screen bounds.
+  /// Current PDF-page-space rect for a text annotation.
   func textAnnotationRect(id: String, pageNumber: Int) -> CGRect? {
     guard let annotation = pagedTextAnnotations[pageNumber]?.first(where: { $0.id == id }) else { return nil }
-    let height = annotation.estimatedHeight
-    return CGRect(x: annotation.x, y: annotation.y - height, width: annotation.width, height: height + 8)
+    return PageTextAnnotationLayer.annotationFrame(annotation)
+  }
+
+  func isTextResizeHandle(at viewPoint: CGPoint, id: String) -> Bool {
+    guard let pdfView, let document = pdfView.document,
+          let page = pdfView.page(for: viewPoint, nearest: true),
+          let rect = textAnnotationRect(id: id, pageNumber: document.index(for: page) + 1)
+    else { return false }
+    let point = pdfView.convert(viewPoint, to: page)
+    let radius = 16 / max(0.01, pdfView.scaleFactor)
+    return hypot(point.x - rect.maxX, point.y - rect.minY) <= radius
   }
 
   // MARK: - Drawing

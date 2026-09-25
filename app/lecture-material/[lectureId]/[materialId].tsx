@@ -799,6 +799,7 @@ export default function LectureMaterialWorkspaceScreen() {
     };
     setNativeHistory((h) => pushMaterialHistory(h, { kind: 'text-create', pageNumber, annotation: created }));
     saveTextAnnotations(pageNumber, [...current, created]);
+    setSelectedTextAnnotationId(created.id);
     ensureTrailingBlankPageAfterContent(pageNumber);
   }, [ensureTrailingBlankPageAfterContent, saveTextAnnotations, textAnnotationsForMaterialPage]);
 
@@ -867,6 +868,15 @@ export default function LectureMaterialWorkspaceScreen() {
       }));
       saveTextAnnotations(event.pageNumber, current.map((annotation) => annotation.id === selected.id
         ? { ...annotation, x: event.x!, y: event.y!, updatedAt: new Date().toISOString() }
+        : annotation));
+    } else if (event.action === 'resize' && Number.isFinite(event.width)) {
+      const width = Math.max(80, event.width!);
+      if (width === selected.width) return;
+      setNativeHistory((h) => pushMaterialHistory(h, {
+        kind: 'text-resize', pageNumber: event.pageNumber, annotationId: selected.id, before: selected.width, after: width,
+      }));
+      saveTextAnnotations(event.pageNumber, current.map((annotation) => annotation.id === selected.id
+        ? { ...annotation, width, updatedAt: new Date().toISOString() }
         : annotation));
     } else if (event.action === 'move') {
       Alert.alert('Move text', 'Long-press the new location on the page.');

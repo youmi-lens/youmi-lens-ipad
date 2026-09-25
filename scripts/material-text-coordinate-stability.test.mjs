@@ -87,4 +87,18 @@ check('the page-space Y reflection is countered only for glyph rendering, preser
   assert.doesNotMatch(documentText, /contentOffset/);
 });
 
+check('selected text uses PDF-page geometry for body drag and its visible resize handle', () => {
+  assert.match(source, /liveResizedTextWidth/);
+  assert.match(source, /isTextResizeHandle\(at: point, id: hit\.id\)/);
+  assert.match(source, /onTextAnnotationAction\(\["action": "resize"/);
+  assert.match(documentText, /handle\.frame = CGRect\(x: frame\.maxX/);
+  assert.match(documentText, /y: frame\.minY/);
+});
+
+check('document-hosted static text preserves legacy bottom-anchor semantics', () => {
+  const frame = source.slice(source.indexOf('static func annotationFrame('), source.indexOf('\n  }\n}', source.indexOf('static func annotationFrame(')));
+  assert.match(frame, /y: annotation\.y,/);
+  assert.doesNotMatch(frame, /y: annotation\.y - Double\(height\)/);
+});
+
 console.log(`material-text-coordinate-stability: ${passed} checks passed`);
