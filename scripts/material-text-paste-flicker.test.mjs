@@ -156,12 +156,12 @@ check('paste and native-create share exactly one annotation-construction path â€
     materialScreen.indexOf('const createTextAnnotationFromEvent = useCallback('),
     materialScreen.indexOf('const handleNativeTextAnnotationAction = useCallback('),
   );
-  assert.match(createFn, /id: `material-text-\$\{Date\.now\(\)\}-\$\{Math\.random\(\)\.toString\(36\)\.slice\(2, 8\)\}`/);
+  assert.match(createFn, /id: annotationId \?\? `material-text-\$\{Date\.now\(\)\}-\$\{Math\.random\(\)\.toString\(36\)\.slice\(2, 8\)\}`/);
   const pasteBranch = materialScreen.slice(
     materialScreen.indexOf("if (event.action === 'create')"),
     materialScreen.indexOf("const selected = current.find"),
   );
-  assert.match(pasteBranch, /createTextAnnotationFromEvent\(event\.pageNumber, text, event\.x!, event\.y!, event\.width \?\? 180, 16, event\.anchor\);/);
+  assert.match(pasteBranch, /createTextAnnotationFromEvent\(event\.pageNumber, text, event\.x!, event\.y!, event\.width \?\? 180, 16, event\.anchor, event\.annotationId\);/);
 });
 
 check('the store setter itself already bails out on identical content (belt-and-suspenders with the two checks above)', () => {

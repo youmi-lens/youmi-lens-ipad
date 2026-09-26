@@ -103,7 +103,11 @@ public final class PdfAnnotationView: ExpoView {
   /// non-nil means editing an existing one (suppressed from drawing/hit-
   /// testing for the duration — see AnnotationOverlay.editingTextAnnotationId).
   /// Immutable PDF-page anchor; old annotations retain bottom-anchor semantics.
-  private var inlineTextEditingContext: (id: String?, pageNumber: Int, originX: Double, originY: Double, fontSize: Double, width: Double, anchor: String?)?
+  private typealias InlineTextContext = (id: String?, pageNumber: Int, originX: Double, originY: Double, fontSize: Double, width: Double, anchor: String?)
+  private var inlineTextEditingContext: InlineTextContext?
+  /// Only used if PDFKit's document host is temporarily unavailable. Keep the
+  /// actual editor until its document representation is ready; never a timer.
+  private var pendingInlineTextHandoff: (id: String, context: InlineTextContext)?
   /// PDFKit sends contentOffset/bounds KVO while its internal page transform
   /// is still transient (the physical trace captured a valid editor frame,
   /// then y=-75893, then the same valid frame again at identical PDF coords).
@@ -408,6 +412,7 @@ public final class PdfAnnotationView: ExpoView {
         "pages=\(textAnnotationsByPage?.keys.sorted() ?? [])"
       }
       annotationOverlay.loadTextAnnotations(textAnnotationsByPage)
+      completeInlineTextHandoffIfReady()
     }
   }
 
@@ -506,6 +511,7 @@ public final class PdfAnnotationView: ExpoView {
     bringSubviewToFront(annotationOverlay)
     if !inlineTextEditor.isHidden { bringSubviewToFront(inlineTextEditor) }
     annotationOverlay.setNeedsDisplay()
+    completeInlineTextHandoffIfReady()
     applyInitialViewportIfPossible()
     #if DEBUG
     traceViewportMutation("layoutSubviews-after", reason: "native layout")
@@ -1161,7 +1167,8 @@ public final class PdfAnnotationView: ExpoView {
     traceViewportMutation("annotation-layout-change", reason: "PDFKit scale/visible pages notification")
     #endif
     annotationOverlay.setNeedsDisplay()
-    if inlineTextEditingContext != nil { scheduleInlineTextEditorReposition() }
+    if inlineTextEditingContext != nil || pendingInlineTextHandoff != nil { scheduleInlineTextEditorReposition() }
+    completeInlineTextHandoffIfReady()
     scheduleViewportSnapshot()
   }
 
@@ -1301,7 +1308,8 @@ public final class PdfAnnotationView: ExpoView {
     annotationOverlay.setNeedsDisplay()
     if keyPath == "contentOffset" || keyPath == "bounds" {
       scheduleViewportSnapshot()
-      if inlineTextEditingContext != nil { scheduleInlineTextEditorReposition() }
+      if inlineTextEditingContext != nil || pendingInlineTextHandoff != nil { scheduleInlineTextEditorReposition() }
+      completeInlineTextHandoffIfReady()
     }
     #if DEBUG
     if keyPath == "contentOffset" {
@@ -1420,6 +1428,8 @@ public final class PdfAnnotationView: ExpoView {
   /// the store until the editor commits with non-empty text — an empty
   /// commit (tapped, typed nothing, tapped away) creates nothing.
   private func beginInlineTextCreation(at pagePoint: CGPoint, pageNumber: Int, page: PDFPage, initialText: String = "") {
+    completeInlineTextHandoffIfReady()
+    guard pendingInlineTextHandoff == nil else { return }
     let pageWidth = page.bounds(for: .mediaBox).width
     let availableWidth = max(80, pageWidth - pagePoint.x - 24)
     let fontSize = Double(MaterialTextGeometry.defaultFontSize)
@@ -1440,6 +1450,8 @@ public final class PdfAnnotationView: ExpoView {
   /// (see AnnotationOverlay.editingTextAnnotationId) so the live editor is
   /// the only visible/interactive copy until commit.
   private func beginInlineTextEditing(_ hit: TextAnnotationHit) {
+    completeInlineTextHandoffIfReady()
+    guard pendingInlineTextHandoff == nil else { return }
     inlineTextEditingContext = (id: hit.id, pageNumber: hit.pageNumber, originX: hit.x, originY: hit.y, fontSize: hit.fontSize, width: hit.width, anchor: hit.anchor)
     annotationOverlay.editingTextAnnotationId = hit.id
     inlineTextEditor.text = hit.text
@@ -1461,12 +1473,13 @@ public final class PdfAnnotationView: ExpoView {
   /// a single next-main-turn conversion observes the settled transform without
   /// introducing an arbitrary timer or retaining a second render owner.
   private func scheduleInlineTextEditorReposition() {
-    guard inlineTextEditingContext != nil, !inlineEditorRepositionScheduled else { return }
+    guard inlineTextEditingContext != nil || pendingInlineTextHandoff != nil,
+          !inlineEditorRepositionScheduled else { return }
     inlineEditorRepositionScheduled = true
     DispatchQueue.main.async { [weak self] in
       guard let self else { return }
       self.inlineEditorRepositionScheduled = false
-      guard self.inlineTextEditingContext != nil else { return }
+      guard self.inlineTextEditingContext != nil || self.pendingInlineTextHandoff != nil else { return }
       self.repositionInlineTextEditor()
     }
   }
@@ -1479,7 +1492,7 @@ public final class PdfAnnotationView: ExpoView {
   /// zero-inset/zero-padding config on the editor) so committing never
   /// visibly jumps.
   private func repositionInlineTextEditor() {
-    guard let context = inlineTextEditingContext, let document,
+    guard let context = inlineTextEditingContext ?? pendingInlineTextHandoff?.context, let document,
           context.pageNumber >= 1, context.pageNumber <= document.pageCount,
           let page = document.page(at: context.pageNumber - 1)
     else { return }
@@ -1499,26 +1512,35 @@ public final class PdfAnnotationView: ExpoView {
     inlineTextEditor.transform = placement.transform
   }
 
-  /// Commits whatever is currently in the editor (if any is open) and hides
-  /// it. A brand-new annotation only emits "create" when non-empty — an
+  /// Atomically hands the editor to document text BEFORE hiding/clearing it.
+  /// A brand-new annotation only emits "create" when non-empty — an
   /// existing one always emits "edit" (even empty), reusing JS's existing,
   /// already-tested edit-vs-delete-on-empty logic. Coordinates are NEVER
   /// recomputed here: the anchor captured at begin-time is reused exactly,
   /// since typing never moves it (see inlineTextEditingContext's doc comment).
   private func commitInlineTextEditorIfNeeded() {
     guard let context = inlineTextEditingContext else { return }
-    // Clear ALL state before emitting or resigning first responder.
-    // resignFirstResponder() below synchronously triggers
-    // textViewDidEndEditing → commitInlineTextEditorIfNeeded again (UIKit
-    // re-entrancy) — with inlineTextEditingContext already nil at that
-    // point, that re-entrant call's own guard no-ops immediately instead of
-    // re-emitting the same action a second time.
     let finalText = (inlineTextEditor.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-    inlineTextEditor.isHidden = true
-    inlineTextEditor.text = ""
-    annotationOverlay.editingTextAnnotationId = nil
+    let id = context.id ?? UUID().uuidString
+    // Clear the edit SESSION before resigning, not the visible text. UIKit's
+    // synchronous textViewDidEndEditing re-entry must not emit a second commit.
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
     inlineTextEditingContext = nil
+    if context.id != nil || !finalText.isEmpty {
+      let annotation = finalText.isEmpty ? nil : TextAnnotation(
+        id: id, text: finalText, x: context.originX, y: context.originY,
+        width: context.width, fontSize: context.fontSize, anchor: context.anchor
+      )
+      annotationOverlay.stageTextCommit(id: id, pageNumber: context.pageNumber, annotation: annotation)
+      pendingInlineTextHandoff = (id, context)
+      completeInlineTextHandoffIfReady()
+    } else {
+      inlineTextEditor.isHidden = true
+      inlineTextEditor.text = ""
+    }
     if inlineTextEditor.isFirstResponder { inlineTextEditor.resignFirstResponder() }
+    CATransaction.commit()
     MaterialTextTrace.log(context.id == nil ? "editor-create-commit" : "editor-edit-commit") {
       "id=\(context.id ?? "new") page=\(context.pageNumber) pdfX=\(context.originX) pdfY=\(context.originY) width=\(context.width) font=\(context.fontSize)"
     }
@@ -1526,11 +1548,29 @@ public final class PdfAnnotationView: ExpoView {
       onTextAnnotationAction(["action": "edit", "pageNumber": context.pageNumber, "annotationId": id, "text": finalText])
     } else if !finalText.isEmpty {
       onTextAnnotationAction([
-        "action": "create", "pageNumber": context.pageNumber, "text": finalText,
+        "action": "create", "annotationId": id, "pageNumber": context.pageNumber, "text": finalText,
         "x": context.originX, "y": context.originY, "width": context.width, "fontSize": context.fontSize,
         "anchor": "top-left"
       ])
     }
+  }
+
+  private func completeInlineTextHandoffIfReady() {
+    guard let pending = pendingInlineTextHandoff else { return }
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    if annotationOverlay.renderCommittedTextIfPossible(id: pending.id, pageNumber: pending.context.pageNumber) {
+      // Static glyphs have been built AND displayed at the same page geometry.
+      // Visibility swaps in this single transaction; there is no bridge gap.
+      inlineTextEditor.isHidden = true
+      inlineTextEditor.text = ""
+      pendingInlineTextHandoff = nil
+    }
+    CATransaction.commit()
+  }
+
+  func setTextHistoryIntent(pageNumber: Int, annotations: [[String: Any]]) {
+    annotationOverlay.setTextHistoryIntent(pageNumber: pageNumber, annotations: annotations)
   }
 
   private func presentTextActions(_ annotation: TextAnnotationHit, from source: UIView) {
@@ -1765,6 +1805,7 @@ final class PageTextAnnotationLayer: CALayer {
       let frame = Self.annotationFrame(annotation)
 
       let text = CATextLayer()
+      text.name = annotation.id
       text.frame = frame
       text.contentsScale = UIScreen.main.scale
       text.foregroundColor = UIColor.label.cgColor
@@ -1839,6 +1880,10 @@ final class AnnotationOverlay: UIView {
   private var pageTextLayers: [Int: PageTextAnnotationLayer] = [:]
   private weak var textDocumentView: UIView?
   private var pagedTextAnnotations: [Int: [TextAnnotation]] = [:]
+  /// Native visual commits, keyed by the SAME id JS persists. An older prop
+  /// cannot remove/revert the glyph during the asynchronous persistence echo.
+  /// This is transient render reconciliation, not another persisted annotation.
+  private var pendingTextCommits: [String: (pageNumber: Int, annotation: TextAnnotation?)] = [:]
   /// Id of the text annotation currently open in the native inline editor
   /// (PdfAnnotationView.inlineTextEditor), if any. Suppressed from BOTH
   /// drawing and hit-testing while set — the live UITextView is the sole
@@ -2257,21 +2302,71 @@ final class AnnotationOverlay: UIView {
     setNeedsDisplay()
   }
 
+  func stageTextCommit(id: String, pageNumber: Int, annotation: TextAnnotation?) {
+    pendingTextCommits[id] = (pageNumber, annotation)
+    var annotations = pagedTextAnnotations[pageNumber] ?? []
+    if let annotation {
+      if let index = annotations.firstIndex(where: { $0.id == id }) { annotations[index] = annotation }
+      else { annotations.append(annotation) }
+    } else { annotations.removeAll { $0.id == id } }
+    pagedTextAnnotations[pageNumber] = annotations
+    editingTextAnnotationId = nil
+  }
+
+  func renderCommittedTextIfPossible(id: String, pageNumber: Int) -> Bool {
+    guard pdfView?.documentView != nil, let layer = pageTextLayer(pageNumber) else { return false }
+    syncPageText()
+    layer.sublayers?.forEach { $0.displayIfNeeded() }
+    let expected = pagedTextAnnotations[pageNumber]?.contains { $0.id == id } == true
+    return (layer.sublayers?.contains { $0.name == id } == true) == expected
+  }
+
+  /// Explicit existing Undo/Redo intent must beat an unacknowledged commit;
+  /// a missing id in an ordinary stale prop alone is not deletion intent.
+  func setTextHistoryIntent(pageNumber: Int, annotations: [[String: Any]]) {
+    let next = annotations.compactMap(Self.parseTextAnnotation)
+    let ids = Set((pagedTextAnnotations[pageNumber] ?? []).map { $0.id } + next.map { $0.id })
+    for id in ids {
+      pendingTextCommits[id] = (pageNumber, next.first { $0.id == id })
+    }
+    pagedTextAnnotations[pageNumber] = next
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    syncPageText()
+    CATransaction.commit()
+    setNeedsDisplay()
+  }
+
+  private static func parseTextAnnotation(_ item: [String: Any]) -> TextAnnotation? {
+    guard let id = item["id"] as? String, let text = item["text"] as? String,
+          !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+          let x = coerceDouble(item["x"]), let y = coerceDouble(item["y"])
+    else { return nil }
+    return TextAnnotation(id: id, text: text, x: x, y: y,
+      width: max(40, coerceDouble(item["width"]) ?? 180),
+      fontSize: max(8, coerceDouble(item["fontSize"]) ?? 16),
+      anchor: item["anchor"] as? String == "top-left" ? "top-left" : nil)
+  }
+
   func loadTextAnnotations(_ annotationsByPage: [String: Any]?) {
     var loaded: [Int: [TextAnnotation]] = [:]
     for (key, value) in annotationsByPage ?? [:] {
       guard let pageNumber = Int(key), let values = value as? [[String: Any]] else { continue }
-      let annotations = values.compactMap { item -> TextAnnotation? in
-        guard let id = item["id"] as? String, let text = item["text"] as? String,
-              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let x = AnnotationOverlay.coerceDouble(item["x"]), let y = AnnotationOverlay.coerceDouble(item["y"])
-        else { return nil }
-        return TextAnnotation(id: id, text: text, x: x, y: y,
-          width: max(40, AnnotationOverlay.coerceDouble(item["width"]) ?? 180),
-          fontSize: max(8, AnnotationOverlay.coerceDouble(item["fontSize"]) ?? 16),
-          anchor: item["anchor"] as? String == "top-left" ? "top-left" : nil)
-      }
+      let annotations = values.compactMap(Self.parseTextAnnotation)
       if !annotations.isEmpty { loaded[pageNumber] = annotations }
+    }
+    for (id, pending) in Array(pendingTextCommits) {
+      let echoed = loaded[pending.pageNumber]?.first { $0.id == id }
+      if echoed == pending.annotation {
+        pendingTextCommits.removeValue(forKey: id)
+      } else {
+        var annotations = loaded[pending.pageNumber] ?? []
+        if let annotation = pending.annotation {
+          if let index = annotations.firstIndex(where: { $0.id == id }) { annotations[index] = annotation }
+          else { annotations.append(annotation) }
+        } else { annotations.removeAll { $0.id == id } }
+        loaded[pending.pageNumber] = annotations
+      }
     }
     // The JS-side prop can be resent with byte-identical content on a
     // cadence tied to unrelated app activity (recording autosave, any other

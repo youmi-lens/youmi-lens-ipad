@@ -126,7 +126,7 @@ check('ink strokes on the material-scoped (legacy JS fallback) path also call en
 
 check('pasting text calls ensureTrailingBlankPageAfterContent on the page it was pasted onto (via the shared createTextAnnotationFromEvent helper, same as native "create")', () => {
   const pasteBranch = slice(screen, "if (event.action === 'create') {", 'const selected = current.find');
-  assert.match(pasteBranch, /createTextAnnotationFromEvent\(event\.pageNumber, text, event\.x!, event\.y!, event\.width \?\? 180, 16, event\.anchor\);/);
+  assert.match(pasteBranch, /createTextAnnotationFromEvent\(event\.pageNumber, text, event\.x!, event\.y!, event\.width \?\? 180, 16, event\.anchor, event\.annotationId\);/);
   const createHelper = slice(screen, 'const createTextAnnotationFromEvent = useCallback', 'const handleNativeTextAnnotationAction = useCallback');
   assert.match(createHelper, /ensureTrailingBlankPageAfterContent\(pageNumber\);/);
 });
@@ -167,7 +167,7 @@ check('create (paste and native inline-create) generates a fresh id, captures na
   const pasteBranch = slice(screen, "if (event.action === 'create') {", 'const selected = current.find');
   assert.match(pasteBranch, /if \(!text \|\| !Number\.isFinite\(event\.x\) \|\| !Number\.isFinite\(event\.y\)\) return;/);
   const createHelper = slice(screen, 'const createTextAnnotationFromEvent = useCallback', 'const handleNativeTextAnnotationAction = useCallback');
-  assert.match(createHelper, /id: `material-text-\$\{Date\.now\(\)\}-/);
+  assert.match(createHelper, /id: annotationId \?\? `material-text-\$\{Date\.now\(\)\}-/);
 });
 
 check('edit is native-inline-editor-driven: the event already carries the FINAL text (no modal round-trip), and the handler writes it back with a fresh updatedAt', () => {
@@ -190,7 +190,7 @@ check('delete removes exactly the targeted annotation by id and clears the selec
 
 check('width and fontSize are captured at creation time and are part of the persisted annotation shape, so re-render/re-layout does not have to re-derive wrapping from scratch', () => {
   const pasteBranch = slice(screen, "if (event.action === 'create') {", 'const selected = current.find');
-  assert.match(pasteBranch, /createTextAnnotationFromEvent\(event\.pageNumber, text, event\.x!, event\.y!, event\.width \?\? 180, 16, event\.anchor\)/, 'commit passes document width and fixed font16 into the shared helper');
+  assert.match(pasteBranch, /createTextAnnotationFromEvent\(event\.pageNumber, text, event\.x!, event\.y!, event\.width \?\? 180, 16, event\.anchor, event\.annotationId\)/, 'commit passes document width, fixed font16 and native identity into the shared helper');
   const createHelper = slice(screen, 'const createTextAnnotationFromEvent = useCallback', 'const handleNativeTextAnnotationAction = useCallback');
   assert.match(createHelper, /x, y, width, fontSize, anchor, createdAt: now, updatedAt: now,/, 'width/fontSize are real fields on the persisted annotation, not derived later');
 });

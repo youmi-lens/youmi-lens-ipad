@@ -13,6 +13,7 @@ import {
   type NativePdfViewport,
   type NativePdfPageChangedEvent,
   type NativePdfTextAnnotationsByPage,
+  type NativePdfTextAnnotation,
   type NativePdfTextAnnotationActionEvent,
   type NativePdfViewportDiagnosticEvent,
 } from '@/modules/expo-pdf-annotation';
@@ -40,6 +41,8 @@ export type NativePdfAnnotationViewRef = {
   markStrokeRemovalIntent: (ids: string[]) => void;
   /** Allow an intentional Undo to restore ink previously removed natively. */
   markStrokeRestorationIntent: (ids: string[]) => void;
+  /** Explicit Undo/Redo overrides a pending native text-render commit. */
+  setTextHistoryIntent: (pageNumber: number, annotations: NativePdfTextAnnotation[]) => void;
 };
 
 export type NativePdfAnnotationViewProps = {
@@ -120,6 +123,11 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
       markStrokeRestorationIntent(ids: string[]) {
         nativeRef.current?.markStrokeRestorationIntentAsync?.(ids).catch((error: unknown) => {
           if (__DEV__) console.warn('[native-pdf] markStrokeRestorationIntentAsync failed', error);
+        });
+      },
+      setTextHistoryIntent(pageNumber: number, annotations: NativePdfTextAnnotation[]) {
+        nativeRef.current?.setTextHistoryIntentAsync?.(pageNumber, annotations).catch((error: unknown) => {
+          if (__DEV__) console.warn('[native-pdf] setTextHistoryIntentAsync failed', error);
         });
       },
     }), []);

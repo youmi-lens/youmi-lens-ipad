@@ -38,7 +38,7 @@ check('text and Pencil share unchanged PDFKit page basis', () => {
   }
 });
 check('KVO coalesces only the transient editor, not a timer', () => {
-  assert.match(source, /if inlineTextEditingContext != nil \{ scheduleInlineTextEditorReposition\(\) \}/);
+  assert.match(source, /if inlineTextEditingContext != nil \|\| pendingInlineTextHandoff != nil \{ scheduleInlineTextEditorReposition\(\) \}/);
   const body = source.slice(source.indexOf('private func scheduleInlineTextEditorReposition'), source.indexOf('private func repositionInlineTextEditor'));
   assert.match(body, /DispatchQueue\.main\.async/);
   assert.doesNotMatch(body, /Timer|asyncAfter/);

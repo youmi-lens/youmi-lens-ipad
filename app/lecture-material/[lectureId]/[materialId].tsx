@@ -786,14 +786,14 @@ export default function LectureMaterialWorkspaceScreen() {
   // natively), so both create exactly one MaterialTextAnnotation and push
   // exactly one text-create history action. No second text-creation path.
   const createTextAnnotationFromEvent = useCallback((
-    pageNumber: number, text: string, x: number, y: number, width: number, fontSize: number, anchor?: 'top-left',
+    pageNumber: number, text: string, x: number, y: number, width: number, fontSize: number, anchor?: 'top-left', annotationId?: string,
   ) => {
     const id = materialIdRef.current;
     if (!id) return;
     const current = textAnnotationsForMaterialPage(id, pageNumber);
     const now = new Date().toISOString();
     const created: MaterialTextAnnotation = {
-      id: `material-text-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: annotationId ?? `material-text-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       text, x, y, width, fontSize, anchor, createdAt: now, updatedAt: now,
     };
     setNativeHistory((h) => pushMaterialHistory(h, { kind: 'text-create', pageNumber, annotation: created }));
@@ -810,7 +810,7 @@ export default function LectureMaterialWorkspaceScreen() {
       // text before emitting this — no modal, nothing left to ask the user.
       const text = event.text?.trim();
       if (!text || !Number.isFinite(event.x) || !Number.isFinite(event.y)) return;
-      createTextAnnotationFromEvent(event.pageNumber, text, event.x!, event.y!, event.width ?? 180, 16, event.anchor);
+      createTextAnnotationFromEvent(event.pageNumber, text, event.x!, event.y!, event.width ?? 180, 16, event.anchor, event.annotationId);
       return;
     }
     const selected = current.find((annotation) => annotation.id === event.annotationId);
@@ -1033,6 +1033,9 @@ export default function LectureMaterialWorkspaceScreen() {
         replaceMaterialPageAnnotationStrokesForMaterial(mid, action.pageNumber, result.strokes, materialScopeLectureId(mid));
         return;
       }
+      // Undo/Redo is explicit intent, unlike an older React prop echo. It may
+      // supersede a native visual commit that is still awaiting persistence.
+      pdfRef.current?.setTextHistoryIntent(action.pageNumber, result.textAnnotations);
       saveTextAnnotations(action.pageNumber, result.textAnnotations);
     },
     [replaceMaterialPageAnnotationStrokesForMaterial, saveTextAnnotations],

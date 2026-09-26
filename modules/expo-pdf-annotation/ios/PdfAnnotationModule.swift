@@ -84,6 +84,9 @@ public final class ExpoPdfAnnotationModule: Module {
       AsyncFunction("markStrokeRestorationIntentAsync") { (view: PdfAnnotationView, ids: [String]) in
         view.markStrokeRestorationIntent(ids: ids)
       }
+      AsyncFunction("setTextHistoryIntentAsync") { (view: PdfAnnotationView, pageNumber: Int, annotations: [[String: Any]]) in
+        view.setTextHistoryIntent(pageNumber: pageNumber, annotations: annotations)
+      }
     }
   }
 }
