@@ -2239,11 +2239,19 @@ export const NotebookCanvas = memo(function NotebookCanvas({
       previousDrawingToolRef.current = next;
     }
     if (next !== 'select') {
-      // Leave any active selection behind when switching tools.
-      selectedIdsRef.current = new Set();
-      setSelectedIds(new Set());
-      lassoPointsRef.current = [];
-      setLassoPoints([]);
+      // Leave any active selection behind when switching tools — but only when
+      // there is actually something to clear. selectedIds is a dependency of
+      // the stroke-render memo, so replacing it with a new (still-empty) Set
+      // on every ordinary Pen/Eraser/Highlighter/Text switch invalidated that
+      // memo and re-filtered every stroke on the page for no reason.
+      if (selectedIdsRef.current.size > 0) {
+        selectedIdsRef.current = new Set();
+        setSelectedIds(new Set());
+      }
+      if (lassoPointsRef.current.length > 0) {
+        lassoPointsRef.current = [];
+        setLassoPoints([]);
+      }
     }
     setMode(next);
   }, []);
