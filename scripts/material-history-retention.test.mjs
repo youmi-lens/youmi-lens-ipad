@@ -254,7 +254,7 @@ console.log('\nWiring: undo/redo apply against the ACTION\'S OWN page, not whate
 check('applyNativeHistoryStep commits strokes/text keyed on action.pageNumber (already correct pre-fix — the bug was purely the reset lifetime)', () => {
   const fn = materialScreen.slice(
     materialScreen.indexOf('const applyNativeHistoryStep = useCallback('),
-    materialScreen.indexOf('[replaceMaterialPageAnnotationStrokesForMaterial, saveTextAnnotations, selectedTextAnnotationId],'),
+    materialScreen.indexOf('[replaceMaterialPageAnnotationStrokesForMaterial, saveTextAnnotations],'),
   );
   assert.match(fn, /replaceMaterialPageAnnotationStrokesForMaterial\(mid, action\.pageNumber, result\.strokes/);
   assert.match(fn, /saveTextAnnotations\(action\.pageNumber, result\.textAnnotations\)/);

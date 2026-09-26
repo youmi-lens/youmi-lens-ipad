@@ -57,7 +57,6 @@ export type NativePdfAnnotationViewProps = {
   annotationsByPage?: NativePdfAnnotationsByPage;
   appendedBlankPageCount?: number;
   textAnnotationsByPage?: NativePdfTextAnnotationsByPage;
-  selectedTextAnnotationId?: string;
   onPageChanged?: (event: NativePdfPageChangedEvent) => void;
   onLoadComplete?: (event: NativePdfLoadCompleteEvent) => void;
   onViewportChanged?: (event: NativePdfViewport) => void;
@@ -86,7 +85,6 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
       annotationsByPage,
       appendedBlankPageCount,
       textAnnotationsByPage,
-      selectedTextAnnotationId,
       onPageChanged,
       onLoadComplete,
       onViewportChanged,
@@ -142,7 +140,6 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
         annotationsByPage={annotationsByPage}
         appendedBlankPageCount={appendedBlankPageCount}
         textAnnotationsByPage={textAnnotationsByPage}
-        selectedTextAnnotationId={selectedTextAnnotationId}
         onPageChanged={(event) => onPageChanged?.(event.nativeEvent)}
         onLoadComplete={(event) => onLoadComplete?.(event.nativeEvent)}
         onViewportChanged={(event) => onViewportChanged?.(event.nativeEvent)}

@@ -36,8 +36,7 @@ export type MaterialHistoryAction =
       annotationId: string;
       before: { x: number; y: number };
       after: { x: number; y: number };
-    }
-  | { kind: 'text-resize'; pageNumber: number; annotationId: string; before: number; after: number };
+    };
 
 export type MaterialHistoryState = {
   undo: MaterialHistoryAction[];
@@ -125,8 +124,6 @@ export function applyMaterialHistoryUndo(
         ),
         removedStrokeIds: [],
       };
-    case 'text-resize':
-      return { strokes, textAnnotations: textAnnotations.map((a) => a.id === action.annotationId ? { ...a, width: action.before } : a), removedStrokeIds: [] };
   }
 }
 
@@ -168,7 +165,5 @@ export function applyMaterialHistoryRedo(
         ),
         removedStrokeIds: [],
       };
-    case 'text-resize':
-      return { strokes, textAnnotations: textAnnotations.map((a) => a.id === action.annotationId ? { ...a, width: action.after } : a), removedStrokeIds: [] };
   }
 }

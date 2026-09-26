@@ -68,41 +68,13 @@ public final class PdfAnnotationView: ExpoView {
     return g
   }()
 
-  /// Finger tap on a text annotation (select) or, in "text" mode, on empty
-  /// page space (create). Requires the existing long-press to fail first —
-  /// see the delegate section below — so a genuine long-press always wins
-  /// and still opens the Move/Edit/Copy/Delete sheet exactly as before.
+  /// Direct tap-to-create/edit in Text mode; PDF scrolling remains independent.
   private lazy var textTapGesture: UITapGestureRecognizer = {
     let g = UITapGestureRecognizer(target: self, action: #selector(handleTextTap(_:)))
     g.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
     g.delegate = self
     return g
   }()
-
-  /// Finger drag that repositions the CURRENTLY SELECTED text annotation.
-  /// Gated (via the UIGestureRecognizerDelegate methods below) to only ever
-  /// receive a touch that starts on that selected annotation while in
-  /// "scroll" or "text" mode — every other touch is left completely alone,
-  /// so normal PDF panning is untouched and Pen/Highlighter drawing (a
-  /// distinct Pencil-only touch type, see pencilGesture) can never be
-  /// affected by this. Also requires the long-press to fail, matching
-  /// textTapGesture, so a held touch always resolves as the existing
-  /// action-sheet flow instead of starting a drag.
-  private lazy var textDragGesture: UIPanGestureRecognizer = {
-    let g = UIPanGestureRecognizer(target: self, action: #selector(handleTextDrag(_:)))
-    g.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
-    g.maximumNumberOfTouches = 1
-    g.delegate = self
-    return g
-  }()
-
-  /// Set for the duration of one textDragGesture, from `.began` to
-  /// `.ended`/`.cancelled`. `startPagePoint` + `originX`/`originY` are the
-  /// drag's anchor: every `.changed` computes a fresh page-space delta from
-  /// `startPagePoint` and applies it to the ORIGINAL origin, rather than
-  /// accumulating per-frame deltas, so rounding never drifts across a long
-  /// drag.
-  private var textDragContext: (id: String, pageNumber: Int, startPagePoint: CGPoint, originX: Double, originY: Double, originWidth: Double, resizing: Bool)?
 
   /// Native inline text editing — replaces the old "tap → JS opens a modal"
   /// flow. A UITextView positioned directly over the PDF page at the
@@ -126,34 +98,12 @@ public final class PdfAnnotationView: ExpoView {
     return tv
   }()
 
-  /// Small, restrained delete affordance shown whenever a text annotation is
-  /// selected (editing or not) — the only way to delete text in "text" mode
-  /// without the removed long-press-only action sheet. Positioned at the
-  /// selected annotation's own rect; hidden whenever nothing is selected.
-  private lazy var textDeleteButton: UIButton = {
-    let button = UIButton(type: .system)
-    button.isHidden = true
-    button.tintColor = .systemRed
-    button.backgroundColor = UIColor.systemBackground.withAlphaComponent(0.92)
-    button.layer.cornerRadius = 12
-    button.layer.shadowColor = UIColor.black.cgColor
-    button.layer.shadowOpacity = 0.18
-    button.layer.shadowRadius = 3
-    button.layer.shadowOffset = CGSize(width: 0, height: 1)
-    button.setImage(UIImage(systemName: "trash.circle.fill"), for: .normal)
-    button.addTarget(self, action: #selector(handleTextDeleteButtonTap), for: .touchUpInside)
-    return button
-  }()
-
   /// Set for the duration of one inline text edit/create session. `id == nil`
   /// means a brand-new annotation (nothing committed to the store yet);
   /// non-nil means editing an existing one (suppressed from drawing/hit-
   /// testing for the duration — see AnnotationOverlay.editingTextAnnotationId).
-  /// originX/originY/fontSize/width are the ANCHOR the final commit reuses
-  /// unchanged — typing more text only grows the visual box, it never moves
-  /// the anchor (matches drawTextAnnotation's existing bottom-anchored
-  /// convention, so paste/created/edited text all render identically).
-  private var inlineTextEditingContext: (id: String?, pageNumber: Int, originX: Double, originY: Double, fontSize: Double, width: Double)?
+  /// Immutable PDF-page anchor; old annotations retain bottom-anchor semantics.
+  private var inlineTextEditingContext: (id: String?, pageNumber: Int, originX: Double, originY: Double, fontSize: Double, width: Double, anchor: String?)?
   /// PDFKit sends contentOffset/bounds KVO while its internal page transform
   /// is still transient (the physical trace captured a valid editor frame,
   /// then y=-75893, then the same valid frame again at identical PDF coords).
@@ -182,7 +132,6 @@ public final class PdfAnnotationView: ExpoView {
   /// recompute min/max on actual orientation/splitview changes — never per
   /// layout pass (which would yank user pinch state mid-gesture).
   private var lastBoundsSize: CGSize = .zero
-  private var pendingTextMove: (id: String, pageNumber: Int)?
   private var pendingInitialViewport: (pageIndex: Int, scale: CGFloat, anchor: CGPoint)?
   private var restorationComplete = false
   /// Guards against reentrant restore attempts. layoutSubviews() calls
@@ -398,14 +347,6 @@ public final class PdfAnnotationView: ExpoView {
         if annotationMode != "text" {
           commitInlineTextEditorIfNeeded()
         }
-        // The delete button is a real interactive subview that would
-        // otherwise sit on top of the page and could swallow a Pencil touch
-        // landing on it — only relevant while selecting/editing text is
-        // even possible (scroll/text mode), so it must disappear the moment
-        // a draw tool becomes active, never lingering as a stray hit target.
-        if annotationMode != "scroll" && annotationMode != "text" {
-          textDeleteButton.isHidden = true
-        }
         // Drop the eraser cursor the moment the mode leaves "eraser" — this
         // covers manual tool switches AND the Apple Pencil double-tap path
         // (temporary eraser returns to Pen / Highlighter by flipping the
@@ -470,13 +411,6 @@ public final class PdfAnnotationView: ExpoView {
     }
   }
 
-  var selectedTextAnnotationId: String? {
-    didSet {
-      annotationOverlay.selectedTextAnnotationId = selectedTextAnnotationId
-      repositionTextDeleteButton()
-    }
-  }
-
   public required init(appContext: AppContext? = nil) {
     super.init(appContext: appContext)
     clipsToBounds = true
@@ -515,12 +449,9 @@ public final class PdfAnnotationView: ExpoView {
     ])
     bringSubviewToFront(annotationOverlay)
 
-    // Manually-framed (not Auto Layout) — position is computed per-edit from
-    // PDF-page-coordinate conversion, the same pattern drawTextAnnotation
-    // already uses. Added above the overlay so they're both visible and
-    // touchable; layoutSubviews() keeps them frontmost while active.
+    // The temporary editor is above the inert overlay; committed text lives
+    // in documentView and has no persistent manipulation controls.
     addSubview(inlineTextEditor)
-    addSubview(textDeleteButton)
 
     // Attach Pencil-only gesture recognizer to PDFView. allowedTouchTypes
     // is the OS-level filter that actually works (vs the hitTest dance).
@@ -531,9 +462,7 @@ public final class PdfAnnotationView: ExpoView {
     longPress.delegate = self
     pdfView.addGestureRecognizer(longPress)
     textTapGesture.require(toFail: longPress)
-    textDragGesture.require(toFail: longPress)
     pdfView.addGestureRecognizer(textTapGesture)
-    pdfView.addGestureRecognizer(textDragGesture)
     applyWorkspaceCanvasColors()
 
     NotificationCenter.default.addObserver(
@@ -576,7 +505,6 @@ public final class PdfAnnotationView: ExpoView {
     applyPdfGestureTouchPolicy()
     bringSubviewToFront(annotationOverlay)
     if !inlineTextEditor.isHidden { bringSubviewToFront(inlineTextEditor) }
-    if !textDeleteButton.isHidden { bringSubviewToFront(textDeleteButton) }
     annotationOverlay.setNeedsDisplay()
     applyInitialViewportIfPossible()
     #if DEBUG
@@ -1234,7 +1162,6 @@ public final class PdfAnnotationView: ExpoView {
     #endif
     annotationOverlay.setNeedsDisplay()
     if inlineTextEditingContext != nil { scheduleInlineTextEditorReposition() }
-    if selectedTextAnnotationId != nil { repositionTextDeleteButton() }
     scheduleViewportSnapshot()
   }
 
@@ -1375,7 +1302,6 @@ public final class PdfAnnotationView: ExpoView {
     if keyPath == "contentOffset" || keyPath == "bounds" {
       scheduleViewportSnapshot()
       if inlineTextEditingContext != nil { scheduleInlineTextEditorReposition() }
-      if selectedTextAnnotationId != nil { repositionTextDeleteButton() }
     }
     #if DEBUG
     if keyPath == "contentOffset" {
@@ -1455,16 +1381,10 @@ public final class PdfAnnotationView: ExpoView {
   @objc private func handleFingerLongPress(_ recognizer: UILongPressGestureRecognizer) {
     guard recognizer.state == .began, annotationMode == "scroll" else { return }
     let point = recognizer.location(in: pdfView)
-    guard let document, let page = pdfView.page(for: point, nearest: true) else { return }
+    guard let document, let page = pdfView.page(for: point, nearest: false) else { return }
     let pageNumber = document.index(for: page) + 1
     let pagePoint = pdfView.convert(point, to: page)
-    if let pending = pendingTextMove {
-      pendingTextMove = nil
-      onTextAnnotationAction(["action": "move", "pageNumber": pageNumber, "annotationId": pending.id, "x": pagePoint.x, "y": pagePoint.y])
-      return
-    }
     if let existing = annotationOverlay.textAnnotation(at: point) {
-      onTextAnnotationAction(["action": "select", "pageNumber": existing.pageNumber, "annotationId": existing.id])
       presentTextActions(existing, from: recognizer.view ?? pdfView)
       return
     }
@@ -1472,108 +1392,25 @@ public final class PdfAnnotationView: ExpoView {
     guard !clipboard.isEmpty else { return }
     let menu = UIAlertController(title: "Course Material", message: nil, preferredStyle: .actionSheet)
     menu.addAction(UIAlertAction(title: "Paste", style: .default) { [weak self] _ in
-      self?.onTextAnnotationAction(["action": "paste", "pageNumber": pageNumber, "text": clipboard, "x": pagePoint.x, "y": pagePoint.y])
+      self?.commitInlineTextEditorIfNeeded()
+      self?.beginInlineTextCreation(at: pagePoint, pageNumber: pageNumber, page: page, initialText: clipboard)
     })
     menu.addAction(UIAlertAction(title: "Cancel", style: .cancel))
     present(menu, from: recognizer.view ?? pdfView)
   }
 
-  /// Quick tap (not a hold — see textTapGesture.require(toFail:) on the
-  /// long-press above): in "text" mode, tapping existing text selects AND
-  /// immediately opens it in the inline editor (caret + keyboard, directly
-  /// on the canvas — no modal); tapping empty space begins a brand-new
-  /// inline annotation there. In "scroll" mode a tap only selects (editing
-  /// stays a deliberate long-press action there, unchanged). Any tap while
-  /// the inline editor is already open commits it first, so the new tap is
-  /// evaluated against the just-settled state.
+  /// Text mode persists between pages. Commit reuses the original page anchor.
   @objc private func handleTextTap(_ recognizer: UITapGestureRecognizer) {
-    guard recognizer.state == .ended, annotationMode == "scroll" || annotationMode == "text" else { return }
+    guard recognizer.state == .ended, annotationMode == "text" else { return }
     let point = recognizer.location(in: pdfView)
-    guard let document, let page = pdfView.page(for: point, nearest: true) else { return }
+    guard let document, let page = pdfView.page(for: point, nearest: false) else { return }
     let pageNumber = document.index(for: page) + 1
     let pagePoint = pdfView.convert(point, to: page)
-
     commitInlineTextEditorIfNeeded()
-
     if let existing = annotationOverlay.textAnnotation(at: point) {
-      onTextAnnotationAction(["action": "select", "pageNumber": existing.pageNumber, "annotationId": existing.id])
-      if annotationMode == "text" {
-        beginInlineTextEditing(existing)
-      }
-      return
-    }
-
-    if annotationMode == "text" {
+      beginInlineTextEditing(existing)
+    } else {
       beginInlineTextCreation(at: pagePoint, pageNumber: pageNumber, page: page)
-      return
-    }
-
-    if selectedTextAnnotationId != nil {
-      onTextAnnotationAction(["action": "deselect", "pageNumber": pageNumber])
-    }
-  }
-
-  /// Repositions the currently-selected text annotation. Only ever begins
-  /// for a touch that starts on that exact annotation while in "scroll" or
-  /// "text" mode — see gestureRecognizer(_:shouldReceive:) below, which is
-  /// the actual gate; everything here can assume that precondition already
-  /// held at `.began`. Tracks visually via annotationOverlay.liveDraggedTextPosition
-  /// and emits exactly ONE "move" mutation at `.ended`/`.cancelled` — the
-  /// same event type the existing long-press Move flow already emits, so no
-  /// new JS-side handling is needed beyond capturing a "before" position for
-  /// history.
-  @objc private func handleTextDrag(_ recognizer: UIPanGestureRecognizer) {
-    let point = recognizer.location(in: pdfView)
-    switch recognizer.state {
-    case .began:
-      guard let document, let page = pdfView.page(for: point, nearest: true),
-            let selectedId = selectedTextAnnotationId,
-            let hit = annotationOverlay.textAnnotation(at: point), hit.id == selectedId
-      else { return }
-      let pageNumber = document.index(for: page) + 1
-      let pagePoint = pdfView.convert(point, to: page)
-      let resizing = annotationOverlay.isTextResizeHandle(at: point, id: hit.id)
-      textDragContext = (id: hit.id, pageNumber: pageNumber, startPagePoint: pagePoint, originX: hit.x, originY: hit.y, originWidth: hit.width, resizing: resizing)
-      annotationOverlay.liveDraggedTextPosition = (id: hit.id, x: hit.x, y: hit.y)
-
-    case .changed:
-      guard let context = textDragContext, let page = document?.page(at: context.pageNumber - 1) else { return }
-      let currentPagePoint = pdfView.convert(point, to: page)
-      if context.resizing {
-        annotationOverlay.liveResizedTextWidth = (id: context.id, width: max(80, currentPagePoint.x - context.originX))
-      } else {
-        let dx = currentPagePoint.x - context.startPagePoint.x
-        let dy = currentPagePoint.y - context.startPagePoint.y
-        annotationOverlay.liveDraggedTextPosition = (id: context.id, x: context.originX + dx, y: context.originY + dy)
-      }
-
-    case .ended:
-      guard let context = textDragContext, let page = document?.page(at: context.pageNumber - 1) else {
-        textDragContext = nil; annotationOverlay.liveDraggedTextPosition = nil; annotationOverlay.liveResizedTextWidth = nil
-        return
-      }
-      let currentPagePoint = pdfView.convert(point, to: page)
-      textDragContext = nil
-      annotationOverlay.liveDraggedTextPosition = nil
-      annotationOverlay.liveResizedTextWidth = nil
-      if context.resizing {
-        onTextAnnotationAction(["action": "resize", "pageNumber": context.pageNumber, "annotationId": context.id, "width": max(80, currentPagePoint.x - context.originX)])
-      } else {
-        let dx = currentPagePoint.x - context.startPagePoint.x
-        let dy = currentPagePoint.y - context.startPagePoint.y
-        onTextAnnotationAction(["action": "move", "pageNumber": context.pageNumber, "annotationId": context.id, "x": context.originX + dx, "y": context.originY + dy])
-      }
-
-    case .cancelled, .failed:
-      // Abandoned mid-drag (e.g. a second touch interrupts it) — drop back to
-      // the committed position. No mutation was ever emitted, so there is
-      // nothing to undo; the overlay simply stops showing the live override.
-      textDragContext = nil
-      annotationOverlay.liveDraggedTextPosition = nil
-      annotationOverlay.liveResizedTextWidth = nil
-
-    default:
-      break
     }
   }
 
@@ -1582,19 +1419,19 @@ public final class PdfAnnotationView: ExpoView {
   /// Begins a brand-new annotation at `pagePoint`. Nothing is committed to
   /// the store until the editor commits with non-empty text — an empty
   /// commit (tapped, typed nothing, tapped away) creates nothing.
-  private func beginInlineTextCreation(at pagePoint: CGPoint, pageNumber: Int, page: PDFPage) {
+  private func beginInlineTextCreation(at pagePoint: CGPoint, pageNumber: Int, page: PDFPage, initialText: String = "") {
     let pageWidth = page.bounds(for: .mediaBox).width
     let availableWidth = max(80, pageWidth - pagePoint.x - 24)
-    let fontSize = 16.0
+    let fontSize = Double(MaterialTextGeometry.defaultFontSize)
     inlineTextEditingContext = (
       id: nil, pageNumber: pageNumber,
       originX: Double(pagePoint.x), originY: Double(pagePoint.y),
-      fontSize: fontSize, width: Double(availableWidth)
+      fontSize: fontSize, width: Double(availableWidth), anchor: "top-left"
     )
     MaterialTextTrace.log("editor-create-begin") {
       "page=\(pageNumber) pdfX=\(pagePoint.x) pdfY=\(pagePoint.y) width=\(availableWidth) scale=\(pdfView.scaleFactor)"
     }
-    inlineTextEditor.text = ""
+    inlineTextEditor.text = initialText
     showInlineTextEditorAndFocus()
   }
 
@@ -1603,7 +1440,7 @@ public final class PdfAnnotationView: ExpoView {
   /// (see AnnotationOverlay.editingTextAnnotationId) so the live editor is
   /// the only visible/interactive copy until commit.
   private func beginInlineTextEditing(_ hit: TextAnnotationHit) {
-    inlineTextEditingContext = (id: hit.id, pageNumber: hit.pageNumber, originX: hit.x, originY: hit.y, fontSize: hit.fontSize, width: hit.width)
+    inlineTextEditingContext = (id: hit.id, pageNumber: hit.pageNumber, originX: hit.x, originY: hit.y, fontSize: hit.fontSize, width: hit.width, anchor: hit.anchor)
     annotationOverlay.editingTextAnnotationId = hit.id
     inlineTextEditor.text = hit.text
     MaterialTextTrace.log("editor-edit-begin") {
@@ -1646,26 +1483,20 @@ public final class PdfAnnotationView: ExpoView {
           context.pageNumber >= 1, context.pageNumber <= document.pageCount,
           let page = document.page(at: context.pageNumber - 1)
     else { return }
-    let scale = max(0.01, pdfView.scaleFactor)
-    let width = CGFloat(context.width) * scale
-    let font = UIFont.systemFont(ofSize: CGFloat(context.fontSize) * scale)
-    inlineTextEditor.font = font
-    let measured = inlineTextEditor.text.isEmpty ? " " : inlineTextEditor.text!
-    let fitSize = (measured as NSString).boundingRect(
-      with: CGSize(width: width, height: .greatestFiniteMagnitude),
-      options: [.usesLineFragmentOrigin, .usesFontLeading],
-      attributes: [.font: font],
-      context: nil
-    ).size
-    let height = max(font.lineHeight, ceil(fitSize.height)) + 4
-    // Bottom-anchored, matching drawTextAnnotation: the stored (x, y) is the
-    // bottom-left of the rendered block, so growth extends the box UPWARD,
-    // never moving the anchor the final commit reuses unchanged.
-    let origin = pdfView.convert(CGPoint(x: context.originX, y: context.originY), from: page)
-    inlineTextEditor.frame = CGRect(x: origin.x, y: origin.y - height, width: width, height: height)
-    MaterialTextTrace.log("editor-frame") {
-      "id=\(context.id ?? "new") page=\(context.pageNumber) pdfX=\(context.originX) pdfY=\(context.originY) viewX=\(origin.x) viewY=\(origin.y) frame=\(inlineTextEditor.frame) scale=\(scale)"
-    }
+    // Shared document-space measurement for editor, static glyphs, hit-test and export.
+    // No editor-frame or viewport offset ever enters persistence.
+    let rect = MaterialTextGeometry.pageRect(
+      text: inlineTextEditor.text ?? "", x: context.originX, y: context.originY,
+      width: context.width, fontSize: context.fontSize, anchor: context.anchor
+    )
+    let placement = MaterialTextGeometry.editorPlacement(rect: rect, page: page, pdfView: pdfView, container: self)
+    inlineTextEditor.font = UIFont.systemFont(ofSize: CGFloat(context.fontSize))
+    inlineTextEditor.transform = .identity
+    inlineTextEditor.bounds = CGRect(origin: .zero, size: rect.size)
+    inlineTextEditor.center = placement.center
+    // UIKit text grows down; PDF-page geometry grows up. Counter-reflect ONCE,
+    // just like the CATextLayer child, including PDFKit's page rotation/zoom.
+    inlineTextEditor.transform = placement.transform
   }
 
   /// Commits whatever is currently in the editor (if any is open) and hides
@@ -1696,63 +1527,19 @@ public final class PdfAnnotationView: ExpoView {
     } else if !finalText.isEmpty {
       onTextAnnotationAction([
         "action": "create", "pageNumber": context.pageNumber, "text": finalText,
-        "x": context.originX, "y": context.originY, "width": context.width, "fontSize": context.fontSize
+        "x": context.originX, "y": context.originY, "width": context.width, "fontSize": context.fontSize,
+        "anchor": "top-left"
       ])
     }
   }
 
-  @objc private func handleTextDeleteButtonTap() {
-    guard let id = selectedTextAnnotationId else { return }
-    // If the deleted annotation is the one currently being edited, discard
-    // the in-flight edit instead of committing it — deleting supersedes it.
-    if inlineTextEditingContext?.id == id {
-      inlineTextEditingContext = nil
-      inlineTextEditor.isHidden = true
-      inlineTextEditor.text = ""
-      if inlineTextEditor.isFirstResponder { inlineTextEditor.resignFirstResponder() }
-      annotationOverlay.editingTextAnnotationId = nil
-    }
-    guard let pageNumber = pagedTextAnnotationPageNumber(for: id) else { return }
-    onTextAnnotationAction(["action": "delete", "pageNumber": pageNumber, "annotationId": id])
-    textDeleteButton.isHidden = true
-  }
-
-  private func pagedTextAnnotationPageNumber(for id: String) -> Int? {
-    annotationOverlay.pageNumber(forTextAnnotationId: id)
-  }
-
-  /// Shows/hides/positions the delete button at the currently SELECTED
-  /// annotation's rect (independent of whether it's also being edited).
-  /// Called from selectedTextAnnotationId's didSet and from every viewport
-  /// change while a selection is active.
-  private func repositionTextDeleteButton() {
-    guard let id = selectedTextAnnotationId,
-          let pageNumber = pagedTextAnnotationPageNumber(for: id),
-          let rect = annotationOverlay.textAnnotationRect(id: id, pageNumber: pageNumber),
-          let document, let page = document.page(at: pageNumber - 1)
-    else {
-      textDeleteButton.isHidden = true
-      return
-    }
-    let topRight = pdfView.convert(CGPoint(x: rect.maxX, y: rect.maxY), from: page)
-    let size: CGFloat = 26
-    textDeleteButton.frame = CGRect(x: topRight.x - size / 2, y: topRight.y - size / 2, width: size, height: size)
-    textDeleteButton.isHidden = false
-    bringSubviewToFront(textDeleteButton)
-  }
-
   private func presentTextActions(_ annotation: TextAnnotationHit, from source: UIView) {
     let menu = UIAlertController(title: "Text", message: nil, preferredStyle: .actionSheet)
-    menu.addAction(UIAlertAction(title: "Move", style: .default) { [weak self] _ in
-      self?.pendingTextMove = (annotation.id, annotation.pageNumber)
-      self?.onTextAnnotationAction(["action": "move", "pageNumber": annotation.pageNumber, "annotationId": annotation.id])
-    })
     menu.addAction(UIAlertAction(title: "Edit", style: .default) { [weak self] _ in
       self?.beginInlineTextEditing(annotation)
     })
     menu.addAction(UIAlertAction(title: "Copy", style: .default) { [weak self] _ in
       UIPasteboard.general.string = annotation.text
-      self?.onTextAnnotationAction(["action": "copy", "pageNumber": annotation.pageNumber, "annotationId": annotation.id])
     })
     menu.addAction(UIAlertAction(title: "Delete", style: .destructive) { [weak self] _ in
       self?.onTextAnnotationAction(["action": "delete", "pageNumber": annotation.pageNumber, "annotationId": annotation.id])
@@ -1797,50 +1584,18 @@ public final class PdfAnnotationView: ExpoView {
 // MARK: - UIGestureRecognizerDelegate
 
 extension PdfAnnotationView: UIGestureRecognizerDelegate {
-  // Allow our Pencil gesture to recognize simultaneously with PDFView's own
-  // pan/pinch — `allowedTouchTypes` on each gesture keeps them from actually
-  // competing for the same touch (Pencil → us, finger → PDFView). textDragGesture
-  // is the one deliberate exception: once it has decided (via shouldReceive
-  // below) to track a touch, PDFView's own pan must NOT also try to scroll
-  // using that same touch — that's exactly the "drag must not accidentally
-  // scroll the PDF simultaneously" failure mode. Every other pair keeps the
-  // original permissive behavior.
+  // Keep the pre-existing Pencil/PDFView simultaneous recognition behavior.
   public func gestureRecognizer(
     _ gestureRecognizer: UIGestureRecognizer,
     shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
-  ) -> Bool {
-    if gestureRecognizer === textDragGesture || otherGestureRecognizer === textDragGesture {
-      return false
-    }
-    return true
-  }
+  ) -> Bool { true }
 
-  // Narrow admission gate for the two new finger gestures — everything else
-  // (Pencil drawing, PDFView's own pan/pinch/text-selection) is completely
-  // unaffected since this delegate method only governs whether THESE two
-  // recognizers see a given touch at all.
   public func gestureRecognizer(
     _ gestureRecognizer: UIGestureRecognizer,
     shouldReceive touch: UITouch
   ) -> Bool {
-    guard gestureRecognizer === textTapGesture || gestureRecognizer === textDragGesture else { return true }
-    guard annotationMode == "scroll" || annotationMode == "text" else { return false }
-    let point = touch.location(in: pdfView)
-    if gestureRecognizer === textTapGesture {
-      // The tap handles both "select a text annotation" and, in "text" mode,
-      // "create one on empty space" — it always wants the touch while the
-      // mode allows it at all.
-      return true
-    }
-    // textDragGesture: only ever receive a touch that starts on the
-    // annotation that is ALREADY selected. Anything else — empty space, a
-    // different annotation, no selection at all — is left for PDFView's own
-    // pan (normal scroll) to handle untouched.
-    guard let selectedId = selectedTextAnnotationId,
-          let hit = annotationOverlay.textAnnotation(at: point),
-          hit.id == selectedId
-    else { return false }
-    return true
+    guard gestureRecognizer === textTapGesture else { return true }
+    return annotationMode == "text"
   }
 }
 
@@ -1997,9 +1752,9 @@ final class PageTextAnnotationLayer: CALayer {
 
   required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-  func render(_ annotations: [TextAnnotation], selectedId: String?) {
+  func render(_ annotations: [TextAnnotation]) {
     let signature = annotations.map {
-      "\($0.id)|\($0.text)|\($0.x)|\($0.y)|\($0.width)|\($0.fontSize)|\(selectedId == $0.id)"
+      "\($0.id)|\($0.text)|\($0.x)|\($0.y)|\($0.width)|\($0.fontSize)|\($0.anchor ?? "legacy-bottom")"
     }.joined(separator: "\u{1f}")
     guard signature != renderedSignature else { return }
     renderedSignature = signature
@@ -2007,28 +1762,7 @@ final class PageTextAnnotationLayer: CALayer {
     sublayers?.forEach { $0.removeFromSuperlayer() }
     for annotation in annotations {
       let font = UIFont.systemFont(ofSize: CGFloat(annotation.fontSize))
-      let frame = Self.annotationFrame(annotation, font: font)
-
-      if selectedId == annotation.id {
-        let selection = CAShapeLayer()
-        selection.frame = frame.insetBy(dx: -4, dy: -3)
-        selection.path = CGPath(rect: selection.bounds, transform: nil)
-        selection.fillColor = UIColor.systemBlue.withAlphaComponent(0.10).cgColor
-        selection.strokeColor = UIColor.systemBlue.withAlphaComponent(0.9).cgColor
-        selection.lineWidth = 1
-        selection.actions = ["path": NSNull(), "position": NSNull(), "bounds": NSNull()]
-        addSublayer(selection)
-        let handle = CAShapeLayer()
-        let handleSize: CGFloat = 10
-        // PDF y-up: rect.minY maps to the visible bottom edge.
-        handle.frame = CGRect(x: frame.maxX - handleSize / 2, y: frame.minY - handleSize / 2, width: handleSize, height: handleSize)
-        handle.path = CGPath(ellipseIn: handle.bounds, transform: nil)
-        handle.fillColor = UIColor.systemBlue.cgColor
-        handle.strokeColor = UIColor.systemBackground.cgColor
-        handle.lineWidth = 1.5
-        handle.actions = ["path": NSNull(), "position": NSNull(), "bounds": NSNull()]
-        addSublayer(handle)
-      }
+      let frame = Self.annotationFrame(annotation)
 
       let text = CATextLayer()
       text.frame = frame
@@ -2039,7 +1773,7 @@ final class PageTextAnnotationLayer: CALayer {
       text.alignmentMode = .left
       text.truncationMode = .none
       text.isWrapped = true
-      text.string = annotation.text
+      text.string = NSAttributedString(string: annotation.text, attributes: MaterialTextGeometry.attributes(fontSize: annotation.fontSize))
       // `PageTextAnnotationLayer` is intentionally in PDF-page coordinates.
       // Its parent transform has a reflected Y basis because PDF page space is
       // y-up while the document view is UIKit y-down. Geometry-only Pencil
@@ -2057,22 +1791,10 @@ final class PageTextAnnotationLayer: CALayer {
   /// The exact PDF-page-local frame passed to CATextLayer. Kept centralized so
   /// physical QA can compare this frame with the editor and final PDFView
   /// position without a second, approximate height calculation.
-  static func annotationFrame(_ annotation: TextAnnotation, font: UIFont? = nil) -> CGRect {
-    let resolvedFont = font ?? UIFont.systemFont(ofSize: CGFloat(annotation.fontSize))
-    let style = NSMutableParagraphStyle()
-    style.lineBreakMode = .byWordWrapping
-    let attributes: [NSAttributedString.Key: Any] = [.font: resolvedFont, .paragraphStyle: style]
-    let height = (annotation.text as NSString).boundingRect(
-      with: CGSize(width: CGFloat(annotation.width), height: .greatestFiniteMagnitude),
-      options: [.usesLineFragmentOrigin, .usesFontLeading],
-      attributes: attributes,
-      context: nil
-    ).height
-    return CGRect(
-      x: annotation.x,
-      y: annotation.y,
-      width: annotation.width,
-      height: Double(height) + 4
+  static func annotationFrame(_ annotation: TextAnnotation) -> CGRect {
+    MaterialTextGeometry.pageRect(
+      text: annotation.text, x: annotation.x, y: annotation.y,
+      width: annotation.width, fontSize: annotation.fontSize, anchor: annotation.anchor
     )
   }
 }
@@ -2117,18 +1839,6 @@ final class AnnotationOverlay: UIView {
   private var pageTextLayers: [Int: PageTextAnnotationLayer] = [:]
   private weak var textDocumentView: UIView?
   private var pagedTextAnnotations: [Int: [TextAnnotation]] = [:]
-  var selectedTextAnnotationId: String? { didSet { setNeedsDisplay() } }
-
-  /// Purely visual, in-flight drag position for the selected text annotation.
-  /// Set for the duration of one drag gesture (PdfAnnotationView.handleTextDrag)
-  /// and cleared at drag end — never written into pagedTextAnnotations, so a
-  /// mid-drag `annotationsByPage` prop update (or this drag being cancelled)
-  /// can never leave a stale coordinate behind. The committed position only
-  /// ever changes via the normal loadTextAnnotations path, once JS echoes back
-  /// the single "move" mutation this drag emits at `.ended`.
-  var liveDraggedTextPosition: (id: String, x: Double, y: Double)? { didSet { setNeedsDisplay() } }
-  var liveResizedTextWidth: (id: String, width: Double)? { didSet { setNeedsDisplay() } }
-
   /// Id of the text annotation currently open in the native inline editor
   /// (PdfAnnotationView.inlineTextEditor), if any. Suppressed from BOTH
   /// drawing and hit-testing while set — the live UITextView is the sole
@@ -2263,20 +1973,9 @@ final class AnnotationOverlay: UIView {
       pageTextLayers.removeValue(forKey: pageNumber)?.removeFromSuperlayer()
     }
     for (pageNumber, annotations) in pagedTextAnnotations {
-      let rendered = annotations.compactMap { annotation -> TextAnnotation? in
-        guard annotation.id != editingTextAnnotationId else { return nil }
-        guard liveDraggedTextPosition?.id == annotation.id || liveResizedTextWidth?.id == annotation.id else { return annotation }
-        return TextAnnotation(
-          id: annotation.id,
-          text: annotation.text,
-          x: liveDraggedTextPosition?.x ?? annotation.x,
-          y: liveDraggedTextPosition?.y ?? annotation.y,
-          width: liveResizedTextWidth?.width ?? annotation.width,
-          fontSize: annotation.fontSize
-        )
-      }
+      let rendered = annotations.filter { $0.id != editingTextAnnotationId }
       guard let layer = pageTextLayer(pageNumber) else { continue }
-      layer.render(rendered, selectedId: selectedTextAnnotationId)
+      layer.render(rendered)
     }
   }
 
@@ -2569,7 +2268,8 @@ final class AnnotationOverlay: UIView {
         else { return nil }
         return TextAnnotation(id: id, text: text, x: x, y: y,
           width: max(40, AnnotationOverlay.coerceDouble(item["width"]) ?? 180),
-          fontSize: max(8, AnnotationOverlay.coerceDouble(item["fontSize"]) ?? 16))
+          fontSize: max(8, AnnotationOverlay.coerceDouble(item["fontSize"]) ?? 16),
+          anchor: item["anchor"] as? String == "top-left" ? "top-left" : nil)
       }
       if !annotations.isEmpty { loaded[pageNumber] = annotations }
     }
@@ -2606,37 +2306,11 @@ final class AnnotationOverlay: UIView {
       if PageTextAnnotationLayer.annotationFrame(annotation).insetBy(dx: -3, dy: -3).contains(pagePoint) {
         return TextAnnotationHit(
           id: annotation.id, text: annotation.text, pageNumber: pageNumber,
-          x: annotation.x, y: annotation.y, width: annotation.width, fontSize: annotation.fontSize
+          x: annotation.x, y: annotation.y, width: annotation.width, fontSize: annotation.fontSize, anchor: annotation.anchor
         )
       }
     }
     return nil
-  }
-
-  /// Which page a given text annotation id currently lives on — used by the
-  /// delete button/inline editor to resolve page context from just an id
-  /// (e.g. after a selection round-trip), without a screen-point hit-test.
-  func pageNumber(forTextAnnotationId id: String) -> Int? {
-    for (pageNumber, annotations) in pagedTextAnnotations where annotations.contains(where: { $0.id == id }) {
-      return pageNumber
-    }
-    return nil
-  }
-
-  /// Current PDF-page-space rect for a text annotation.
-  func textAnnotationRect(id: String, pageNumber: Int) -> CGRect? {
-    guard let annotation = pagedTextAnnotations[pageNumber]?.first(where: { $0.id == id }) else { return nil }
-    return PageTextAnnotationLayer.annotationFrame(annotation)
-  }
-
-  func isTextResizeHandle(at viewPoint: CGPoint, id: String) -> Bool {
-    guard let pdfView, let document = pdfView.document,
-          let page = pdfView.page(for: viewPoint, nearest: true),
-          let rect = textAnnotationRect(id: id, pageNumber: document.index(for: page) + 1)
-    else { return false }
-    let point = pdfView.convert(viewPoint, to: page)
-    let radius = 16 / max(0.01, pdfView.scaleFactor)
-    return hypot(point.x - rect.maxX, point.y - rect.minY) <= radius
   }
 
   // MARK: - Drawing
@@ -2894,21 +2568,21 @@ struct TextAnnotation: Equatable {
   let y: Double
   let width: Double
   let fontSize: Double
-  var estimatedHeight: Double { max(fontSize * 1.5, ceil(Double(text.count) / max(1, width / (fontSize * 0.55))) * fontSize * 1.35) }
+  let anchor: String?
 }
 
 struct TextAnnotationHit {
   let id: String
   let text: String
   let pageNumber: Int
-  /// Current PDF-page-space origin, carried through so a drag's `.began` can
-  /// anchor on it directly instead of a second lookup back into pagedTextAnnotations.
+  /// Immutable PDF-page origin, preserved while editing.
   let x: Double
   let y: Double
   /// Carried through so the inline editor can be sized/positioned identically
   /// to how this annotation currently renders — no second lookup needed.
   let width: Double
   let fontSize: Double
+  let anchor: String?
 }
 
 private extension UIColor {

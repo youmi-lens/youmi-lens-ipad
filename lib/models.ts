@@ -400,6 +400,8 @@ export type MaterialTextAnnotation = {
   y: number;
   width: number;
   fontSize: number;
+  /** New tap placements use a top-left anchor. Absent preserves legacy geometry. */
+  anchor?: 'top-left';
   createdAt: string;
   updatedAt: string;
 };

@@ -80,7 +80,8 @@ export function textAnnotationsByPageEqual(
         x.x !== y.x ||
         x.y !== y.y ||
         x.width !== y.width ||
-        x.fontSize !== y.fontSize
+        x.fontSize !== y.fontSize ||
+        x.anchor !== y.anchor
       ) {
         return false;
       }

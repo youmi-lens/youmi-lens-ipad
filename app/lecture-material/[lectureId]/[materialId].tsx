@@ -240,7 +240,6 @@ export default function LectureMaterialWorkspaceScreen() {
   // PDF page (PdfAnnotationView.inlineTextEditor) — no JS-side modal. JS
   // only ever receives the FINAL committed 'create'/'edit' event, already
   // typed and confirmed natively (see handleNativeTextAnnotationAction).
-  const [selectedTextAnnotationId, setSelectedTextAnnotationId] = useState<string | undefined>();
   const [exporting, setExporting] = useState(false);
   const [loadingPdf, setLoadingPdf] = useState(true);
   const [pdfError, setPdfError] = useState<string | null>(null);
@@ -787,7 +786,7 @@ export default function LectureMaterialWorkspaceScreen() {
   // natively), so both create exactly one MaterialTextAnnotation and push
   // exactly one text-create history action. No second text-creation path.
   const createTextAnnotationFromEvent = useCallback((
-    pageNumber: number, text: string, x: number, y: number, width: number, fontSize: number,
+    pageNumber: number, text: string, x: number, y: number, width: number, fontSize: number, anchor?: 'top-left',
   ) => {
     const id = materialIdRef.current;
     if (!id) return;
@@ -795,11 +794,10 @@ export default function LectureMaterialWorkspaceScreen() {
     const now = new Date().toISOString();
     const created: MaterialTextAnnotation = {
       id: `material-text-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      text, x, y, width, fontSize, createdAt: now, updatedAt: now,
+      text, x, y, width, fontSize, anchor, createdAt: now, updatedAt: now,
     };
     setNativeHistory((h) => pushMaterialHistory(h, { kind: 'text-create', pageNumber, annotation: created }));
     saveTextAnnotations(pageNumber, [...current, created]);
-    setSelectedTextAnnotationId(created.id);
     ensureTrailingBlankPageAfterContent(pageNumber);
   }, [ensureTrailingBlankPageAfterContent, saveTextAnnotations, textAnnotationsForMaterialPage]);
 
@@ -807,28 +805,12 @@ export default function LectureMaterialWorkspaceScreen() {
     const id = materialIdRef.current;
     if (!id || !event.pageNumber) return;
     const current = textAnnotationsForMaterialPage(id, event.pageNumber);
-    if (event.action === 'select' && event.annotationId) {
-      setSelectedTextAnnotationId(event.annotationId);
-      return;
-    }
-    if (event.action === 'deselect') {
-      setSelectedTextAnnotationId(undefined);
-      return;
-    }
     if (event.action === 'create') {
       // The native inline editor already collected and confirmed the final
       // text before emitting this — no modal, nothing left to ask the user.
       const text = event.text?.trim();
       if (!text || !Number.isFinite(event.x) || !Number.isFinite(event.y)) return;
-      createTextAnnotationFromEvent(event.pageNumber, text, event.x!, event.y!, event.width ?? 180, event.fontSize ?? 16);
-      return;
-    }
-    if (event.action === 'paste') {
-      const text = event.text?.trim();
-      if (!text || !Number.isFinite(event.x) || !Number.isFinite(event.y)) return;
-      // Paste is treated as text-create for history: Undo removes the pasted
-      // item, Redo restores it — same as native Text-tool creation above.
-      createTextAnnotationFromEvent(event.pageNumber, text, event.x!, event.y!, 180, 16);
+      createTextAnnotationFromEvent(event.pageNumber, text, event.x!, event.y!, event.width ?? 180, 16, event.anchor);
       return;
     }
     const selected = current.find((annotation) => annotation.id === event.annotationId);
@@ -836,7 +818,6 @@ export default function LectureMaterialWorkspaceScreen() {
     if (event.action === 'delete') {
       setNativeHistory((h) => pushMaterialHistory(h, { kind: 'text-delete', pageNumber: event.pageNumber, annotation: selected }));
       saveTextAnnotations(event.pageNumber, current.filter((annotation) => annotation.id !== selected.id));
-      setSelectedTextAnnotationId(undefined);
     } else if (event.action === 'edit') {
       // The native inline editor already collected the final text (even if
       // empty — an empty commit is the existing clear-to-delete path, same
@@ -853,33 +834,6 @@ export default function LectureMaterialWorkspaceScreen() {
         ? current.map((annotation) => annotation.id === selected.id ? { ...annotation, text, updatedAt: new Date().toISOString() } : annotation)
         : current.filter((annotation) => annotation.id !== selected.id));
       if (text) ensureTrailingBlankPageAfterContent(event.pageNumber);
-      if (!text) setSelectedTextAnnotationId(undefined);
-    } else if (event.action === 'move' && Number.isFinite(event.x) && Number.isFinite(event.y)) {
-      // Reached both by the existing long-press "Move" flow (a second
-      // long-press elsewhere completes it) and by the finger-drag gesture
-      // (native tracks the drag live, then emits this ONE mutation at drag
-      // end) — one drag gesture = one history action either way.
-      setNativeHistory((h) => pushMaterialHistory(h, {
-        kind: 'text-move',
-        pageNumber: event.pageNumber,
-        annotationId: selected.id,
-        before: { x: selected.x, y: selected.y },
-        after: { x: event.x!, y: event.y! },
-      }));
-      saveTextAnnotations(event.pageNumber, current.map((annotation) => annotation.id === selected.id
-        ? { ...annotation, x: event.x!, y: event.y!, updatedAt: new Date().toISOString() }
-        : annotation));
-    } else if (event.action === 'resize' && Number.isFinite(event.width)) {
-      const width = Math.max(80, event.width!);
-      if (width === selected.width) return;
-      setNativeHistory((h) => pushMaterialHistory(h, {
-        kind: 'text-resize', pageNumber: event.pageNumber, annotationId: selected.id, before: selected.width, after: width,
-      }));
-      saveTextAnnotations(event.pageNumber, current.map((annotation) => annotation.id === selected.id
-        ? { ...annotation, width, updatedAt: new Date().toISOString() }
-        : annotation));
-    } else if (event.action === 'move') {
-      Alert.alert('Move text', 'Long-press the new location on the page.');
     }
   }, [createTextAnnotationFromEvent, ensureTrailingBlankPageAfterContent, saveTextAnnotations, textAnnotationsForMaterialPage]);
 
@@ -1080,15 +1034,8 @@ export default function LectureMaterialWorkspaceScreen() {
         return;
       }
       saveTextAnnotations(action.pageNumber, result.textAnnotations);
-      // A create/delete undo-or-redo that removes the currently-selected
-      // annotation must not leave a selection pointing at nothing.
-      const affectedId = action.kind === 'text-create' || action.kind === 'text-delete' ? action.annotation.id : action.annotationId;
-      const stillPresent = result.textAnnotations.some((a) => a.id === affectedId);
-      if (!stillPresent && selectedTextAnnotationId === affectedId) {
-        setSelectedTextAnnotationId(undefined);
-      }
     },
-    [replaceMaterialPageAnnotationStrokesForMaterial, saveTextAnnotations, selectedTextAnnotationId],
+    [replaceMaterialPageAnnotationStrokesForMaterial, saveTextAnnotations],
   );
 
   const undoNativeCurrentPage = useCallback(() => {
@@ -1179,7 +1126,6 @@ export default function LectureMaterialWorkspaceScreen() {
           annotationsByPage={nativeAnnotationsByPage}
           appendedBlankPageCount={appendedPageCount}
           textAnnotationsByPage={nativeTextAnnotationsByPage}
-          selectedTextAnnotationId={selectedTextAnnotationId}
           onLoadComplete={(event) => handlePdfLoadComplete(event.totalPages, event.sourcePageCount)}
           onPageChanged={(event) => handlePdfPageChanged(event.pageNumber)}
           onViewportChanged={handleNativeViewportChanged}

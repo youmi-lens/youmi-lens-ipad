@@ -69,10 +69,6 @@ public final class ExpoPdfAnnotationModule: Module {
         view.textAnnotationsByPage = value
       }
 
-      Prop("selectedTextAnnotationId") { (view: PdfAnnotationView, value: String?) in
-        view.selectedTextAnnotationId = value
-      }
-
       AsyncFunction("setPageAsync") { (view: PdfAnnotationView, pageNumber: Int) in
         view.setPage(pageNumber)
       }
@@ -167,11 +163,13 @@ enum PdfAnnotatedExporter {
       guard let text = annotation["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
       let x = CGFloat(annotation["x"] as? Double ?? 0), y = CGFloat(annotation["y"] as? Double ?? 0), width = max(40, CGFloat(annotation["width"] as? Double ?? 180))
       let font = UIFont.systemFont(ofSize: max(8, CGFloat(annotation["fontSize"] as? Double ?? 16)))
-      let paragraph = NSMutableParagraphStyle(); paragraph.lineBreakMode = .byWordWrapping
-      let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.label, .paragraphStyle: paragraph]
-      let size = (text as NSString).boundingRect(with: CGSize(width: width, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: attributes, context: nil).size
+      let attributes = MaterialTextGeometry.attributes(fontSize: Double(font.pointSize))
+      let rect = MaterialTextGeometry.pageRect(
+        text: text, x: Double(x), y: Double(y), width: Double(width),
+        fontSize: Double(font.pointSize), anchor: annotation["anchor"] as? String
+      )
       UIGraphicsPushContext(context)
-      (text as NSString).draw(in: CGRect(x: x, y: pageHeight - y - size.height, width: width, height: size.height + 2), withAttributes: attributes)
+      (text as NSString).draw(in: CGRect(x: rect.minX, y: pageHeight - rect.maxY, width: rect.width, height: rect.height), withAttributes: attributes)
       UIGraphicsPopContext()
     }
   }

@@ -83,6 +83,8 @@ export type NativePdfTextAnnotation = {
   y: number;
   width: number;
   fontSize: number;
+  /** Absent on legacy bottom-anchored annotations; no coordinate migration. */
+  anchor?: 'top-left';
   createdAt: string;
   updatedAt: string;
 };
@@ -99,20 +101,17 @@ export type NativePdfTextAnnotationActionEvent = {
    * 'edit' fires with the FINAL typed text for an existing annotationId,
    * even when empty — JS's existing clear-to-delete rule decides from
    * there, exactly as it did for the old Save-button modal.
-   * 'deselect' clears the current selection when the user taps empty space
-   * with something selected. 'paste' still creates immediately with
-   * clipboard content already attached; move/copy/delete act on an
-   * existing annotation.
    */
-  action: 'paste' | 'select' | 'deselect' | 'create' | 'move' | 'resize' | 'edit' | 'copy' | 'delete';
+  action: 'create' | 'edit' | 'delete';
   pageNumber: number;
   annotationId?: string;
   text?: string;
   x?: number;
   y?: number;
-  /** Populated on 'create' and 'resize', in PDF-page points. */
+  /** Populated on 'create', in PDF-page points. */
   width?: number;
   fontSize?: number;
+  anchor?: 'top-left';
 };
 
 export type NativePdfAnnotationMode = 'scroll' | 'pen' | 'highlighter' | 'eraser' | 'text';
@@ -138,7 +137,6 @@ export type ExpoPdfAnnotationViewProps = {
   /** Synthetic, Youmi-owned pages after the immutable source document. */
   appendedBlankPageCount?: number;
   textAnnotationsByPage?: NativePdfTextAnnotationsByPage;
-  selectedTextAnnotationId?: string;
   onPageChanged?: (event: { nativeEvent: NativePdfPageChangedEvent }) => void;
   onLoadComplete?: (event: { nativeEvent: NativePdfLoadCompleteEvent }) => void;
   onViewportChanged?: (event: { nativeEvent: NativePdfViewport }) => void;

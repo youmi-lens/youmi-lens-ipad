@@ -74,9 +74,10 @@ console.log('unrelated behavior is untouched');
 check('bounds/canvas sizing (mediaBox-based) is unchanged — this fix does not touch rotation/canvas-size handling', () => {
   assert.match(exportFn, /let bounds = page\?\.bounds\(for: \.mediaBox\) \?\? finalBounds/);
 });
-check('drawText y-flip convention is unchanged', () => {
+check('drawText converts the shared PDF-page box to UIKit y-down once', () => {
   const textFn = source.slice(source.indexOf('private static func drawText'), source.indexOf('}\n\nprivate func PdfExporterColor'));
-  assert.match(textFn, /pageHeight - y - size\.height/);
+  assert.match(textFn, /MaterialTextGeometry\.pageRect/);
+  assert.match(textFn, /pageHeight - rect\.maxY/);
 });
 
 // Build 55: build 54 fixed only the base page and left strokes drawn raw into

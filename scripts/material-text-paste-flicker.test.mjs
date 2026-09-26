@@ -158,10 +158,10 @@ check('paste and native-create share exactly one annotation-construction path â€
   );
   assert.match(createFn, /id: `material-text-\$\{Date\.now\(\)\}-\$\{Math\.random\(\)\.toString\(36\)\.slice\(2, 8\)\}`/);
   const pasteBranch = materialScreen.slice(
-    materialScreen.indexOf("if (event.action === 'paste')"),
+    materialScreen.indexOf("if (event.action === 'create')"),
     materialScreen.indexOf("const selected = current.find"),
   );
-  assert.match(pasteBranch, /createTextAnnotationFromEvent\(event\.pageNumber, text, event\.x!, event\.y!, 180, 16\);/);
+  assert.match(pasteBranch, /createTextAnnotationFromEvent\(event\.pageNumber, text, event\.x!, event\.y!, event\.width \?\? 180, 16, event\.anchor\);/);
 });
 
 check('the store setter itself already bails out on identical content (belt-and-suspenders with the two checks above)', () => {
@@ -177,13 +177,13 @@ check('an in-progress edit is never double-rendered: the committed draw loop ski
     pdfAnnotationView.indexOf('for (pageNumber, annotations) in pagedTextAnnotations {'),
     pdfAnnotationView.indexOf('  private func drawTextAnnotation('),
   );
-  assert.match(drawLoop, /for annotation in annotations where annotation\.id != editingTextAnnotationId \{/);
+  assert.match(drawLoop, /annotations\.filter \{ \$0\.id != editingTextAnnotationId \}/);
 });
 
 check('the inline editor never recomputes its anchor at commit time â€” it reuses the begin-time origin exactly, so committing cannot visibly jump', () => {
   const commitFn = pdfAnnotationView.slice(
     pdfAnnotationView.indexOf('  private func commitInlineTextEditorIfNeeded('),
-    pdfAnnotationView.indexOf('  @objc private func handleTextDeleteButtonTap('),
+    pdfAnnotationView.indexOf('  private func presentTextActions('),
   );
   assert.match(commitFn, /"x": context\.originX, "y": context\.originY, "width": context\.width, "fontSize": context\.fontSize/);
   assert.doesNotMatch(commitFn, /pdfView\.convert/);

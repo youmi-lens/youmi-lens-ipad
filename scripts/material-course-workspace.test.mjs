@@ -125,19 +125,19 @@ check('ink strokes on the material-scoped (legacy JS fallback) path also call en
 });
 
 check('pasting text calls ensureTrailingBlankPageAfterContent on the page it was pasted onto (via the shared createTextAnnotationFromEvent helper, same as native "create")', () => {
-  const pasteBranch = slice(screen, "if (event.action === 'paste') {", 'const selected = current.find');
-  assert.match(pasteBranch, /createTextAnnotationFromEvent\(event\.pageNumber, text, event\.x!, event\.y!, 180, 16\);/);
+  const pasteBranch = slice(screen, "if (event.action === 'create') {", 'const selected = current.find');
+  assert.match(pasteBranch, /createTextAnnotationFromEvent\(event\.pageNumber, text, event\.x!, event\.y!, event\.width \?\? 180, 16, event\.anchor\);/);
   const createHelper = slice(screen, 'const createTextAnnotationFromEvent = useCallback', 'const handleNativeTextAnnotationAction = useCallback');
   assert.match(createHelper, /ensureTrailingBlankPageAfterContent\(pageNumber\);/);
 });
 
 check('committing a non-empty inline edit can extend the trailing page, but editing does not unconditionally call it every time (only when text is non-empty)', () => {
-  const editBranch = slice(screen, "} else if (event.action === 'edit') {", "} else if (event.action === 'move' && Number.isFinite");
+  const editBranch = slice(screen, "} else if (event.action === 'edit') {", 'const handleNativeModeChange = useCallback');
   assert.match(editBranch, /if \(text\) ensureTrailingBlankPageAfterContent\(event\.pageNumber\);/);
 });
 
 check('committing an inline edit with empty text (the clear-to-delete path) does NOT call ensureTrailingBlankPageAfterContent — removing content must never create a page', () => {
-  const editBranch = slice(screen, "} else if (event.action === 'edit') {", "} else if (event.action === 'move' && Number.isFinite");
+  const editBranch = slice(screen, "} else if (event.action === 'edit') {", 'const handleNativeModeChange = useCallback');
   const beforeEnsureCall = editBranch.slice(0, editBranch.indexOf('if (text) ensureTrailingBlankPageAfterContent'));
   assert.doesNotMatch(beforeEnsureCall, /ensureTrailingBlankPageAfterContent\(/);
 });
@@ -164,42 +164,39 @@ check('text annotations are persisted via the material-scoped store path (replac
 });
 
 check('create (paste and native inline-create) generates a fresh id, captures native x/y, and rejects empty/invalid drops (no text, or non-finite coordinates)', () => {
-  const pasteBranch = slice(screen, "if (event.action === 'paste') {", 'const selected = current.find');
+  const pasteBranch = slice(screen, "if (event.action === 'create') {", 'const selected = current.find');
   assert.match(pasteBranch, /if \(!text \|\| !Number\.isFinite\(event\.x\) \|\| !Number\.isFinite\(event\.y\)\) return;/);
   const createHelper = slice(screen, 'const createTextAnnotationFromEvent = useCallback', 'const handleNativeTextAnnotationAction = useCallback');
   assert.match(createHelper, /id: `material-text-\$\{Date\.now\(\)\}-/);
 });
 
 check('edit is native-inline-editor-driven: the event already carries the FINAL text (no modal round-trip), and the handler writes it back with a fresh updatedAt', () => {
-  const editBranch = slice(screen, "} else if (event.action === 'edit') {", "} else if (event.action === 'move'");
+  const editBranch = slice(screen, "} else if (event.action === 'edit') {", 'const handleNativeModeChange = useCallback');
   assert.doesNotMatch(editBranch, /setEditingText/, 'no JS modal state exists anymore — see material-inline-text-editing.test.mjs');
   assert.match(editBranch, /const text = \(event\.text \?\? ''\)\.trim\(\);/);
   assert.match(editBranch, /\{ \.\.\.annotation, text, updatedAt: new Date\(\)\.toISOString\(\) \}/);
 });
 
-check('move persists the new x/y with a fresh updatedAt, for the SAME annotation id only (map, not a blind overwrite)', () => {
-  const moveBranch = slice(screen, "} else if (event.action === 'move' && Number.isFinite", "} else if (event.action === 'move') {");
-  assert.match(moveBranch, /current\.map\(\(annotation\) => annotation\.id === selected\.id/);
-  assert.match(moveBranch, /\{ \.\.\.annotation, x: event\.x!, y: event\.y!, updatedAt: new Date\(\)\.toISOString\(\) \}/);
+check('object movement is no longer reachable; content editing preserves saved coordinates', () => {
+  const handler = slice(screen, 'const handleNativeTextAnnotationAction = useCallback', 'const handleNativeModeChange = useCallback');
+  assert.doesNotMatch(handler, /event.action === 'move'|event.action === 'resize'/);
 });
 
 check('delete removes exactly the targeted annotation by id and clears the selection — it does not touch any other annotation on the page', () => {
   const deleteBranch = slice(screen, "if (event.action === 'delete') {", "} else if (event.action === 'edit'");
   assert.match(deleteBranch, /current\.filter\(\(annotation\) => annotation\.id !== selected\.id\)/);
-  assert.match(deleteBranch, /setSelectedTextAnnotationId\(undefined\);/);
+  assert.doesNotMatch(deleteBranch, /setSelectedTextAnnotationId/);
 });
 
 check('width and fontSize are captured at creation time and are part of the persisted annotation shape, so re-render/re-layout does not have to re-derive wrapping from scratch', () => {
-  const pasteBranch = slice(screen, "if (event.action === 'paste') {", 'const selected = current.find');
-  assert.match(pasteBranch, /createTextAnnotationFromEvent\(event\.pageNumber, text, event\.x!, event\.y!, 180, 16\)/, 'paste passes fixed 180/16 into the shared helper');
+  const pasteBranch = slice(screen, "if (event.action === 'create') {", 'const selected = current.find');
+  assert.match(pasteBranch, /createTextAnnotationFromEvent\(event\.pageNumber, text, event\.x!, event\.y!, event\.width \?\? 180, 16, event\.anchor\)/, 'commit passes document width and fixed font16 into the shared helper');
   const createHelper = slice(screen, 'const createTextAnnotationFromEvent = useCallback', 'const handleNativeTextAnnotationAction = useCallback');
-  assert.match(createHelper, /x, y, width, fontSize, createdAt: now, updatedAt: now,/, 'width/fontSize are real fields on the persisted annotation, not derived later');
+  assert.match(createHelper, /x, y, width, fontSize, anchor, createdAt: now, updatedAt: now,/, 'width/fontSize are real fields on the persisted annotation, not derived later');
 });
 
-check('a select action only updates local selection state — it never mutates or persists the annotation itself', () => {
-  const selectBranch = slice(screen, "if (event.action === 'select' && event.annotationId) {", 'if (event.action === \'paste\')');
-  assert.match(selectBranch, /setSelectedTextAnnotationId\(event\.annotationId\);/);
-  assert.doesNotMatch(selectBranch, /saveTextAnnotations\(/);
+check('selection state and manipulation props are removed', () => {
+  assert.doesNotMatch(screen, /selectedTextAnnotationId|setSelectedTextAnnotationId/);
 });
 
 check('every text mutation path (edit/move/delete, plus paste/create via the shared createTextAnnotationFromEvent helper) goes through the SAME saveTextAnnotations function — one persistence path, not one per action', () => {

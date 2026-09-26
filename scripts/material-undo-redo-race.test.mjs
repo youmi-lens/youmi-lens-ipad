@@ -107,7 +107,7 @@ console.log('for BOTH directions, via one shared applyNativeHistoryStep helper.'
 
 const applyStepFn = materialScreen.slice(
   materialScreen.indexOf('const applyNativeHistoryStep = useCallback('),
-  materialScreen.indexOf('[replaceMaterialPageAnnotationStrokesForMaterial, saveTextAnnotations, selectedTextAnnotationId],'),
+  materialScreen.indexOf('[replaceMaterialPageAnnotationStrokesForMaterial, saveTextAnnotations],'),
 );
 
 check('applyNativeHistoryStep notifies native of any removed stroke ids before either store call', () => {
