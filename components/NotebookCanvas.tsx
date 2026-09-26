@@ -3173,13 +3173,19 @@ export const NotebookCanvas = memo(function NotebookCanvas({
     return addPencilDoubleTapListener(handleDoubleTap);
   }, [editable, handleDoubleTap]);
 
+  const pageForScroll = useCallback((scrollY: number) => {
+    const { pageStride: stride, totalPages: tp } = pageGeomRef.current;
+    const scale = canvasScaleRef.current || NOTEBOOK_DEFAULT_SCALE;
+    const viewportH = containerSizeRef.current.height || 0;
+    const centerY = (scrollY + viewportH / 2) / scale;
+    return clamp(Math.floor(centerY / Math.max(stride, 1)) + 1, 1, tp);
+  }, []);
+
   const clearPage = useCallback(() => {
     if (strokes.length === 0 && text.length === 0 && images.length === 0) return;
-    // Clear only the page nearest the viewport centre — not the whole notebook.
-    const { pageStride: stride, pageHeight: ph, totalPages: tp } = pageGeomRef.current;
-    const viewportH = containerSizeRef.current.height || 0;
-    const centerY = scrollOffsetYRef.current + viewportH / 2;
-    const pageIdx = clamp(Math.floor(centerY / Math.max(stride, 1)), 0, Math.max(tp - 1, 0));
+    // Use the page indicator's scale-aware target; object assignment stays unchanged.
+    const { pageStride: stride, pageHeight: ph } = pageGeomRef.current;
+    const pageIdx = pageForScroll(scrollOffsetYRef.current) - 1;
     const bandTop = pageIdx * stride;
     const bandBottom = bandTop + ph;
     const strokeCenterY = (s: NoteStroke) => {
@@ -3228,7 +3234,7 @@ export const NotebookCanvas = memo(function NotebookCanvas({
         },
       ],
     );
-  }, [strokes, text, images, onStrokesChange, onTextChange, onImagesChange, recordHistory, t]);
+  }, [strokes, text, images, onStrokesChange, onTextChange, onImagesChange, recordHistory, pageForScroll, t]);
 
   const deleteSelectedObjects = useCallback(() => {
     if (__DEV__) console.info('[NotebookImageAction] delete callback-entered', { selectedIds: Array.from(selectedIdsRef.current) });
@@ -3535,13 +3541,6 @@ export const NotebookCanvas = memo(function NotebookCanvas({
     },
     [pageBadgeOpacity],
   );
-  const pageForScroll = useCallback((scrollY: number) => {
-    const { pageStride: stride, totalPages: tp } = pageGeomRef.current;
-    const scale = canvasScaleRef.current || NOTEBOOK_DEFAULT_SCALE;
-    const viewportH = containerSizeRef.current.height || 0;
-    const centerY = (scrollY + viewportH / 2) / scale;
-    return clamp(Math.floor(centerY / Math.max(stride, 1)) + 1, 1, tp);
-  }, []);
   useEffect(
     () => () => {
       if (pageBadgeTimerRef.current) clearTimeout(pageBadgeTimerRef.current);
