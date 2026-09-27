@@ -40,7 +40,14 @@ export type TranscriptSegment = {
 };
 
 /** A single freehand handwriting point, in canvas pixel coordinates. */
-export type NotePoint = { x: number; y: number };
+/**
+ * `p` (normalized 0...1 Apple Pencil pressure) and `t` (native touch
+ * timestamp) are additive and optional — absent on every historical point,
+ * present only on samples captured through the native pencil sampler (see
+ * `lib/notebookPencilSampler.ts`). No rendering or persistence code depends
+ * on them yet; existing strokes render exactly as before.
+ */
+export type NotePoint = { x: number; y: number; p?: number | null; t?: number };
 
 /** One freehand handwriting stroke on a notebook page. */
 export type NoteStroke = {

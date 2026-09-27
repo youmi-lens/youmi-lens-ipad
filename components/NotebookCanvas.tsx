@@ -77,6 +77,7 @@ import type { NoteImage, NotePoint, NoteStroke } from '@/lib/models';
 import { useT } from '@/lib/i18n';
 import { PressableScale } from '@/components/PressableScale';
 import { persistNotebookImage } from '@/lib/notebookImageStorage';
+import { NotebookPencilSamplerOverlay, type NotebookPencilSampleEvent } from '@/lib/notebookPencilSampler';
 import { shouldStartToolbarTransition } from '@/lib/notebookToolbarTransition.mjs';
 import {
   appendStrokePoint,
@@ -2746,6 +2747,31 @@ export const NotebookCanvas = memo(function NotebookCanvas({
   }, []);
 
   /**
+   * Natural Pen input foundation (Phase 3B-2): the native sampler
+   * (`NotebookPencilSamplerOverlay`) is a pure observer — it never decides
+   * whether a touch is drawing. RNGH's `drawGesture` below still owns every
+   * activation/mode/lifecycle decision exactly as before; this handler only
+   * supplies richer per-sample data (coalesced points + normalized pressure +
+   * timestamp, all read from the same native UITouch) for the 'write' (Pen)
+   * tool specifically, once RNGH has already confirmed a stroke is active.
+   * Highlighter, eraser, select, and scroll are untouched — still driven by
+   * RNGH's own onTouchesMove below, exactly as before this module existed.
+   * `phase !== 'moved'` samples (began/ended/cancelled) are ignored here:
+   * RNGH's onTouchesDown/onTouchesUp remain the sole source of stroke
+   * begin/commit, so there is no risk of a double-start or double-end.
+   */
+  const handleNativePencilSample = useCallback(
+    (event: { nativeEvent: NotebookPencilSampleEvent }) => {
+      if (modeRef.current !== 'write' || !drawingRef.current) return;
+      const { phase, x, y, p, t } = event.nativeEvent;
+      if (phase !== 'moved') return;
+      const canvasPoint = touchToCanvasPoint(x, y);
+      activeInkRef.current?.append({ ...canvasPoint, p, t });
+    },
+    [touchToCanvasPoint],
+  );
+
+  /**
    * The draw / erase gesture.
    *
    * `manualActivation` lets us inspect the pointer type on touch-down before
@@ -3009,7 +3035,12 @@ export const NotebookCanvas = memo(function NotebookCanvas({
 
           if (modeRef.current === 'write' || modeRef.current === 'highlight') {
             strokeMoveSampleCountRef.current += 1;
-            activeInkRef.current?.append(point);
+            // Pen ('write') points now come from the native pencil sampler
+            // (handleNativePencilSample) instead — one authoritative sample
+            // source per tool. Highlighter is untouched: still appended here.
+            if (modeRef.current === 'highlight') {
+              activeInkRef.current?.append(point);
+            }
           } else if (modeRef.current === 'erase') {
             const previous = lastErasePointRef.current ?? point;
             lastErasePointRef.current = point;
@@ -3934,7 +3965,17 @@ export const NotebookCanvas = memo(function NotebookCanvas({
       {/* ---- Long scrollable paper ----
           The gesture lives on the actual ScrollView, not on an absolute overlay
           above it. That keeps finger touches in the scroll view's hit-test path
-          from the beginning; only confirmed stylus input activates drawing. */}
+          from the beginning; only confirmed stylus input activates drawing.
+          NotebookPencilSamplerOverlay WRAPS (does not sit atop as a sibling)
+          the ScrollView specifically so it never wins hit-testing over it: it
+          is an ANCESTOR of whatever view UIKit hit-tests, which is how it
+          receives every touch via the standard gesture-recognizer ancestor
+          chain without blocking or delaying the ScrollView/RNGH beneath it
+          (see NotebookPencilSamplerGestureRecognizer's doc comment). Same
+          frame as the ScrollView (StyleSheet.absoluteFill, zero inset), so its
+          native x/y match RNGH's own touch.x/y — touchToCanvasPoint is reused
+          unchanged in handleNativePencilSample. */}
+      <NotebookPencilSamplerOverlay style={StyleSheet.absoluteFill} onPencilSample={handleNativePencilSample}>
       <GestureDetector gesture={notebookGestures}>
         <AnimatedNotebookScrollView
           ref={scrollViewRef}
@@ -4069,6 +4110,7 @@ export const NotebookCanvas = memo(function NotebookCanvas({
           </View>
         </AnimatedNotebookScrollView>
       </GestureDetector>
+      </NotebookPencilSamplerOverlay>
 
       {/* Scroll-time page indicator — bottom-right, compact, auto-hides. */}
       {pageBadge.visible ? (

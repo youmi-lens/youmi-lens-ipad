@@ -1,0 +1,7 @@
+{
+  "name": "expo-notebook-pencil-sampler",
+  "version": "1.0.0",
+  "description": "Native Apple Pencil x/y/pressure/timestamp sampling for Youmi Lens Notebook (iOS dev/standalone builds only). Input foundation for Natural Pen — no rendering.",
+  "main": "index.ts",
+  "private": true
+}
