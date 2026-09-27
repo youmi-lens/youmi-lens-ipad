@@ -113,7 +113,7 @@ assert.match(plans, /if \(!result\.ok\) \{[\s\S]*plans\.purchaseIncomplete[\s\S]
 // App Review 5.1.1(v): status refresh is dispatched to loadStatus (signed-in)
 // or loadGuestStatus (guest) — refreshCurrentStatus is the single indirection
 // point; assert both the call site and that the dispatch itself is correct.
-assert.match(plans, /const refreshedStatus = await refreshCurrentStatus\(\);/);
+assert.match(plans, /const refreshedStatus = await refreshPaymentStatus\(\);/);
 assert.match(plans, /const refreshCurrentStatus = \(\) => \(isGuest \? loadGuestStatus\(\) : loadStatus\(\)\);/);
 assert.match(plans, /refreshedStatus && confirmsStudentBasicGrant\(refreshedStatus\)/);
 assert.match(plans, /t\('plans\.refreshNeededBody'\)/);
@@ -122,8 +122,8 @@ assert.doesNotMatch(plans, /Student Basic active'[^]*result\.ok/);
 // 11. Refresh Access is backend-first and refreshes quota/status before reporting success.
 assert.match(subscriptions, /\/api\/iap\/entitlement/);
 assert.match(subscriptions, /\/api\/iap\/restore/);
-assert.match(subscriptions, /await syncIOS\(\)/);
-assert.match(plans, /const result = await subscriptionService\.restore\(identity\.token\);[\s\S]*const refreshedStatus = await refreshCurrentStatus\(\);/);
+assert.match(subscriptions, /await boundedPaymentTask\(\(\) => syncIOS\(\)/);
+assert.match(plans, /const result = await subscriptionService\.restore\(identity\.token\);[\s\S]*const refreshedStatus = await refreshPaymentStatus\(\);/);
 assert.match(plans, /plans\.refreshAccess/);
 
 // 12. Status is keyed to Supabase user.id and stale requests are discarded.

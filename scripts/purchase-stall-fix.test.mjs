@@ -134,7 +134,7 @@ test('P15: a refresh timeout does not wipe a previously known active entitlement
 
 test('P9: restore maps timeout through mapError and is bounded', () => {
   assert.match(subs, /if \(isBoundedFetchTimeout\(error\)\) return result\('verify_timeout'\)/);
-  assert.match(plans, /finally \{\s*setBusy\(null\);\s*\}/); // handleRefreshAccess
+  assert.match(plans, /finally \{\s*setBusy\(null\);\s*logDiag\('restore_busy_cleared'\);\s*\}/); // handleRefreshAccess
 });
 
 // ── P11/P13: transaction safety ─────────────────────────────────────────────

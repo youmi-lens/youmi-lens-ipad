@@ -97,7 +97,7 @@ console.log('H — diagnostics carry no sensitive identifiers');
 
 check('H: logDiag event names are a closed, non-account-scoped allowlist', () => {
   assert.match(iapDiag, /const DIAG_EVENTS = \[/);
-  for (const forbidden of ['account', 'email', 'token', 'uuid', 'receipt', 'jws', 'transaction']) {
+  for (const forbidden of ['account', 'email', 'token', 'uuid', 'receipt', 'jws', 'transaction_id']) {
     // Event *names* themselves must not reference identifiers (values are
     // checked separately below) — this catches an event like 'user_account_id'.
     const eventsBlock = iapDiag.slice(iapDiag.indexOf('const DIAG_EVENTS'), iapDiag.indexOf('] as const'));

@@ -1,5 +1,6 @@
 import {
   ErrorCode,
+  ErrorCodeUtils,
   deepLinkToSubscriptionsIOS,
   endConnection,
   fetchProducts,
@@ -17,8 +18,9 @@ import {
 import { AppState, Platform } from 'react-native';
 
 import { API_BASE_URL } from './config';
-import { boundedFetch, isBoundedFetchTimeout } from './boundedFetch';
+import { boundedFetch, BoundedFetchTimeoutError, isBoundedFetchTimeout, SUBSCRIPTION_FETCH_TIMEOUT_MS } from './boundedFetch';
 import { boundedVoidTask } from './boundedTask';
+import { boundedPaymentTask, PaymentTaskTimeoutError } from './boundedPaymentTask';
 import { logDiag } from './iapDiag';
 import { logIap } from './iapLog';
 import type { BackendEntitlement, EntitlementResponse } from './purchases';
@@ -52,6 +54,8 @@ export type SubscriptionResultCode =
   | 'revoked'
   | 'offline'
   | 'verify_timeout'
+  | 'operation_timeout'
+  | 'no_purchase'
   | 'storekit_error'
   | 'presentation_unavailable';
 
@@ -79,6 +83,8 @@ type VerifyResponse = {
 };
 
 const PURCHASE_TIMEOUT_MS = 120_000;
+const STOREKIT_OPERATION_TIMEOUT_MS = 15_000;
+const STOREKIT_SYNC_TIMEOUT_MS = 30_000;
 // finishTransaction is a native StoreKit bridge call with no bound of its own
 // (ExpoIapModule.finishTransaction). By the time it's called here the backend
 // has ALREADY granted (or definitively rejected) the entitlement, so nothing
@@ -102,11 +108,15 @@ const ALL_RESTORABLE_IDS = new Set<string>([
  * backend verify result before this is ever called).
  */
 function finishTransactionBounded(purchase: Purchase, isConsumable: boolean): Promise<void> {
+  logDiag('finish_started');
   return boundedVoidTask(
-    () => finishTransaction({ purchase, isConsumable }),
+    () => finishTransaction({ purchase, isConsumable }).then(() => logDiag('finish_succeeded')),
     FINISH_TRANSACTION_TIMEOUT_MS,
-    () => logIap('finishTransaction timed out; transaction left unfinished for replay/restore'),
-    (error) => logIap('finishTransaction failed', error instanceof Error ? error.name : 'unknown'),
+    () => {
+      logDiag('finish_timeout');
+      logIap('finishTransaction timed out; transaction left unfinished for replay/restore');
+    },
+    () => logDiag('finish_failed'),
   );
 }
 
@@ -124,6 +134,17 @@ function originalTransactionId(purchase: Purchase): string | null {
     : null;
 }
 
+function normalizeStoreKitError(error: unknown): Error {
+  if (error instanceof Error) return error;
+  if (error && typeof error === 'object') {
+    const source = error as { code?: unknown; message?: unknown };
+    const normalized = new Error(typeof source.message === 'string' ? source.message : 'StoreKit purchase failed');
+    normalized.name = typeof source.code === 'string' ? source.code : 'storekit_error';
+    return Object.assign(normalized, { code: source.code });
+  }
+  return new Error('StoreKit purchase failed');
+}
+
 function result(code: SubscriptionResultCode, message?: string): SubscriptionResult {
   const defaults: Record<SubscriptionResultCode, string> = {
     success: 'Student Access is active.',
@@ -139,6 +160,8 @@ function result(code: SubscriptionResultCode, message?: string): SubscriptionRes
     offline: 'Network unavailable. Check your connection and try again.',
     verify_timeout:
       'Purchase verification is taking longer than expected. You will not be charged again. Please refresh access or restore purchases.',
+    operation_timeout: 'The App Store is taking longer than expected. Please try again.',
+    no_purchase: 'No active purchase was found for this Apple Account.',
     storekit_error: 'The Apple purchase could not be completed. Please try again.',
     presentation_unavailable: 'Youmi Lens could not show the Apple purchase screen right now. Please try again.',
   };
@@ -149,47 +172,128 @@ async function fetchJson<T>(url: string, accessToken: string, init?: RequestInit
   // Bounded: a hung backend can no longer leave the Subscribe spinner spinning
   // forever. On timeout boundedFetch rejects with BoundedFetchTimeoutError,
   // which callers map to a recoverable `verify_timeout` result.
-  const response = await boundedFetch(url, {
-    ...init,
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${accessToken}`,
-      ...(init?.headers ?? {}),
-    },
-  });
-  return { status: response.status, payload: (await response.json().catch(() => ({}))) as T };
+  return boundedPaymentTask(async () => {
+    const response = await boundedFetch(url, {
+      ...init,
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${accessToken}`,
+        ...(init?.headers ?? {}),
+      },
+    });
+    return { status: response.status, payload: (await response.json().catch(() => ({}))) as T };
+  }, SUBSCRIPTION_FETCH_TIMEOUT_MS, 'backend_response', () => new BoundedFetchTimeoutError('iap_backend'));
 }
 
 class SubscriptionService {
   private connected = false;
+  private connectionPromise: Promise<void> | null = null;
+  private connectionGeneration = 0;
   private catalog: SubscriptionCatalog = { monthly: null, annual: null };
   private loadPromise: Promise<SubscriptionCatalog> | null = null;
   private purchaseInFlight = false;
+  private restoreInFlight = false;
+  private verificationContext: { accessToken: string; accountId: string } | null = null;
+  private seenTransactions = new Set<string>();
+  private deferredTransactions = new Map<string, Purchase>();
+  private lateVerifications = new Map<string, Promise<void>>();
   private updateSubscription: { remove: () => void } | null = null;
   private errorSubscription: { remove: () => void } | null = null;
-  private pending: { resolve: (purchase: Purchase) => void; reject: (error: Error) => void } | null = null;
+  private pending: {
+    productId: string;
+    accountId: string;
+    startedAt: number;
+    resolve: (purchase: Purchase) => void;
+    reject: (error: Error) => void;
+  } | null = null;
 
   private async connect() {
     if (Platform.OS !== 'ios') throw new Error('Subscriptions are available on iPad.');
     if (this.connected) return;
-    await initConnection();
-    this.connected = true;
+    if (this.connectionPromise) return this.connectionPromise;
+    const generation = this.connectionGeneration;
+    const connecting = (async () => {
+      const initialized = await boundedPaymentTask(() => initConnection(), STOREKIT_OPERATION_TIMEOUT_MS, 'connection');
+      if (!initialized || generation !== this.connectionGeneration) throw new Error('StoreKit connection unavailable');
+      try {
+        this.attachListeners();
+        this.connected = true;
+      } catch (error) {
+        this.updateSubscription?.remove();
+        this.errorSubscription?.remove();
+        this.updateSubscription = null;
+        this.errorSubscription = null;
+        throw error;
+      }
+    })();
+    this.connectionPromise = connecting;
+    try {
+      await connecting;
+    } finally {
+      if (this.connectionPromise === connecting) this.connectionPromise = null;
+    }
+  }
+
+  private attachListeners() {
     this.updateSubscription = purchaseUpdatedListener((purchase) => {
       if (!isSubscriptionProductId(purchase.productId)) return;
       logDiag('purchase_update_received', { productId: purchase.productId });
+      const id = transactionId(purchase);
+      if (!id || this.seenTransactions.has(id)) return;
       const pending = this.pending;
-      this.pending = null;
-      pending?.resolve(purchase);
+      const accountMatches = 'appAccountToken' in purchase &&
+        purchase.appAccountToken?.toLowerCase() === pending?.accountId.toLowerCase();
+      if (pending && purchase.productId === pending.productId && accountMatches &&
+        Number.isFinite(purchase.transactionDate) && purchase.transactionDate >= pending.startedAt) {
+        this.seenTransactions.add(id);
+        pending?.resolve(purchase);
+      } else {
+        if (pending) logDiag('transaction_ignored_wrong_attempt');
+        this.reconcileLateTransaction(purchase);
+      }
     });
     this.errorSubscription = purchaseErrorListener((error) => {
       logDiag('purchase_error_received', { code: String(error?.code ?? 'unknown') });
       const pending = this.pending;
+      if (error.productId && error.productId !== pending?.productId) return;
       this.pending = null;
-      const normalized = new Error(error?.message || 'StoreKit purchase failed');
-      normalized.name = String(error?.code ?? 'storekit_error');
+      const normalized = normalizeStoreKitError(error);
       pending?.reject(normalized);
     });
+  }
+
+  private reconcileLateTransaction(purchase: Purchase) {
+    logDiag('late_transaction_received');
+    const id = transactionId(purchase);
+    const context = this.verificationContext;
+    const accountMatches = context && 'appAccountToken' in purchase &&
+      purchase.appAccountToken?.toLowerCase() === context.accountId.toLowerCase();
+    if (!id || !purchaseToken(purchase) || purchase.purchaseState !== 'purchased') return;
+    if (!context || !accountMatches || this.restoreInFlight) {
+      // Never guess an account for a paid transaction. Preserve it unfinished
+      // in StoreKit for explicit restore; also retry when a matching identity
+      // next becomes available in this connection.
+      this.deferredTransactions.set(id, purchase);
+      if (this.deferredTransactions.size > 256) {
+        this.deferredTransactions.delete(this.deferredTransactions.keys().next().value!);
+      }
+      return;
+    }
+    if (this.seenTransactions.has(id)) return;
+    this.seenTransactions.add(id);
+    this.deferredTransactions.delete(id);
+    const verification = (async () => {
+      const verified = await this.verify(purchase, context.accessToken);
+      // Reconcile account state independently. This never resolves, rejects,
+      // or shows success for an unrelated active UI purchase attempt.
+      if (verified.ok) await this.getEntitlement(context.accessToken);
+    })().catch(() => {
+      logDiag('verify_failed', { reason: 'late_reconciliation' });
+    }).finally(() => {
+      this.lateVerifications.delete(id);
+    });
+    this.lateVerifications.set(id, verification);
   }
 
   /**
@@ -205,7 +309,7 @@ class SubscriptionService {
     if (Platform.OS !== 'ios') return false;
     try {
       await this.connect();
-      const eligible = await isEligibleForIntroOfferIOS(SUBSCRIPTION_GROUP_ID);
+      const eligible = await boundedPaymentTask(() => isEligibleForIntroOfferIOS(SUBSCRIPTION_GROUP_ID), STOREKIT_OPERATION_TIMEOUT_MS, 'intro_eligibility');
       logDiag('intro_eligibility_result', { eligible: eligible === true });
       return eligible === true;
     } catch (error) {
@@ -215,12 +319,17 @@ class SubscriptionService {
   }
 
   async loadProducts(force = false): Promise<SubscriptionCatalog> {
+    if (this.loadPromise) return this.loadPromise;
     if (!force && (this.catalog.monthly || this.catalog.annual)) return this.catalog;
-    if (!force && this.loadPromise) return this.loadPromise;
     logDiag('products_load_start', {});
-    this.loadPromise = (async () => {
+    const generation = this.connectionGeneration;
+    const loading = (async () => {
       await this.connect();
-      const products = await fetchProducts({ skus: [...SUBSCRIPTION_PRODUCT_IDS], type: 'subs' });
+      const products = await boundedPaymentTask(
+        () => fetchProducts({ skus: [...SUBSCRIPTION_PRODUCT_IDS], type: 'subs' }),
+        STOREKIT_OPERATION_TIMEOUT_MS, 'products',
+      );
+      if (generation !== this.connectionGeneration) throw new Error('StoreKit connection changed');
       this.catalog = normalizeSubscriptionCatalog((products ?? []) as ProductSubscription[], SUBSCRIPTION_PRODUCTS);
       for (const plan of ['monthly', 'annual'] as const) {
         const product = this.catalog[plan];
@@ -236,10 +345,11 @@ class SubscriptionService {
       logDiag('products_load_done', {});
       return this.catalog;
     })();
+    this.loadPromise = loading;
     try {
-      return await this.loadPromise;
+      return await loading;
     } finally {
-      this.loadPromise = null;
+      if (this.loadPromise === loading) this.loadPromise = null;
     }
   }
 
@@ -247,7 +357,10 @@ class SubscriptionService {
     if (!accessToken || !isUuid(accountId)) return result('sign_in_required');
     if (!API_BASE_URL) return result('offline');
     if (this.purchaseInFlight) return result('purchase_in_progress');
+    if (this.restoreInFlight) return result('purchase_in_progress');
     this.purchaseInFlight = true;
+    this.verificationContext = { accessToken, accountId };
+    for (const purchase of this.deferredTransactions.values()) this.reconcileLateTransaction(purchase);
     logIap('IAP_PURCHASE_START', productIdForPlan(plan));
     try {
       const catalog = await this.loadProducts();
@@ -304,6 +417,9 @@ class SubscriptionService {
         finish('reject', error);
       }, PURCHASE_TIMEOUT_MS);
       this.pending = {
+        productId: requestedProductId,
+        accountId: appAccountToken,
+        startedAt: Date.now(),
         resolve: (purchase) => finish('resolve', purchase),
         reject: (error) => finish('reject', error),
       };
@@ -322,13 +438,17 @@ class SubscriptionService {
             andDangerouslyFinishTransactionAutomatically: false,
           },
         },
-      }).catch((error) => finish('reject', error instanceof Error ? error : new Error(String(error))));
+      }).catch((error) => finish('reject', normalizeStoreKitError(error)));
     });
   }
 
   private async verify(purchase: Purchase, accessToken: string): Promise<SubscriptionResult> {
+    logDiag('verify_started');
     const signedTransactionInfo = purchaseToken(purchase);
-    if (!signedTransactionInfo) return result('backend_verification_failed');
+    if (!signedTransactionInfo) {
+      logDiag('verify_failed', { reason: 'missing_payload' });
+      return result('backend_verification_failed');
+    }
     let response: { status: number; payload: VerifyResponse };
     try {
       response = await fetchJson<VerifyResponse>(`${API_BASE_URL}/api/iap/apple/verify`, accessToken, {
@@ -341,11 +461,14 @@ class SubscriptionService {
         }),
       });
     } catch (error) {
+      logDiag('verify_failed', { reason: isBoundedFetchTimeout(error) ? 'timeout' : 'network' });
       logIap('IAP_VERIFY_RESULT', isBoundedFetchTimeout(error) ? 'timeout' : 'network');
       return isBoundedFetchTimeout(error) ? result('verify_timeout') : result('offline');
     }
     const payload = response.payload ?? {};
-    if (shouldFinishSubscriptionTransaction(payload)) {
+    const httpOk = response.status >= 200 && response.status < 300;
+    logDiag(httpOk && payload.ok && payload.granted ? 'verify_succeeded' : 'verify_failed');
+    if ((httpOk || response.status === 403 || response.status === 409) && shouldFinishSubscriptionTransaction(payload)) {
       await finishTransactionBounded(purchase, false);
     }
     if (response.status >= 200 && response.status < 300 && payload.ok && payload.granted) {
@@ -360,11 +483,22 @@ class SubscriptionService {
   async restore(accessToken: string | null): Promise<SubscriptionRestoreResult> {
     if (!accessToken) return result('sign_in_required');
     if (!API_BASE_URL) return result('offline');
+    if (this.purchaseInFlight || this.restoreInFlight) return result('purchase_in_progress');
+    this.restoreInFlight = true;
+    logDiag('restore_started');
+    let querying = true;
     try {
+      // Do not verify the same callback concurrently with an explicit restore.
+      await Promise.all(this.lateVerifications.values());
       await this.connect();
-      await syncIOS();
-      const purchases = ((await getAvailablePurchases({ onlyIncludeActiveItemsIOS: false })) as Purchase[] | null) ?? [];
+      await boundedPaymentTask(() => syncIOS(), STOREKIT_SYNC_TIMEOUT_MS, 'restore_sync');
+      const purchases = ((await boundedPaymentTask(
+        () => getAvailablePurchases({ onlyIncludeActiveItemsIOS: false }),
+        STOREKIT_OPERATION_TIMEOUT_MS, 'restore_query',
+      )) as Purchase[] | null) ?? [];
       const eligible = purchases.filter((purchase) => ALL_RESTORABLE_IDS.has(purchase.productId) && purchaseToken(purchase));
+      querying = false;
+      logDiag('verify_started', { source: 'restore' });
       const response = await fetchJson<VerifyResponse>(`${API_BASE_URL}/api/iap/restore`, accessToken, {
         method: 'POST',
         body: JSON.stringify({
@@ -377,10 +511,16 @@ class SubscriptionService {
         }),
       });
       const payload = response.payload ?? {};
+      if (response.status < 200 || response.status >= 300 || !payload.ok) {
+        logDiag('verify_failed', { source: 'restore' });
+        return result('backend_verification_failed');
+      }
+      logDiag('restore_verified');
       const verifiedIds = new Set(payload.verifiedTransactionIds ?? []);
       for (const purchase of eligible) {
         const id = transactionId(purchase);
         if (id && verifiedIds.has(id)) {
+          this.deferredTransactions.delete(id);
           await finishTransactionBounded(purchase, purchase.productId === LEGACY_STUDENT_ACCESS_PRODUCT_IDS[0]);
         }
       }
@@ -392,18 +532,28 @@ class SubscriptionService {
       if (payload.entitlement?.status === 'revoked' || payload.entitlement?.status === 'refunded') {
         return { ...result('revoked'), restoredCount: payload.restoredCount ?? 0 };
       }
-      return { ...result('backend_verification_failed', 'No active purchase was found for this Apple Account.'), restoredCount: payload.restoredCount ?? 0 };
+      logDiag('restore_no_purchase');
+      return { ...result('no_purchase'), restoredCount: payload.restoredCount ?? 0 };
     } catch (error) {
+      logDiag(querying ? 'restore_query_failed' : 'verify_failed', {
+        reason: error instanceof PaymentTaskTimeoutError || isBoundedFetchTimeout(error) ? 'timeout' : 'error',
+      });
       return this.mapError(error);
+    } finally {
+      this.restoreInFlight = false;
     }
   }
 
   async getEntitlement(accessToken: string | null): Promise<EntitlementResponse | null> {
     if (!accessToken || !API_BASE_URL) return null;
+    logDiag('entitlement_refresh_started');
     try {
       const response = await fetchJson<EntitlementResponse>(`${API_BASE_URL}/api/iap/entitlement`, accessToken, { method: 'GET' });
-      return response.status >= 200 && response.status < 300 ? response.payload : null;
+      const succeeded = response.status >= 200 && response.status < 300 && response.payload?.ok;
+      logDiag(succeeded ? 'entitlement_refresh_succeeded' : 'entitlement_refresh_failed');
+      return succeeded ? response.payload : null;
     } catch (error) {
+      logDiag('entitlement_refresh_failed');
       logIap('IAP_ENTITLEMENT_REFRESH', isBoundedFetchTimeout(error) ? 'timeout' : 'error');
       return null;
     }
@@ -415,25 +565,42 @@ class SubscriptionService {
   }
 
   private mapError(error: unknown): SubscriptionResult {
+    if (error instanceof PaymentTaskTimeoutError) return result('operation_timeout');
     if (isBoundedFetchTimeout(error)) return result('verify_timeout');
     const name = error instanceof Error ? error.name.toLowerCase() : '';
     const message = error instanceof Error ? error.message.toLowerCase() : '';
-    if (name === ErrorCode.UserCancelled || name.includes('cancel') || message.includes('cancel')) return result('cancelled');
+    const code = error && typeof error === 'object' && 'code' in error ? error.code : null;
+    // 4.3.1's internal cancellation helper accepts E_USER_CANCELLED, but its
+    // public fromPlatformCode only maps it reliably after stripping E_.
+    const platformCode = typeof code === 'string' && code.startsWith('E_') ? code.slice(2) : code;
+    const nativeCode = typeof platformCode === 'string' || typeof platformCode === 'number'
+      ? ErrorCodeUtils.fromPlatformCode(platformCode, 'ios') : null;
+    if (nativeCode === ErrorCode.UserCancelled || name === ErrorCode.UserCancelled || name.includes('cancel') || message.includes('cancel')) {
+      logDiag('purchase_cancelled');
+      return result('cancelled');
+    }
     if (name === 'presentation_not_active') return result('presentation_unavailable');
-    if (name === ErrorCode.Pending || name === ErrorCode.DeferredPayment) return result('pending');
-    if ([ErrorCode.NetworkError, ErrorCode.RemoteError, ErrorCode.ServiceError, ErrorCode.ServiceDisconnected, ErrorCode.ServiceTimeout].includes(name as ErrorCode)) return result('offline');
+    if ([name, nativeCode].some((code) => code === ErrorCode.Pending || code === ErrorCode.DeferredPayment)) return result('pending');
+    if ([ErrorCode.NetworkError, ErrorCode.RemoteError, ErrorCode.ServiceError, ErrorCode.ServiceDisconnected, ErrorCode.ServiceTimeout].includes((nativeCode ?? name) as ErrorCode)) return result('offline');
     logIap('subscription purchase error', name || 'unknown');
     return result('storekit_error');
   }
 
   cleanup() {
+    this.connectionGeneration += 1;
+    this.pending?.reject(new Error('StoreKit connection closed'));
     this.updateSubscription?.remove();
     this.errorSubscription?.remove();
     this.updateSubscription = null;
     this.errorSubscription = null;
     if (this.connected) void endConnection().catch(() => {});
     this.connected = false;
+    this.connectionPromise = null;
+    this.loadPromise = null;
     this.catalog = { monthly: null, annual: null };
+    this.verificationContext = null;
+    this.deferredTransactions.clear();
+    this.seenTransactions.clear();
   }
 }
 

@@ -19,6 +19,7 @@ import {
   shouldShowPurchaseEntry,
 } from '@/lib/purchases';
 import { logDiag } from '@/lib/iapDiag';
+import { boundedPaymentTask, PAYMENT_UI_WAIT_TIMEOUT_MS } from '@/lib/boundedPaymentTask';
 import { isTrialAvailable, type LoadedSubscriptionProduct, type SubscriptionCatalog } from '@/lib/subscriptionCore';
 import { PREVIEW_PRICES, SUBSCRIPTIONS_LIVE } from '@/lib/subscriptionPreview';
 import type { SubscriptionPlan } from '@/lib/subscriptionProducts';
@@ -93,7 +94,7 @@ export default function PlansScreen() {
     setStatusLoading(true);
     setError(null);
     try {
-      const nextStatus = await fetchPlanStatus(accessToken);
+      const nextStatus = await boundedPaymentTask(() => fetchPlanStatus(accessToken), PAYMENT_UI_WAIT_TIMEOUT_MS, 'plan_status');
       if (requestId !== statusRequestRef.current || activeAccountRef.current !== requestedAccountId) {
         return null;
       }
@@ -138,7 +139,7 @@ export default function PlansScreen() {
     setGuestAccountId(identity.accountId);
     setGuestStatusLoading(true);
     try {
-      const nextStatus = await fetchPlanStatus(identity.accessToken);
+      const nextStatus = await boundedPaymentTask(() => fetchPlanStatus(identity.accessToken), PAYMENT_UI_WAIT_TIMEOUT_MS, 'plan_status');
       setGuestPlanStatus(nextStatus);
       setGuestPlanStatusAccountId(identity.accountId);
       return nextStatus;
@@ -255,6 +256,17 @@ export default function PlansScreen() {
     return { token: identity.accessToken, account: identity.accountId };
   };
   const refreshCurrentStatus = () => (isGuest ? loadGuestStatus() : loadStatus());
+  const refreshPaymentStatus = async () => {
+    logDiag('entitlement_refresh_started');
+    try {
+      const status = await boundedPaymentTask(refreshCurrentStatus, PAYMENT_UI_WAIT_TIMEOUT_MS, 'entitlement_refresh');
+      logDiag(status ? 'entitlement_refresh_succeeded' : 'entitlement_refresh_failed');
+      return status;
+    } catch {
+      logDiag('entitlement_refresh_failed');
+      return null;
+    }
+  };
 
   const handlePurchase = async () => {
     if (purchaseLockRef.current || busy !== null || !purchaseVisible || !selectedProduct) return;
@@ -262,7 +274,7 @@ export default function PlansScreen() {
     setBusy('purchase');
     setAccessRefreshMessage(null);
     try {
-      const identity = await resolvePurchaseIdentity();
+      const identity = await boundedPaymentTask(resolvePurchaseIdentity, PAYMENT_UI_WAIT_TIMEOUT_MS, 'purchase_identity');
       if (!identity) {
         Alert.alert(t('plans.purchaseUnavailableTitle'), t('plans.guestPurchaseUnavailable'));
         return;
@@ -283,7 +295,7 @@ export default function PlansScreen() {
         return;
       }
 
-      const refreshedStatus = await refreshCurrentStatus();
+      const refreshedStatus = await refreshPaymentStatus();
       if (refreshedStatus && confirmsStudentBasicGrant(refreshedStatus)) {
         Alert.alert(t('plans.activeTitle'), t('plans.activeBody'));
       } else {
@@ -292,6 +304,8 @@ export default function PlansScreen() {
           t('plans.refreshNeededBody'),
         );
       }
+    } catch {
+      Alert.alert(t('plans.purchaseUnavailableTitle'), t('plans.guestPurchaseUnavailable'));
     } finally {
       purchaseLockRef.current = false;
       setBusy(null);
@@ -302,13 +316,18 @@ export default function PlansScreen() {
     if (busy !== null) return;
     setBusy('refresh');
     try {
-      const identity = await resolvePurchaseIdentity();
+      const identity = await boundedPaymentTask(resolvePurchaseIdentity, PAYMENT_UI_WAIT_TIMEOUT_MS, 'restore_identity');
       if (!identity) {
         Alert.alert(t('plans.purchaseUnavailableTitle'), t('plans.guestPurchaseUnavailable'));
         return;
       }
       const result = await subscriptionService.restore(identity.token);
-      const refreshedStatus = await refreshCurrentStatus();
+      const refreshedStatus = await refreshPaymentStatus();
+      if (!result.ok && !['no_purchase', 'expired', 'revoked'].includes(result.code)) {
+        setAccessRefreshMessage(result.message);
+        Alert.alert(t('plans.refreshFailed'), result.message);
+        return;
+      }
       if (!refreshedStatus) {
         setAccessRefreshMessage(result.message);
         Alert.alert(t('plans.refreshFailed'), t('plans.refreshFailedBody'));
@@ -317,8 +336,11 @@ export default function PlansScreen() {
       const message = accessMessageForStatus(refreshedStatus, t);
       setAccessRefreshMessage(message);
       Alert.alert(t('plans.refreshed'), message);
+    } catch {
+      Alert.alert(t('plans.refreshFailed'), t('plans.refreshFailedBody'));
     } finally {
       setBusy(null);
+      logDiag('restore_busy_cleared');
     }
   };
   const handleManageSubscription = async () => {

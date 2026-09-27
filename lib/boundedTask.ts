@@ -21,7 +21,7 @@ export function boundedVoidTask(
       onTimeout();
       resolve();
     }, timeoutMs);
-    task()
+    Promise.resolve().then(task)
       .catch((error) => {
         onError?.(error);
       })

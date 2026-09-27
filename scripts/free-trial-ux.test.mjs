@@ -45,7 +45,7 @@ check('FT4: ineligible/default -> normal price UI (the non-trial branch is real,
 check('FT5: the eligibility query fails closed and can never block/alter purchase', () => {
   const fn = subscriptions.slice(subscriptions.indexOf('async getIntroOfferEligibility'), subscriptions.indexOf('async loadProducts'));
   assert.match(fn, /catch \(error\) \{[\s\S]{0,160}return false;\s*\}/, 'any failure must resolve to false, never throw');
-  assert.match(fn, /const eligible = await isEligibleForIntroOfferIOS\(SUBSCRIPTION_GROUP_ID\);/);
+  assert.match(fn, /const eligible = await boundedPaymentTask\(\(\) => isEligibleForIntroOfferIOS\(SUBSCRIPTION_GROUP_ID\), STOREKIT_OPERATION_TIMEOUT_MS, 'intro_eligibility'\);/);
   // purchase() itself must not read eligibility state at all — a purchase
   // proceeds through the SAME unmodified path regardless of trial UI.
   const purchaseFn = subscriptions.slice(subscriptions.indexOf('async purchase('), subscriptions.indexOf('private requestWithTimeout'));
