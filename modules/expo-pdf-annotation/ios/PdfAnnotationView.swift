@@ -1169,7 +1169,7 @@ public final class PdfAnnotationView: ExpoView {
       } else if isMovingSelection {
         if let point = recognizer.confirmedPoints.last { annotationOverlay.updateMove(at: point) }
         if let moved = annotationOverlay.finishMove() {
-          onSelectionMoved(["pageNumber": moved.pageNumber, "strokeIds": moved.strokeIds, "dx": Double(moved.dx), "dy": Double(moved.dy)])
+          onSelectionMoved(moved.payload)
         }
       } else {
         for point in recognizer.confirmedPoints { annotationOverlay.appendSelection(at: point) }
@@ -1230,7 +1230,7 @@ public final class PdfAnnotationView: ExpoView {
       case .move:
         if let first = points.first { annotationOverlay.updateMove(at: first) }
         if let moved = annotationOverlay.finishMove() {
-          onSelectionMoved(["pageNumber": moved.pageNumber, "strokeIds": moved.strokeIds, "dx": Double(moved.dx), "dy": Double(moved.dy)])
+          onSelectionMoved(moved.payload)
         }
       case .scale:
         if points.count >= 2, let scaled = annotationOverlay.finishScale(at: points[0], and: points[1]) {
@@ -2357,6 +2357,8 @@ final class AnnotationOverlay: UIView {
   private var scalePreviewLayers: [String: CAShapeLayer] = [:]
   private var scalePreviewBounds: CGRect?
   private var moveStartPagePoint: CGPoint?
+  /// Page whose ink layer is lifted above its siblings during a drag (see setMoveElevation).
+  private var elevatedPageNumber: Int?
   /// Cheap always-on counters (fixture + DEV recorder read them).
   var perf = InkPerfCounters()
   private var moveOffset: CGPoint = .zero
@@ -2440,6 +2442,7 @@ final class AnnotationOverlay: UIView {
     if moveStartPagePoint != nil { applyMoveTransforms(.zero) }
     moveStartPagePoint = nil
     moveOffset = .zero
+    setMoveElevation(false)
     if handleDrag != nil { cancelHandleDrag() }
     if scaleSession != nil { cancelScale() }
     clearShapeEditPreview()
@@ -2541,6 +2544,7 @@ final class AnnotationOverlay: UIView {
     moveStartPagePoint = point
     moveOffset = .zero
     dispatch(.beginMove)
+    setMoveElevation(true)
     return true
   }
 
@@ -2581,13 +2585,11 @@ final class AnnotationOverlay: UIView {
   func updateMove(at viewPoint: CGPoint) {
     guard let start = moveStartPagePoint, let number = selectionPageNumber,
           let pdfView, let document = pdfView.document, let page = document.page(at: number - 1) else { return }
+    // Deliberately NOT clamped to the source page: selected content is movable content and may follow the finger
+    // across the page boundary. Converting through the SOURCE page is a rigid document-space translation, so the
+    // live preview stays exact over the gap and the next page. Release resolves the destination page and clamps.
     let point = pdfView.convert(viewPoint, to: page)
-    var dx = point.x - start.x, dy = point.y - start.y
-    let bounds = selectedPageBounds(), box = page.bounds(for: .mediaBox)
-    if !bounds.isNull {
-      if bounds.width <= box.width { dx = min(max(dx, box.minX - bounds.minX), box.maxX - bounds.maxX) }
-      if bounds.height <= box.height { dy = min(max(dy, box.minY - bounds.minY), box.maxY - bounds.maxY) }
-    }
+    let dx = point.x - start.x, dy = point.y - start.y
     moveOffset = CGPoint(x: dx, y: dy)
     applyMoveTransforms(moveOffset)
     drawSelectionChrome()
@@ -2602,23 +2604,104 @@ final class AnnotationOverlay: UIView {
     CATransaction.commit()
   }
 
+  /// One completed drag. `toPageNumber`/`transform` are set only when the release landed on a DIFFERENT PDF page:
+  /// `transform` is the exact source-page -> destination-page affine (CGAffineTransform order a,b,c,d,tx,ty) that
+  /// native applied, so JS can persist the identical result from its own authoritative page buckets.
+  struct MoveResult {
+    let pageNumber: Int
+    let strokeIds: [String]
+    let dx: CGFloat
+    let dy: CGFloat
+    var toPageNumber: Int? = nil
+    var transform: [Double]? = nil
+
+    var payload: [String: Any] {
+      var event: [String: Any] = ["pageNumber": pageNumber, "strokeIds": strokeIds, "dx": Double(dx), "dy": Double(dy)]
+      if let toPageNumber, let transform {
+        event["toPageNumber"] = toPageNumber
+        event["transform"] = transform
+      }
+      return event
+    }
+  }
+
+  /// The selection's reference point is the CENTER of its bounds after the drag (one point for the whole group, so
+  /// a multi-stroke selection can never scatter across pages). The page under it decides ownership; a release in the
+  /// gap or beyond the document resolves to the NEAREST page (PDFKit `page(for:nearest:)`), never to nothing.
+  private func transferDestination(from number: Int, dx: CGFloat, dy: CGFloat) -> (page: PDFPage, number: Int)? {
+    guard let pdfView, let document = pdfView.document, let source = document.page(at: number - 1) else { return nil }
+    let bounds = selectedPageBounds()
+    guard !bounds.isNull else { return nil }
+    let reference = CGPoint(x: bounds.midX + dx, y: bounds.midY + dy)
+    guard let target = pdfView.page(for: pdfView.convert(reference, from: source), nearest: true), target !== source else { return nil }
+    let targetNumber = document.index(for: target) + 1
+    return targetNumber > 0 ? (target, targetNumber) : nil
+  }
+
+  /// Source-page space -> destination-page space, through PDFView space, with the drag applied. Three basis points
+  /// carry crop origins, page rotation and continuous-layout offsets exactly (same technique as `pageInkLayer`).
+  private func transferTransform(from source: PDFPage, to target: PDFPage, dx: CGFloat, dy: CGFloat) -> CGAffineTransform? {
+    guard let pdfView else { return nil }
+    func map(_ q: CGPoint) -> CGPoint {
+      pdfView.convert(pdfView.convert(CGPoint(x: q.x + dx, y: q.y + dy), from: source), to: target)
+    }
+    let o = map(.zero), x = map(CGPoint(x: 1, y: 0)), y = map(CGPoint(x: 0, y: 1))
+    return CGAffineTransform(a: x.x - o.x, b: x.y - o.y, c: y.x - o.x, d: y.y - o.y, tx: o.x, ty: o.y)
+  }
+
+  /// Same-page rule (unchanged product behavior): ink may not be released off its own page.
+  private func clampedMove(_ dx: CGFloat, _ dy: CGFloat, page: PDFPage) -> (CGFloat, CGFloat) {
+    let bounds = selectedPageBounds(), box = page.bounds(for: .mediaBox)
+    var dx = dx, dy = dy
+    if !bounds.isNull {
+      if bounds.width <= box.width { dx = min(max(dx, box.minX - bounds.minX), box.maxX - bounds.maxX) }
+      if bounds.height <= box.height { dy = min(max(dy, box.minY - bounds.minY), box.maxY - bounds.maxY) }
+    }
+    return (dx, dy)
+  }
+
+  /// Lifts the SOURCE page's ink layer above its siblings for the duration of a drag, so the content stays visible
+  /// while it crosses the page gap and passes over the next page's layers.
+  private func setMoveElevation(_ on: Bool) {
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    if let previous = elevatedPageNumber { pageInkLayers[previous]?.zPosition = 0 }
+    elevatedPageNumber = nil
+    if on, let number = selectionPageNumber, let layer = pageInkLayer(number) {
+      layer.zPosition = 10_000
+      elevatedPageNumber = number
+    }
+    CATransaction.commit()
+  }
+
   /// Commits the drag into the native model at once (so no stale prop can
-  /// snap the ink back) and reports ONE page-space delta for JS history.
-  func finishMove() -> (pageNumber: Int, strokeIds: [String], dx: CGFloat, dy: CGFloat)? {
+  /// snap the ink back) and reports ONE page-space delta for JS history. A release on
+  /// another PDF page moves the whole selected GROUP into that page's bucket (same ids) atomically.
+  func finishMove() -> MoveResult? {
     guard moveStartPagePoint != nil, let number = selectionPageNumber else { return nil }
     dispatch(.endMove)
-    let dx = moveOffset.x, dy = moveOffset.y
+    var dx = moveOffset.x, dy = moveOffset.y
     // The drag is over: the live offset must be zero BEFORE the strokes are
     // rebuilt at their moved coordinates and the outline is recomputed from
     // them, otherwise the offset would be applied to the outline twice.
     moveStartPagePoint = nil
     moveOffset = .zero
+    setMoveElevation(false)
     guard abs(dx) >= 0.5 || abs(dy) >= 0.5 else {
       applyMoveTransforms(.zero)
       drawSelectionChrome()
       return nil
     }
     let ids = selectedStrokeIds
+    if let destination = transferDestination(from: number, dx: dx, dy: dy) {
+      return commitTransfer(from: number, to: destination, ids: ids, dx: dx, dy: dy)
+    }
+    if let page = pdfView?.document?.page(at: number - 1) { (dx, dy) = clampedMove(dx, dy, page: page) }
+    guard abs(dx) >= 0.5 || abs(dy) >= 0.5 else {
+      applyMoveTransforms(.zero)
+      drawSelectionChrome()
+      return nil
+    }
     pagedStrokes[number] = (pagedStrokes[number] ?? []).map { stroke in
       guard ids.contains(stroke.id) else { return stroke }
       return AnnotationStroke(
@@ -2633,13 +2716,58 @@ final class AnnotationOverlay: UIView {
     syncPageInk()
     CATransaction.commit()
     drawSelectionChrome()
-    return (number, ids.sorted(), dx, dy)
+    return MoveResult(pageNumber: number, strokeIds: ids.sorted(), dx: dx, dy: dy)
+  }
+
+  private func commitTransfer(from number: Int, to destination: (page: PDFPage, number: Int), ids: Set<String>, dx: CGFloat, dy: CGFloat) -> MoveResult? {
+    guard let pdfView, let document = pdfView.document, let source = document.page(at: number - 1),
+          var transform = transferTransform(from: source, to: destination.page, dx: dx, dy: dy) else {
+      applyMoveTransforms(.zero)
+      drawSelectionChrome()
+      return nil
+    }
+    let moving = (pagedStrokes[number] ?? []).filter { ids.contains($0.id) }
+    let groupBounds = selectedPageBounds()
+    guard !moving.isEmpty, !groupBounds.isNull else {
+      applyMoveTransforms(.zero)
+      drawSelectionChrome()
+      return nil
+    }
+    // The released group stays fully on its destination page (same rule as a same-page release).
+    let landed = groupBounds.applying(transform), box = destination.page.bounds(for: .mediaBox)
+    if landed.width <= box.width {
+      if landed.minX < box.minX { transform.tx += box.minX - landed.minX } else if landed.maxX > box.maxX { transform.tx += box.maxX - landed.maxX }
+    }
+    if landed.height <= box.height {
+      if landed.minY < box.minY { transform.ty += box.minY - landed.minY } else if landed.maxY > box.maxY { transform.ty += box.maxY - landed.maxY }
+    }
+    let placed = moving.map { stroke in
+      AnnotationStroke(
+        id: stroke.id, tool: stroke.tool, color: stroke.color, width: stroke.width,
+        opacity: stroke.opacity, points: stroke.points.map { $0.applying(transform) },
+        createdAt: stroke.createdAt,
+        shape: stroke.shape.map { StrokeShape(origin: $0.origin, geometry: $0.geometry.transformed(transform)) })
+    }
+    let remaining = (pagedStrokes[number] ?? []).filter { !ids.contains($0.id) }
+    if remaining.isEmpty { pagedStrokes.removeValue(forKey: number) } else { pagedStrokes[number] = remaining }
+    pagedStrokes[destination.number] = (pagedStrokes[destination.number] ?? []) + placed
+    selectionPageNumber = destination.number
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    for id in ids { savedInkLayers.removeValue(forKey: id)?.removeFromSuperlayer() }
+    syncPageInk()
+    CATransaction.commit()
+    drawSelectionChrome()
+    return MoveResult(
+      pageNumber: number, strokeIds: ids.sorted(), dx: dx, dy: dy, toPageNumber: destination.number,
+      transform: [transform.a, transform.b, transform.c, transform.d, transform.tx, transform.ty].map(Double.init))
   }
 
   func cancelMove() {
     dispatch(.manipulationCancelled)
     moveStartPagePoint = nil
     moveOffset = .zero
+    setMoveElevation(false)
     applyMoveTransforms(.zero)
     drawSelectionChrome()
   }
@@ -4110,6 +4238,17 @@ enum StrokeShapeGeometry: Equatable {
     case let .line(a, b): return .line(a: move(a), b: move(b))
     case let .polygon(v): return .polygon(v.map(move))
     case let .ellipse(c, ax, ay): return .ellipse(center: move(c), ax: ax, ay: ay)
+    }
+  }
+
+  /// Page-to-page transfer (lib/annotationShape.transformGeometry): points map through the full affine, an
+  /// ellipse's axis VECTORS only through its linear part. A same-orientation transfer is a pure translation.
+  func transformed(_ t: CGAffineTransform) -> StrokeShapeGeometry {
+    func linear(_ v: CGPoint) -> CGPoint { CGPoint(x: t.a * v.x + t.c * v.y, y: t.b * v.x + t.d * v.y) }
+    switch self {
+    case let .line(a, b): return .line(a: a.applying(t), b: b.applying(t))
+    case let .polygon(v): return .polygon(v.map { $0.applying(t) })
+    case let .ellipse(c, ax, ay): return .ellipse(center: c.applying(t), ax: linear(ax), ay: linear(ay))
     }
   }
 

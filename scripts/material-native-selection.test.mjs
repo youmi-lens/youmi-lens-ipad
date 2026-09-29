@@ -69,6 +69,13 @@ assert.match(output, /NATIVE_FINGER_HANDLE_PASS scale=0.5/);
 assert.match(output, /NATIVE_FINGER_HANDLE_PASS scale=1.0/);
 assert.match(output, /NATIVE_FINGER_HANDLE_PASS scale=2.0/);
 assert.match(output, /NATIVE_FINGER_HANDLE_PARITY_PASS/);
+// Cross-page selection transfer (RC-1.3): whole selected groups follow one continuous drag onto another PDF page.
+assert.match(output, /NATIVE_CROSS_PAGE_PASS scale=0.5/);
+assert.match(output, /NATIVE_CROSS_PAGE_PASS scale=1.0/);
+assert.match(output, /NATIVE_CROSS_PAGE_PASS scale=2.0/);
+assert.match(output, /NATIVE_CROSS_PAGE_ROTATED_PASS/);
+assert.match(output, /NATIVE_CROSS_PAGE_GAP_PASS/);
+assert.match(output, /NATIVE_CROSS_PAGE_FIXTURE_PASS/);
 assert.equal((output.match(/SELECTION_PASS/g) ?? []).length, 6);
 assert.match(output, /SELECTION_BOX_CORNER_PASS/);
 assert.equal((output.match(/SELECTION_MOVE_PASS/g) ?? []).length, 3);

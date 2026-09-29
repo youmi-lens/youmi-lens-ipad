@@ -67,7 +67,7 @@ import { shapeFromRecognition, shapeToInkPoints } from '@/lib/annotationShape';
 import { recordShapeSnapAttempt, SHAPE_SNAP_TRACE_ENABLED } from '@/lib/shapeSnapTrace';
 import { SHAPE_SNAP_HOLD_MS, SHAPE_SNAP_HOLD_TOLERANCE_PT } from '@/lib/shapeSnapHold';
 import { INK_PROP_GATE_IDLE, gateDecide, gatePencilDown, gatePencilLifted, gateRequestBypass, gateSettled, type InkPropGateState } from '@/lib/inkPropGate';
-import { materialSelectionChange, materialSelectionMove, materialSelectionScale, materialShapeEdit, type MaterialSelection } from '@/lib/materialSelection';
+import { materialSelectionChange, materialSelectionMove, materialSelectionScale, materialSelectionTransfer, materialShapeEdit, type MaterialSelection } from '@/lib/materialSelection';
 import {
   EMPTY_MATERIAL_HISTORY,
   applyMaterialHistoryRedo,
@@ -986,6 +986,30 @@ export default function LectureMaterialWorkspaceScreen() {
   const handleNativeSelectionMoved = useCallback((event: NativePdfSelectionMovedEvent) => {
     const mid = nativeMaterialIdRef.current;
     if (!mid || event.pageNumber <= 0) return;
+    // A release on ANOTHER PDF page moves the whole selected group into that page's bucket (ONE history action,
+    // page ownership + geometry). Native already applied the same transform to its own model.
+    if (event.toPageNumber && event.toPageNumber !== event.pageNumber && event.transform?.length === 6) {
+      const [ta, tb, tc, td, ttx, tty] = event.transform;
+      const transfer = materialSelectionTransfer(
+        { pageNumber: event.pageNumber, strokeIds: event.strokeIds },
+        annotationsForMaterialPage(mid, event.pageNumber),
+        event.toPageNumber,
+        annotationsForMaterialPage(mid, event.toPageNumber),
+        { a: ta, b: tb, c: tc, d: td, tx: ttx, ty: tty },
+      );
+      if (!transfer) return;
+      const transferAction: MaterialHistoryAction = {
+        kind: 'selection-transfer', pageNumber: transfer.fromPage, toPageNumber: transfer.toPage, strokeIds: transfer.movedIds,
+        beforeStrokes: transfer.beforeFromStrokes, afterStrokes: transfer.afterFromStrokes,
+        beforeToStrokes: transfer.beforeToStrokes, afterToStrokes: transfer.afterToStrokes,
+      };
+      setNativeHistory((history) => pushMaterialHistory(history, transferAction));
+      requestImmediateNativeAnnotations();
+      replaceMaterialPageAnnotationStrokesForMaterial(mid, transfer.fromPage, transfer.afterFromStrokes, materialScopeLectureId(mid));
+      replaceMaterialPageAnnotationStrokesForMaterial(mid, transfer.toPage, transfer.afterToStrokes, materialScopeLectureId(mid));
+      setNativeSelection({ pageNumber: transfer.toPage, strokeIds: transfer.movedIds });
+      return;
+    }
     const change = materialSelectionMove(
       { pageNumber: event.pageNumber, strokeIds: event.strokeIds },
       annotationsForMaterialPage(mid, event.pageNumber),
@@ -997,7 +1021,7 @@ export default function LectureMaterialWorkspaceScreen() {
     };
     setNativeHistory((history) => pushMaterialHistory(history, action));
     replaceMaterialPageAnnotationStrokesForMaterial(mid, event.pageNumber, change.afterStrokes, materialScopeLectureId(mid));
-  }, [annotationsForMaterialPage, replaceMaterialPageAnnotationStrokesForMaterial]);
+  }, [annotationsForMaterialPage, replaceMaterialPageAnnotationStrokesForMaterial, requestImmediateNativeAnnotations]);
 
   // One completed two-finger pinch of the selected ink = ONE history action. Native already scaled the ink
   // visually (and in its own model); this persists the same transform from the shared math.
@@ -1210,6 +1234,18 @@ export default function LectureMaterialWorkspaceScreen() {
       requestImmediateNativeAnnotations();
       if (result.removedStrokeIds.length > 0) {
         pdfRef.current?.markStrokeRemovalIntent(result.removedStrokeIds);
+      }
+      if (action.kind === 'selection-transfer') {
+        // Both pages change together (page ownership is part of the action); the group is re-selected where it now lives.
+        replaceMaterialPageAnnotationStrokesForMaterial(mid, action.pageNumber, result.strokes, materialScopeLectureId(mid));
+        for (const other of result.otherPages ?? []) {
+          replaceMaterialPageAnnotationStrokesForMaterial(mid, other.pageNumber, other.strokes, materialScopeLectureId(mid));
+        }
+        if (result.selection) {
+          pdfRef.current?.setSelection(result.selection.pageNumber, result.selection.strokeIds);
+          setNativeSelection(result.selection);
+        }
+        return;
       }
       if (action.kind === 'stroke-add' || action.kind === 'stroke-erase' || action.kind === 'page-clear' || action.kind === 'selection-change' || action.kind === 'selection-move' || action.kind === 'selection-scale' || action.kind === 'shape-edit') {
         if (action.kind === 'stroke-erase' || action.kind === 'page-clear' || action.kind === 'selection-change') {

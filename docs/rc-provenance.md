@@ -40,6 +40,14 @@ Recording engine: **legacy** (unchanged). Backend: **not deployed, not modified*
 - FIX: router gets the finger-on-handle branch (handle > body move > page; two fingers still scale); Notebook passes `onHandle` into the router (same behavior); native `AnnotationOverlay.beginFingerManipulation` (scale -> handle -> move) is what the finger recogniser calls, with a `.handle` mode (live native preview, ONE `onShapeEdited` on release). Recognition, Shape Snap, geometry, hit radii, toolbar, Pencil paths: unchanged.
 - TESTS: new `selection-finger-handle-parity`; native fixture `NATIVE_FINGER_HANDLE_PASS` at 0.5x/1x/2x + rotated page; router cases in `selection-transform`; updated Notebook routing contracts and the shape-edit emit-site count (2 -> 3).
 
+## RC-1.3 — Course Material cross-page selection transfer
+- Commit `fix: allow Course Material selections to move across pages` (after RC-1.2).
+- ROOT CAUSE: the native overlay clamped every drag to the SOURCE page (`updateMove`), `finishMove` rebuilt strokes only inside `pagedStrokes[selectionPageNumber]`, the event carried one page + delta, JS applied `materialSelectionMove` to that one page bucket, and history (`selection-move`) encoded one page. Notebook has no per-page ownership (one continuous canvas), so it never had the limit.
+- FIX: live drag unclamped (source page layer lifted via zPosition so content stays visible over the gap/next page); release resolves the destination page from ONE reference point (center of the group bounds after the drag; gap/beyond-document -> nearest page), clamps the group onto that page, moves the whole group between page buckets (same ids; shapes stay structured) and emits ONE event with `toPageNumber` + the exact source->destination affine; JS applies the same transform (`materialSelectionTransfer`), pushes ONE `selection-transfer` history action (both pages before/after), persists both buckets and keeps the selection; Undo/Redo restore both pages and re-select the group.
+- Export needs no change (draws page N from bucket N); protected export files untouched.
+- TESTS: new `material-cross-page-selection`; native fixture `NATIVE_CROSS_PAGE_*` (0.5x/1x/2x, scroll offsets, rotated destination, gap/beyond/above releases); updated move-event and construction-site contracts.
+- Text keeps its own direct model and is unchanged; Course Material has no image objects.
+
 ## Group 4 — Other explicitly authorized fixes
 - Other-account lecture lookup: **EXCLUDED** — not proven required by an accepted user-facing fix (integrated line's exact-ID ownership is stricter).
 - Legacy recorder health/watchdog: **EXCLUDED — STOPPED FOR REVIEW**. It changes recording lifecycle behavior materially (Decision 2(D) STOP clause). Inclusion would not be a Recording Release PASS.

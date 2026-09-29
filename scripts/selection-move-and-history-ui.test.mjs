@@ -65,20 +65,22 @@ console.log('\nCourse Material wiring');
 const screen = read('app/lecture-material/[lectureId]/[materialId].tsx');
 const native = read('modules/expo-pdf-annotation/ios/PdfAnnotationView.swift');
 check('the screen pushes ONE history action per onSelectionMoved event and persists in page space', () => {
-  const handler = screen.slice(screen.indexOf('const handleNativeSelectionMoved'), screen.indexOf('const handleNativeSelectionMoved') + 900);
-  assert.equal((handler.match(/pushMaterialHistory\(/g) ?? []).length, 1);
+  // Two branches (same-page move; RC-1.3 cross-page transfer) — exactly ONE history action per event in either.
+  const handler = screen.slice(screen.indexOf('const handleNativeSelectionMoved'), screen.indexOf('const handleNativeSelectionScaled'));
+  assert.equal((handler.match(/pushMaterialHistory\(/g) ?? []).length, 2);
   assert.match(handler, /kind: 'selection-move'/);
+  assert.match(handler, /kind: 'selection-transfer'/);
   assert.match(screen, /onSelectionMoved=\{handleNativeSelectionMoved\}/);
 });
 check('native emits onSelectionMoved only when a drag ENDS (never per sample), and only for a Pencil recognizer', () => {
   // Two recognisers (Pencil, finger) each emit exactly ONE event per completed drag, only from finishMove().
-  assert.equal((native.match(/onSelectionMoved\(\[/g) ?? []).length, 2);
-  assert.equal((native.match(/if let moved = annotationOverlay\.finishMove\(\) \{\s*onSelectionMoved\(\[/g) ?? []).length, 2);
+  assert.equal((native.match(/onSelectionMoved\(moved\.payload\)/g) ?? []).length, 2);
+  assert.equal((native.match(/if let moved = annotationOverlay\.finishMove\(\) \{\s*onSelectionMoved\(moved\.payload\)/g) ?? []).length, 2);
   const ended = native.slice(native.indexOf('case .ended:', native.indexOf('handleSelectionGesture')));
   assert.ok(ended.indexOf('onSelectionMoved(') > 0 && ended.indexOf('onSelectionMoved(') < ended.indexOf('case .cancelled'));
   assert.match(native, /gesture\.allowedTouchTypes = \[NSNumber\(value: UITouch\.TouchType\.pencil\.rawValue\)\]/);
 });
-check('native move works in page space and clamps ink to its own page', () => {
+check('native move works in page space; a release is clamped onto the page it lands on (RC-1.3: the source page is not a prison)', () => {
   assert.match(native, /func beginMoveIfHit\(/);
   assert.match(native, /pdfView\.convert\(viewPoint, to: page\)/);
   assert.match(native, /box\.minX - bounds\.minX/);

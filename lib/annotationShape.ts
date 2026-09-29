@@ -248,6 +248,31 @@ export function translateInkStroke<T extends { points: Pt[]; shape?: AnnotationS
   return isStructuredStroke(stroke) ? { ...stroke, points, shape: translateShape(stroke.shape, dx, dy) } : { ...stroke, points };
 }
 
+/**
+ * Page-to-page transfer transform, CGAffineTransform convention: x' = a*x + c*y + tx, y' = b*x + d*y + ty.
+ * Between same-orientation PDF pages it is a pure translation; rotated pages add a 90-degree linear part.
+ */
+export type PageAffine = { a: number; b: number; c: number; d: number; tx: number; ty: number };
+
+export const affinePoint = (m: PageAffine, p: Pt): Pt => ({ x: m.a * p.x + m.c * p.y + m.tx, y: m.b * p.x + m.d * p.y + m.ty });
+const affineVector = (m: PageAffine, v: Pt): Pt => ({ x: m.a * v.x + m.c * v.y, y: m.b * v.x + m.d * v.y });
+
+export function transformGeometry(geometry: ShapeGeometry, m: PageAffine): ShapeGeometry {
+  if (geometry.kind === 'line') return { kind: 'line', a: affinePoint(m, geometry.a), b: affinePoint(m, geometry.b) };
+  if (geometry.kind === 'polygon') return { kind: 'polygon', vertices: geometry.vertices.map((v) => affinePoint(m, v)) };
+  return { kind: 'ellipse', center: affinePoint(m, geometry.center), ax: affineVector(m, geometry.ax), ay: affineVector(m, geometry.ay) };
+}
+
+export function transformShape(shape: AnnotationShape, m: PageAffine): AnnotationShape {
+  return { origin: shape.origin, geometry: transformGeometry(shape.geometry, m) };
+}
+
+/** Maps an ink stroke (points AND structured geometry together) through `m`; identity, style and width are preserved. */
+export function transformInkStroke<T extends { points: Pt[]; shape?: AnnotationShape }>(stroke: T, m: PageAffine): T {
+  const points = stroke.points.map((p) => ({ ...p, ...affinePoint(m, p) }));
+  return isStructuredStroke(stroke) ? { ...stroke, points, shape: transformShape(stroke.shape, m) } : { ...stroke, points };
+}
+
 /** The stroke rebuilt from edited geometry: authoritative `shape`, regenerated `points`. */
 export function strokeWithShape<T extends { points: Pt[]; shape?: AnnotationShape }>(stroke: T, shape: AnnotationShape): T {
   return { ...stroke, shape, points: shapeToInkPoints(shape) };

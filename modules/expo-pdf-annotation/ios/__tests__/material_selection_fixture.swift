@@ -651,6 +651,228 @@ final class MaterialSelectionFixture: UIResponder, UIApplicationDelegate {
       overlay.setSelection(pageNumber: 1, ids: [])
       print("NATIVE_FINGER_HANDLE_PARITY_PASS")
 
+      // ================= CROSS-PAGE selection transfer (RC-1.3) =================
+      // Selected content is MOVABLE content: one continuous drag from page 1 onto page 2 (or 3) commits the whole
+      // group to the destination page bucket — same ids, page-space geometry, ONE event, selection kept.
+      func hw(_ id: String, _ x0: Double, _ y0: Double) -> [String: Any] {
+        var pts: [[Double]] = []
+        for i in 0..<6 { pts.append([x0 + Double(i) * 4, y0 + (i % 2 == 0 ? 0 : 6)]) }
+        return ["id": id, "tool": "pen", "color": "#061B34", "width": 2.4, "points": pts]
+      }
+      func crossDict() -> [String: Any] {
+        let ring: [[Double]] = [[200, 500], [300, 500], [250, 600], [200, 500]]
+        let page1: [[String: Any]] = [
+          hw("h", 100, 700), hw("e", 130, 700), hw("l1", 160, 700), hw("l2", 190, 700), hw("o", 220, 700),
+          ["id": "tri", "tool": "pen", "color": "#061B34", "width": 3.0, "points": ring, "shape": triShape],
+          ["id": "circ", "tool": "pen", "color": "#061B34", "width": 3.0, "points": circPoints, "shape": circShape],
+          ["id": "ln", "tool": "pen", "color": "#061B34", "width": 3.0, "points": [[100.0, 150.0], [220.0, 190.0]], "shape": lineShape],
+          quadStroke,
+          ["id": "far", "tool": "pen", "color": "#061B34", "width": 2.4, "points": [[500.0, 60.0], [520.0, 70.0]]],
+        ]
+        let page2: [[String: Any]] = [["id": "p2-existing", "tool": "pen", "color": "#061B34", "width": 2.4, "points": [[300.0, 300.0], [310.0, 310.0]]]]
+        return ["1": page1, "2": page2]
+      }
+      func dictFrom(_ model: [Int: [AnnotationStroke]]) -> [String: Any] {
+        var out: [String: Any] = [:]
+        for (page, strokes) in model where !strokes.isEmpty { out[String(page)] = strokes.map { viewer.serializeStroke($0) } }
+        return out
+      }
+      func allIds() -> [String] { overlay.pagedStrokes.values.flatMap { $0 }.map(\.id) }
+      func nearPt(_ p: CGPoint, _ q: CGPoint, _ eps: CGFloat = 1e-4) -> Bool { abs(p.x - q.x) < eps && abs(p.y - q.y) < eps }
+      func boundsOf(_ strokes: [AnnotationStroke]) -> CGRect {
+        strokes.flatMap(\.points).reduce(CGRect.null) { $0.union(CGRect(origin: $1, size: .zero)) }
+      }
+
+      func crossCase(_ label: String, ids: [String], via: String, scale: CGFloat, targetRotation: Int, scrollY: CGFloat) {
+        first.rotation = 0
+        second.rotation = targetRotation
+        viewer.pdfView.scaleFactor = scale
+        viewer.pdfView.go(to: PDFDestination(page: first, at: CGPoint(x: 0, y: scrollY)))
+        viewer.pdfView.layoutDocumentView()
+        func a(_ x: CGFloat, _ y: CGFloat) -> CGPoint { viewer.pdfView.convert(CGPoint(x: x, y: y), from: first) }
+        func b(_ x: CGFloat, _ y: CGFloat) -> CGPoint { viewer.pdfView.convert(CGPoint(x: x, y: y), from: second) }
+        let tag = "\(label) scale \(scale) target-rotation \(targetRotation) scroll \(scrollY)"
+        loadShapes(crossDict())
+        overlay.setSelection(pageNumber: 1, ids: [])
+
+        // --- select (Box / Lasso by Pencil, or programmatic for shapes / mixed groups)
+        var selIds = ids
+        if via == "box" {
+          overlay.beginSelection(at: a(80, 670), shape: "rect")
+          overlay.appendSelection(at: a(280, 735))
+          selIds = overlay.finishSelection()?.strokeIds ?? []
+        } else if via == "lasso" {
+          overlay.beginSelection(at: a(80, 670), shape: "lasso")
+          for q in [CGPoint(x: 285, y: 668), CGPoint(x: 290, y: 738), CGPoint(x: 75, y: 738)] { overlay.appendSelection(at: a(q.x, q.y)) }
+          selIds = overlay.finishSelection()?.strokeIds ?? []
+        } else {
+          overlay.setSelection(pageNumber: 1, ids: ids)
+        }
+        precondition(!selIds.isEmpty && overlay.selectionStateKind != "IDLE", "selection made (\(tag))")
+        if via != "set" { precondition(Set(selIds) == ["h", "e", "l1", "l2", "o"], "\(via) selects the whole handwritten word (\(tag)): \(selIds)") }
+        let idSet = Set(selIds)
+        let beforeAll = overlay.pagedStrokes
+        let before = (beforeAll[1] ?? []).filter { idSet.contains($0.id) }
+        let totalBefore = allIds().count
+        let bb = boundsOf(before)
+        let c = CGPoint(x: bb.midX, y: bb.midY)
+
+        // --- ONE continuous drag: finger starts on the selection, ends over page 2
+        precondition(overlay.beginMoveIfHit(at: a(c.x, c.y), padPt: SelectionLimits.touchPadPt), "finger on the selected content starts the move (\(tag))")
+        let startView = a(c.x, c.y), endView = b(300, 400)
+        overlay.updateMove(at: endView)
+        precondition(c.y + overlay.moveOffset.y < 0, "the live preview is NOT clamped to the source page: the content is carried below page 1 (\(tag)): \(overlay.moveOffset)")
+        precondition(overlay.pageInkLayers[1]!.zPosition == 10_000, "source page layer is lifted so the content stays visible over page 2 (\(tag))")
+        let liveLayer = overlay.savedInkLayers[selIds[0]]!
+        precondition(!liveLayer.isHidden && nearPt(CGPoint(x: liveLayer.affineTransform().tx, y: liveLayer.affineTransform().ty), overlay.moveOffset, 1e-6), "the preview layer follows the finger across the gap (\(tag))")
+        let delta = CGPoint(x: endView.x - startView.x, y: endView.y - startView.y)
+        let snapshotBeforeRelease = overlay.pagedStrokes
+        precondition(snapshotBeforeRelease == beforeAll, "nothing is committed or persisted per drag sample (\(tag))")
+
+        let res = overlay.finishMove()!
+        precondition(res.pageNumber == 1 && res.toPageNumber == 2 && res.transform?.count == 6, "release on page 2 reports a page transfer (\(tag)): \(String(describing: res.toPageNumber))")
+        precondition(Set(res.strokeIds) == idSet, "event carries exactly the selected ids (\(tag))")
+        let t = CGAffineTransform(a: res.transform![0], b: res.transform![1], c: res.transform![2], d: res.transform![3], tx: res.transform![4], ty: res.transform![5])
+        if targetRotation == 0 {
+          precondition(abs(t.a - 1) < 1e-9 && abs(t.d - 1) < 1e-9 && abs(t.b) < 1e-9 && abs(t.c) < 1e-9, "same-orientation pages: pure translation (\(tag)): \(t)")
+        } else {
+          precondition(abs(t.a * t.d - t.b * t.c - 1) < 1e-6 && (abs(t.a) < 1e-6 || abs(t.b) < 1e-6), "rotated destination: an exact 90-degree linear part (\(tag)): \(t)")
+        }
+        // ownership: whole group moved atomically, no ghost, no duplicate, nothing lost
+        let onOne = Set((overlay.pagedStrokes[1] ?? []).map(\.id)), onTwo = (overlay.pagedStrokes[2] ?? []).map(\.id)
+        precondition(idSet.isDisjoint(with: onOne), "no ghost left on the source page (\(tag))")
+        precondition(idSet.isSubset(of: Set(onTwo)), "the whole group belongs to page 2 (\(tag))")
+        precondition(Set(allIds()).count == allIds().count && allIds().count == totalBefore, "no duplicate ids, nothing lost (\(tag))")
+        precondition((overlay.pagedStrokes[1] ?? []).first { $0.id == "far" }?.points == [CGPoint(x: 500, y: 60), CGPoint(x: 520, y: 70)], "unselected ink untouched (\(tag))")
+        precondition(overlay.pagedStrokes[2]!.first { $0.id == "p2-existing" }?.points == [CGPoint(x: 300, y: 300), CGPoint(x: 310, y: 310)], "existing destination ink untouched (\(tag))")
+        // WYSIWYG: every moved point sits exactly where the finger carried it on screen; relative geometry is exact.
+        let after = overlay.pagedStrokes[2]!.filter { idSet.contains($0.id) }
+        for stroke in before {
+          let moved = after.first { $0.id == stroke.id }!
+          precondition(moved.points.count == stroke.points.count, "point count preserved (\(tag))")
+          for (i, p) in stroke.points.enumerated() {
+            let onScreenBefore = a(p.x, p.y)
+            let onScreenAfter = b(moved.points[i].x, moved.points[i].y)
+            precondition(nearPt(onScreenAfter, CGPoint(x: onScreenBefore.x + delta.x, y: onScreenBefore.y + delta.y)), "content lands exactly under the finger drag at scale \(scale) (\(tag)): \(onScreenAfter)")
+          }
+          if let shape = stroke.shape {
+            precondition(moved.shape?.origin == shape.origin && moved.shape?.geometry == shape.geometry.transformed(t), "structured shape stays structured with transformed geometry (\(tag))")
+          } else { precondition(moved.shape == nil, "ordinary ink stays ordinary (\(tag))") }
+        }
+        let refBefore = before[0].points[0]
+        for stroke in before.dropFirst() {
+          let dBefore = hypot(stroke.points[0].x - refBefore.x, stroke.points[0].y - refBefore.y)
+          let m0 = after.first { $0.id == before[0].id }!.points[0], m1 = after.first { $0.id == stroke.id }!.points[0]
+          precondition(abs(hypot(m1.x - m0.x, m1.y - m0.y) - dBefore) < 1e-6, "group relative geometry preserved exactly (\(tag))")
+        }
+        // selection persists on the destination page; chrome re-homed; drag state clean
+        let single = selIds.count == 1 && before[0].shape != nil
+        precondition(overlay.selectionStateKind == (single ? "SELECTED_SHAPE" : "SELECTED_INK"), "selection persists after transfer (\(tag)): \(overlay.selectionStateKind)")
+        precondition(overlay.selectionPageNumber == 2, "selection now lives on page 2 (\(tag))")
+        precondition((single ? overlay.handleLayer?.superlayer : overlay.selectionLayer?.superlayer) === overlay.pageInkLayers[2], "outline/handles re-homed to the destination page (\(tag))")
+        precondition(overlay.moveOffset == .zero && overlay.moveStartPagePoint == nil && overlay.pageInkLayers[1]!.zPosition == 0, "drag state cleared (\(tag))")
+        precondition(res.payload["toPageNumber"] as? Int == 2 && (res.payload["transform"] as? [Double])?.count == 6, "event payload (\(tag))")
+
+        // --- UNDO / REDO echo (JS restores both page buckets, then re-selects where the group now lives)
+        let afterModel = overlay.pagedStrokes
+        overlay.loadAnnotations(crossDict()); overlay.syncPageInk()
+        overlay.setSelection(pageNumber: 1, ids: selIds)
+        precondition(idSet.isSubset(of: Set((overlay.pagedStrokes[1] ?? []).map(\.id))) && idSet.isDisjoint(with: Set((overlay.pagedStrokes[2] ?? []).map(\.id))), "Undo echo: back on the source page, no ghost on page 2 (\(tag))")
+        precondition(overlay.pagedStrokes[1]!.filter { idSet.contains($0.id) } == before, "Undo restores the exact original geometry (\(tag))")
+        precondition(overlay.selectionStateKind != "IDLE" && overlay.selectionPageNumber == 1, "Undo re-selects the group on the source page (\(tag))")
+        overlay.loadAnnotations(dictFrom(afterModel)); overlay.syncPageInk()
+        overlay.setSelection(pageNumber: 2, ids: selIds)
+        precondition(overlay.pagedStrokes[2]!.filter { idSet.contains($0.id) } == after && idSet.isDisjoint(with: Set((overlay.pagedStrokes[1] ?? []).map(\.id))), "Redo restores the exact transferred geometry on page 2 (\(tag))")
+        precondition(Set(allIds()).count == allIds().count, "no duplicate ids after Undo/Redo (\(tag))")
+
+        // --- subsequent manipulation on the DESTINATION page
+        let ab = boundsOf(overlay.pagedStrokes[2]!.filter { idSet.contains($0.id) })
+        let d = CGPoint(x: ab.midX, y: ab.midY)
+        if single {
+          let geometry = overlay.pagedStrokes[2]!.first { $0.id == selIds[0] }!.shape!.geometry
+          let h = geometry.handles[0]
+          precondition(overlay.beginFingerManipulation(at: [b(h.x, h.y)]) == .handle, "finger handle edit still works on the destination page (\(tag))")
+          overlay.updateHandleDrag(at: b(h.x + 12, h.y - 12))
+          let edit = overlay.finishHandleDrag(at: b(h.x + 12, h.y - 12))
+          precondition(edit?.pageNumber == 2 && edit?.strokeId == selIds[0], "handle edit reports the destination page (\(tag))")
+          overlay.clearShapeEditPreview()
+          overlay.loadAnnotations(dictFrom(afterModel)); overlay.syncPageInk()
+          overlay.setSelection(pageNumber: 2, ids: selIds)
+        }
+        precondition(overlay.beginMoveIfHit(at: b(d.x, d.y), padPt: SelectionLimits.touchPadPt), "body move still works on the destination page (\(tag))")
+        overlay.updateMove(at: b(d.x + 10, d.y - 10))
+        let again = overlay.finishMove()
+        precondition(again?.pageNumber == 2 && again?.toPageNumber == nil && abs((again?.dx ?? 0) - 10) < 0.01 && abs((again?.dy ?? 0) + 10) < 0.01, "second move stays a same-page move on page 2 (\(tag)): \(String(describing: again?.dx))")
+        let d2 = CGPoint(x: d.x + 10, y: d.y - 10)
+        precondition(overlay.beginScale(at: b(d2.x - 8, d2.y), and: b(d2.x + 8, d2.y)), "pinch begins on the destination page (\(tag))")
+        let scaled = overlay.finishScale(at: b(d2.x - 12, d2.y), and: b(d2.x + 12, d2.y))
+        precondition(scaled?.pageNumber == 2 && (scaled?.factor ?? 1) > 1.2, "pinch scale still works on the destination page (\(tag)): \(String(describing: scaled?.factor))")
+        overlay.setSelection(pageNumber: 1, ids: [])
+        second.rotation = 0
+      }
+
+      let crossGroups: [(String, [String], String)] = [
+        ("ordinary ink", ["h"], "set"),
+        ("Box word", [], "box"),
+        ("Lasso word", [], "lasso"),
+        ("quadrilateral", ["quad"], "set"),
+        ("triangle", ["tri"], "set"),
+        ("ellipse", ["circ"], "set"),
+        ("line", ["ln"], "set"),
+        ("mixed group", ["h", "e", "quad", "tri"], "set"),
+      ]
+      for scale: CGFloat in [0.5, 1, 2] {
+        for (label, ids, via) in crossGroups { crossCase(label, ids: ids, via: via, scale: scale, targetRotation: 0, scrollY: 720) }
+        print("NATIVE_CROSS_PAGE_PASS scale=\(scale)")
+      }
+      // scroll offsets + a rotated destination page (exact 90-degree linear part, WYSIWYG placement)
+      crossCase("Box word scrolled", ids: [], via: "box", scale: 1, targetRotation: 0, scrollY: 300)
+      crossCase("quadrilateral scrolled", ids: ["quad"], via: "set", scale: 2, targetRotation: 0, scrollY: 200)
+      crossCase("Lasso word rotated destination", ids: [], via: "lasso", scale: 1, targetRotation: 90, scrollY: 720)
+      crossCase("ellipse rotated destination", ids: ["circ"], via: "set", scale: 1, targetRotation: 90, scrollY: 720)
+      crossCase("mixed rotated destination", ids: ["h", "e", "quad", "tri"], via: "set", scale: 0.5, targetRotation: 270, scrollY: 720)
+      print("NATIVE_CROSS_PAGE_ROTATED_PASS")
+
+      // --- release in the page GAP / beyond the document: deterministic, never lost, never off-page
+      func releaseAt(_ endOf: (CGPoint) -> CGPoint) -> (page: Int, pts: [CGPoint])? {
+        second.rotation = 0
+        viewer.pdfView.scaleFactor = 1
+        viewer.pdfView.go(to: PDFDestination(page: first, at: CGPoint(x: 0, y: 720)))
+        viewer.pdfView.layoutDocumentView()
+        loadShapes(crossDict())
+        overlay.setSelection(pageNumber: 1, ids: ["h", "e"])
+        let bb = boundsOf((overlay.pagedStrokes[1] ?? []).filter { ["h", "e"].contains($0.id) })
+        let c = CGPoint(x: bb.midX, y: bb.midY)
+        precondition(overlay.beginMoveIfHit(at: viewer.pdfView.convert(c, from: first), padPt: SelectionLimits.touchPadPt), "gap begin")
+        overlay.updateMove(at: endOf(c))
+        let r = overlay.finishMove()
+        let landedPage = r?.toPageNumber ?? 1
+        let box = document.page(at: landedPage - 1)!.bounds(for: .mediaBox)
+        let moved = (overlay.pagedStrokes[landedPage] ?? []).filter { ["h", "e"].contains($0.id) }
+        precondition(moved.count == 2, "the group is never lost in the gap (landed on page \(landedPage))")
+        let mb = boundsOf(moved)
+        precondition(mb.minX >= box.minX - 1e-6 && mb.maxX <= box.maxX + 1e-6 && mb.minY >= box.minY - 1e-6 && mb.maxY <= box.maxY + 1e-6, "released content stays fully on its page: \(mb) in \(box)")
+        precondition(Set(allIds()).count == allIds().count, "no duplicates after a gap release")
+        overlay.setSelection(pageNumber: 1, ids: [])
+        return (landedPage, moved.flatMap(\.points))
+      }
+      let gapEnd: (CGPoint) -> CGPoint = { c in viewer.pdfView.convert(CGPoint(x: c.x, y: -6), from: first) }
+      let gap1 = releaseAt(gapEnd), gap2 = releaseAt(gapEnd)
+      precondition(gap1 != nil && gap2 != nil && gap1!.page == gap2!.page && gap1!.pts == gap2!.pts, "a gap release is deterministic")
+      let beyond = releaseAt { _ in viewer.pdfView.convert(CGPoint(x: 300, y: -6000), from: second) }
+      precondition(beyond?.page == 3, "released beyond the last page: nearest valid page (3), not lost: \(String(describing: beyond?.page))")
+      let above = releaseAt { _ in viewer.pdfView.convert(CGPoint(x: 300, y: 6000), from: first) }
+      precondition(above?.page == 1, "released above the first page: stays on page 1, clamped inside it")
+      print("NATIVE_CROSS_PAGE_GAP_PASS gap=page\(gap1!.page)")
+      first.rotation = 0
+      second.rotation = 0
+      viewer.pdfView.scaleFactor = 1
+      viewer.pdfView.go(to: first)
+      viewer.pdfView.layoutDocumentView()
+      loadShapes(shapeDict())
+      overlay.setSelection(pageNumber: 1, ids: [])
+      print("NATIVE_CROSS_PAGE_FIXTURE_PASS")
+
 
       // ================= Selection interaction (state machine, finger move, pinch scale) =================
       first.rotation = 0

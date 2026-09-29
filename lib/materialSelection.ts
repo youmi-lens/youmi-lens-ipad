@@ -1,4 +1,4 @@
-import { dragShapeHandle, isStructuredStroke, strokeWithShape, translateInkStroke } from './annotationShape.ts';
+import { dragShapeHandle, isStructuredStroke, strokeWithShape, transformInkStroke, translateInkStroke, type PageAffine } from './annotationShape.ts';
 import { scaleInkStroke } from './selectionTransform.ts';
 import type { MaterialAnnotationStroke } from './models';
 
@@ -42,6 +42,50 @@ export function materialSelectionMove(
   if (!strokes.some(moves)) return null;
   const afterStrokes = strokes.map((stroke) => moves(stroke) ? translateInkStroke(stroke, dx, dy) : stroke);
   return { beforeStrokes: strokes, afterStrokes };
+}
+
+export type MaterialSelectionTransfer = {
+  fromPage: number;
+  toPage: number;
+  /** Ids that moved (stable, original order). */
+  movedIds: string[];
+  beforeFromStrokes: MaterialAnnotationStroke[];
+  afterFromStrokes: MaterialAnnotationStroke[];
+  beforeToStrokes: MaterialAnnotationStroke[];
+  afterToStrokes: MaterialAnnotationStroke[];
+};
+
+/**
+ * One completed drag whose release landed on a DIFFERENT PDF page. The selected group leaves the source page bucket
+ * and joins the destination bucket atomically: same stable ids, geometry mapped through `affine` (source-page space
+ * -> destination-page space, native's exact transform). Structured shapes stay structured; legacy viewport strokes
+ * and unselected ink are untouched. Returns null when nothing selectable moved.
+ */
+export function materialSelectionTransfer(
+  selection: MaterialSelection,
+  fromStrokes: MaterialAnnotationStroke[],
+  toPage: number,
+  toStrokes: MaterialAnnotationStroke[],
+  affine: PageAffine,
+): MaterialSelectionTransfer | null {
+  if (!Number.isInteger(toPage) || toPage < 1 || toPage === selection.pageNumber) return null;
+  if (![affine.a, affine.b, affine.c, affine.d, affine.tx, affine.ty].every(Number.isFinite)) return null;
+  const strokeIds = new Set(selection.strokeIds);
+  const isMoved = (stroke: MaterialAnnotationStroke) => stroke.coordSpace === 'pdfPage' && strokeIds.has(stroke.id);
+  const moving = fromStrokes.filter(isMoved);
+  if (moving.length === 0) return null;
+  const movedIdSet = new Set(moving.map((stroke) => stroke.id));
+  // A destination that somehow already holds an id (stale echo) must not end up with a duplicate.
+  const destinationKept = toStrokes.filter((stroke) => !movedIdSet.has(stroke.id));
+  return {
+    fromPage: selection.pageNumber,
+    toPage,
+    movedIds: moving.map((stroke) => stroke.id),
+    beforeFromStrokes: fromStrokes,
+    afterFromStrokes: fromStrokes.filter((stroke) => !movedIdSet.has(stroke.id)),
+    beforeToStrokes: toStrokes,
+    afterToStrokes: [...destinationKept, ...moving.map((stroke) => transformInkStroke(stroke, affine))],
+  };
 }
 
 /**

@@ -138,6 +138,12 @@ export type NativePdfSelectionMovedEvent = {
   strokeIds: string[];
   dx: number;
   dy: number;
+  /**
+   * Present ONLY when the release landed on a different PDF page: the destination page and the exact
+   * source-page -> destination-page affine [a, b, c, d, tx, ty] (CGAffineTransform order) native applied.
+   */
+  toPageNumber?: number;
+  transform?: number[];
 };
 
 /**

@@ -110,7 +110,8 @@ check('shape survives every native<->store crossing (prop out, commit in, eraser
   const swift = read('modules/expo-pdf-annotation/ios/PdfAnnotationView.swift');
   assert.match(swift, /if let shape = stroke\.shape \{ payload\["shape"\] = shape\.json \}/, 'serializeStroke carries the shape (used by commit AND page replacement)');
   assert.match(swift, /a\.opacity == b\.opacity && a\.points == b\.points && a\.shape == b\.shape/, 'render identity includes the shape');
-  assert.equal((swift.match(/AnnotationStroke\(/g) ?? []).length, 4, 'every construction site (parse, commit, move, scale) is shape-aware');
+  assert.equal((swift.match(/AnnotationStroke\(/g) ?? []).length, 5, 'every construction site (parse, commit, move, scale, cross-page transfer) is shape-aware');
+  assert.match(swift, /shape: stroke\.shape\.map \{ StrokeShape\(origin: \$0\.origin, geometry: \$0\.geometry\.transformed\(transform\)\) \}\)/, 'a cross-page transfer keeps the structured geometry');
   assert.match(swift, /shape: stroke\.shape\.map \{ StrokeShape\(origin: \$0\.origin, geometry: \$0\.geometry\.scaled\(about: center, by: factor\)\) \}\)/, 'scale keeps the structured geometry');
   assert.match(swift, /shape: StrokeShape\.parse\(item\["shape"\]\)/);
   assert.match(swift, /shape: inProgressShape/);

@@ -36,6 +36,16 @@ export function boundsOfStrokes(strokes: readonly { points: readonly Pt[] }[]): 
 export const boundsCenter = (b: Bounds): Pt => ({ x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 });
 export const boundsSpan = (b: Bounds): number => Math.max(b.maxX - b.minX, b.maxY - b.minY);
 
+/**
+ * SHARED PRODUCT SEMANTIC (both workspaces): selected content is MOVABLE CONTENT — its origin canvas/page is never a
+ * movement prison. When a workspace keeps per-page ownership (Course Material: PDF page buckets) the destination is
+ * decided by ONE reference point for the whole selected group: the CENTER of the selection bounds after the drag.
+ * Notebook's continuous canvas has no per-page ownership, so the same drag is a plain translation.
+ */
+export function selectionReferencePoint(bounds: Bounds, dx = 0, dy = 0): Pt {
+  return { x: (bounds.minX + bounds.maxX) / 2 + dx, y: (bounds.minY + bounds.maxY) / 2 + dy };
+}
+
 /** True when `p` is inside the selected region grown by `padUnits` (= padPt / screen scale). */
 export function insideSelectionRegion(bounds: Bounds | null, p: Pt, padUnits: number): boolean {
   return !!bounds && p.x >= bounds.minX - padUnits && p.x <= bounds.maxX + padUnits && p.y >= bounds.minY - padUnits && p.y <= bounds.maxY + padUnits;

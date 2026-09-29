@@ -60,6 +60,21 @@ export type MaterialHistoryAction =
       afterStrokes: MaterialAnnotationStroke[];
     }
   | {
+      /**
+       * One completed drag whose release landed on ANOTHER PDF page: the selected group changes page bucket.
+       * Encodes BOTH pages' exact arrays before and after, so Undo/Redo restore geometry AND page ownership.
+       */
+      kind: 'selection-transfer';
+      /** Source page. */
+      pageNumber: number;
+      toPageNumber: number;
+      strokeIds: string[];
+      beforeStrokes: MaterialAnnotationStroke[];
+      afterStrokes: MaterialAnnotationStroke[];
+      beforeToStrokes: MaterialAnnotationStroke[];
+      afterToStrokes: MaterialAnnotationStroke[];
+    }
+  | {
       /** One completed structured-shape handle drag: exact geometry before and after. */
       kind: 'shape-edit';
       pageNumber: number;
@@ -120,6 +135,10 @@ export type MaterialHistoryApplyResult = {
    * an add) are never subject to that guard, so this is empty for those.
    */
   removedStrokeIds: string[];
+  /** Full stroke arrays for OTHER pages this step also changes (a cross-page transfer touches two pages). */
+  otherPages?: { pageNumber: number; strokes: MaterialAnnotationStroke[] }[];
+  /** Where the selection lives after this step (a transfer's Undo/Redo re-selects the group on its page). */
+  selection?: { pageNumber: number; strokeIds: string[] };
 };
 
 /** Reverses `action`, given the CURRENT strokes/text for its page. */
@@ -147,6 +166,14 @@ export function applyMaterialHistoryUndo(
     case 'selection-scale':
     case 'shape-edit':
       return { strokes: action.beforeStrokes, textAnnotations, removedStrokeIds: [] };
+    case 'selection-transfer':
+      return {
+        strokes: action.beforeStrokes,
+        textAnnotations,
+        removedStrokeIds: [],
+        otherPages: [{ pageNumber: action.toPageNumber, strokes: action.beforeToStrokes }],
+        selection: { pageNumber: action.pageNumber, strokeIds: action.strokeIds },
+      };
     case 'selection-change': {
       const beforeIds = new Set(action.beforeStrokes.map((stroke) => stroke.id));
       return {
@@ -208,6 +235,14 @@ export function applyMaterialHistoryRedo(
     case 'selection-scale':
     case 'shape-edit':
       return { strokes: action.afterStrokes, textAnnotations, removedStrokeIds: [] };
+    case 'selection-transfer':
+      return {
+        strokes: action.afterStrokes,
+        textAnnotations,
+        removedStrokeIds: [],
+        otherPages: [{ pageNumber: action.toPageNumber, strokes: action.afterToStrokes }],
+        selection: { pageNumber: action.toPageNumber, strokeIds: action.strokeIds },
+      };
     case 'selection-change': {
       const afterIds = new Set(action.afterStrokes.map((stroke) => stroke.id));
       return {
