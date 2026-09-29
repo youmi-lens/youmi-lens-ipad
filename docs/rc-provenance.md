@@ -31,6 +31,9 @@ Recording engine: **legacy** (unchanged). Backend: **not deployed, not modified*
 - FOCUSED TESTS: `course-restore-on-commit`, `course-deletion-race`, `legacy-ghost-course-derivation`
 - RC COMMITS: `b56f8fc`, `90be5da`
 
+## RC-1.1 — lint-neutral cleanup
+- Commit `fix: keep RC course restore integration lint-neutral` (single commit after the provenance commit; touches only `lib/store.tsx` + this doc). `restoreCourseIfDeletedForNewCommit` moved from an in-provider `useCallback` to a module-level function taking `(courseId, courses, setCourses, currentUserId)`; `createLecture`/`saveInProgressLecture` deps are `[currentUserId]` (previously the callback's own deps were `[currentUserId]`, so identity behavior is unchanged). Course restore/deletion semantics unchanged; focused course tests, full suite (same 3 baseline failures), tsc, diff-check pass.
+
 ## Group 4 — Other explicitly authorized fixes
 - Other-account lecture lookup: **EXCLUDED** — not proven required by an accepted user-facing fix (integrated line's exact-ID ownership is stricter).
 - Legacy recorder health/watchdog: **EXCLUDED — STOPPED FOR REVIEW**. It changes recording lifecycle behavior materially (Decision 2(D) STOP clause). Inclusion would not be a Recording Release PASS.
@@ -60,7 +63,7 @@ Recording engine: **legacy** (unchanged). Backend: **not deployed, not modified*
 ## Gate results (from Documents-located RC worktree)
 - Full JS suite: 181 pass / 3 fail of 184 — the 3 are the true eb79b71 baseline failures with identical signatures (`cloud-sync-canonical-course-id`, `lecture-session-resume-playback`, `recording-caption-pause-resume`); no new regression.
 - `tsc --noEmit`: 0 errors. `git diff --check`: clean.
-- ESLint: 81 errors / 49 warnings vs baseline 80 / 41. +1 error is `lib/store.tsx` rules-of-hooks (one more instance of the pre-existing hooks-after-early-return pattern); +8 warnings in accepted new files (4 `no-require-imports`, 4 `no-unused-vars` in tests).
+- ESLint: RC-1.1 = 80 errors / 49 warnings vs pristine baseline 80 / 41 — zero new errors in any file. (RC-1 initially had 81: the group-3 `restoreCourseIfDeletedForNewCommit` was a `useCallback` after the provider's early return; RC-1.1 made it a module-level function with identical semantics.) +8 warnings are in accepted new files (4 `no-require-imports`, 4 `no-unused-vars` in tests).
 - Backend vitest (read-only, `/Users/summer/Documents/youmi-lens`): 844 pass / 4 fail (missing `stripe` package in that checkout; title-guard and staging-launcher tests against the backend's own uncommitted state). Backend repo unmodified.
 
 ## BACKEND SOURCE/DEPLOYMENT REPRODUCIBILITY DEBT (OPEN)

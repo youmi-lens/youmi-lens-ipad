@@ -491,6 +491,25 @@ function writeCourseDeletion(userId: string, courseId: string, courseName: strin
   attempt({ deleted_at: deletedAt, deletion_updated_at: now, updated_at: now }, 2);
 }
 
+// Shared by createLecture and saveInProgressLecture — see the call sites for why a brand-new commit must never be
+// allowed to land on a deleted course. Mirrors restoreCourse's own field-freshness contract exactly (same
+// deletionUpdatedAt clock, same cloud write) so a later explicit delete on another device still wins if it is
+// genuinely newer. Module-level (not a hook) so it adds no hook call after the provider's early return.
+function restoreCourseIfDeletedForNewCommit(
+  courseId: string | undefined,
+  currentCourses: Course[],
+  setCourses: (updater: (prev: Course[]) => Course[]) => void,
+  currentUserId: string | null | undefined,
+): void {
+  const patch = courseRestorePatchForNewCommit(courseId, currentCourses);
+  if (!patch) return;
+  const now = new Date().toISOString();
+  setCourses((prev) =>
+    prev.map((c) => (c.id === patch.courseId ? { ...c, deletedAt: null, deletionUpdatedAt: now, deletedReason: null } : c)),
+  );
+  if (currentUserId) writeCourseDeletion(currentUserId, patch.courseId, patch.courseName, null, now);
+}
+
 // A legacy course (no courses row, name-derived from recordings.course) has
 // nowhere for a delete/restore decision to live durably. Without a row here,
 // the next merge on ANY device — including this one, after a relaunch —
@@ -1533,22 +1552,8 @@ export function DataProvider({ children }: { children: ReactNode }) {
     return { ok: true, course };
   }, [currentUserId]);
 
-  // Shared by createLecture and saveInProgressLecture — see the call sites for why a brand-new commit must never be
-  // allowed to land on a deleted course. Mirrors restoreCourse's own field-freshness contract exactly (same
-  // deletionUpdatedAt clock, same cloud write) so a later explicit delete on another device still wins if it is
-  // genuinely newer.
-  const restoreCourseIfDeletedForNewCommit = useCallback((courseId: string | undefined) => {
-    const patch = courseRestorePatchForNewCommit(courseId, coursesRef.current);
-    if (!patch) return;
-    const now = new Date().toISOString();
-    setCourses((prev) =>
-      prev.map((c) => (c.id === patch.courseId ? { ...c, deletedAt: null, deletionUpdatedAt: now, deletedReason: null } : c)),
-    );
-    if (currentUserId) writeCourseDeletion(currentUserId, patch.courseId, patch.courseName, null, now);
-  }, [currentUserId]);
-
   const createLecture = useCallback((input: NewLectureInput): Lecture => {
-    restoreCourseIfDeletedForNewCommit(input.courseId);
+    restoreCourseIfDeletedForNewCommit(input.courseId, coursesRef.current, setCourses, currentUserId);
     const lecture: Lecture = {
       id: input.id ?? makeId('lecture'),
       courseId: input.courseId,
@@ -1584,7 +1589,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
     };
     setLectures((prev) => [...prev, lecture]);
     return lecture;
-  }, [restoreCourseIfDeletedForNewCommit]);
+  }, [currentUserId]);
 
   // Resilient cloud write for recordings. Fire-and-forget by contract (local
   // state already updated; a failed push is retried on the next merge). The
@@ -1717,8 +1722,8 @@ export function DataProvider({ children }: { children: ReactNode }) {
   // first call creates the row with status 'in_progress'; later calls patch it.
   // Keeps prior audio if a fresh segment URI isn't provided this save.
   const saveInProgressLecture = useCallback((input: NewLectureInput): Lecture => {
-    // Same stale-courseId hazard as createLecture — see restoreCourseIfDeletedForNewCommit above.
-    restoreCourseIfDeletedForNewCommit(input.courseId);
+    // Same stale-courseId hazard as createLecture — see restoreCourseIfDeletedForNewCommit.
+    restoreCourseIfDeletedForNewCommit(input.courseId, coursesRef.current, setCourses, currentUserId);
     const id = input.id ?? makeId('lecture');
     let saved: Lecture | null = null;
     setLectures((prev) => {
@@ -1798,7 +1803,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
       return [...prev, lecture];
     });
     return saved ?? ({ id } as Lecture);
-  }, [restoreCourseIfDeletedForNewCommit]);
+  }, [currentUserId]);
 
   const renameCourse = useCallback((courseId: string, newName: string) => {
     const trimmed = newName.trim();
