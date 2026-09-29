@@ -118,7 +118,10 @@ export default function RecordingScreen() {
       setSourceLanguage(pair.sourceLanguage); setTranslationLanguage(pair.translationLanguage);
     }).finally(() => setContentPreferencesLoaded(true));
   }, [resumeLecture]);
-  const course = getCourse(resumeLecture?.courseId ?? params.courseId);
+  // Canonical id only — never title/name (same discipline as the same-name course ownership bugs this
+  // app has already been burned by once). Scopes unresolved-recording recovery to the CURRENT course.
+  const currentCourseId = resumeLecture?.courseId ?? params.courseId ?? '';
+  const course = getCourse(currentCourseId);
   const courseName = course?.name ?? t('recording.defaultCourse');
   // One stable lecture identity owns both the local draft and (when gated on)
   // exactly one native durable recording session.
@@ -138,12 +141,23 @@ export default function RecordingScreen() {
     dataLoaded && !isResume && !isGuest && !visualFixture,
     pendingLectureId,
     activeRecoveryLectureIds,
+    currentCourseId,
+    lectures,
   );
+  // P0 (2026-09-11): a single recoverable session used to silently hijack EVERY param-less "Start New
+  // Lecture" tap with no user-facing choice. Recording safety (never orphan real audio) and user intent
+  // (let them actually start something new) are separate concerns: once the owner explicitly chooses
+  // "Start New Recording" for a matched session in this mount, that match must never re-block or
+  // re-redirect this screen. The recoverable lecture itself is NOT touched — it stays exactly as
+  // recoverable as before, reachable from its own course page.
+  const [dismissedSingleMatchId, setDismissedSingleMatchId] = useState<string | null>(null);
+  const singleMatchPendingChoice =
+    unresolvedGuard.singleMatch !== null && unresolvedGuard.singleMatch.lectureId !== dismissedSingleMatchId;
   const unresolvedGuardHandledRef = useRef(false);
   useEffect(() => {
     if (isResume || isGuest || visualFixture) return;
     if (!unresolvedGuard.checked || unresolvedGuardHandledRef.current) return;
-    if (unresolvedGuard.singleMatch) {
+    if (unresolvedGuard.singleMatch && singleMatchPendingChoice) {
       const matchedLectureId = unresolvedGuard.singleMatch.lectureId;
       const matchedLecture = lectures.find((l) => l.id === matchedLectureId);
       // The guard only returns current-account active IDs. Keep this local
@@ -151,7 +165,23 @@ export default function RecordingScreen() {
       // remain an orphaned recovery artifact, never be adopted by a new route.
       if (matchedLecture?.status === 'in_progress') {
         unresolvedGuardHandledRef.current = true;
-        router.replace({ pathname: '/recording', params: { lectureId: matchedLectureId } });
+        Alert.alert(
+          t('recording.unresolvedFoundTitle'),
+          t('recording.unresolvedFoundBody'),
+          [
+            {
+              text: t('recording.startNewAnyway'),
+              style: 'cancel',
+              // The ref stays true: this exact match is fully resolved for this mount (see
+              // singleMatchPendingChoice) and must never re-alert; the fresh recording just continues.
+              onPress: () => setDismissedSingleMatchId(matchedLectureId),
+            },
+            {
+              text: t('recording.resume'),
+              onPress: () => router.replace({ pathname: '/recording', params: { lectureId: matchedLectureId } }),
+            },
+          ],
+        );
         return;
       }
     }
@@ -166,7 +196,7 @@ export default function RecordingScreen() {
         [{ text: t('common.ok'), onPress: () => router.back() }],
       );
     }
-  }, [isResume, isGuest, visualFixture, unresolvedGuard, lectures, router, t]);
+  }, [isResume, isGuest, visualFixture, unresolvedGuard, singleMatchPendingChoice, lectures, router, t]);
 
   const {
     engine: recordingEngine,
@@ -607,7 +637,9 @@ export default function RecordingScreen() {
     // resolve, and never proceed if it found something (the effect above
     // handles redirecting/blocking in that case). See
     // useUnresolvedRecordingGuard.
-    if (!isResume && (!dataLoaded || !unresolvedGuard.checked || unresolvedGuard.singleMatch || unresolvedGuard.ambiguous)) return;
+    // singleMatchPendingChoice (not the raw singleMatch object): once the owner chooses Start New, the
+    // stale non-null match must stop blocking or the screen hangs at "Preparing microphone…" forever.
+    if (!isResume && (!dataLoaded || !unresolvedGuard.checked || singleMatchPendingChoice || unresolvedGuard.ambiguous)) return;
     autoStarted.current = true;
     void startRecording().then((started) => {
       if (__DEV__) console.info('[recording] automatic local recording result', { started });
@@ -618,7 +650,7 @@ export default function RecordingScreen() {
     });
   // The recorder and caption starters intentionally run once after permission resolves.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visualFixture, granted, isGuest, isResume, continueRequested, contentPreferencesLoaded, recoveryChecked, recoverableSession, dataLoaded, unresolvedGuard]);
+  }, [visualFixture, granted, isGuest, isResume, continueRequested, contentPreferencesLoaded, recoveryChecked, recoverableSession, dataLoaded, unresolvedGuard, singleMatchPendingChoice]);
 
   // Keep this fresh for the mount-once AppState listener below.
   isRecordingRef.current = isRecording;

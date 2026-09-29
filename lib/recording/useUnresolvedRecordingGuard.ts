@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { listRecoverableSessions, type DurableRecordingSession } from '@/modules/expo-durable-recorder';
 
-import { ownedUnresolvedRecoverableSessions } from './policy.mjs';
+import { courseScopedUnresolvedSessions, ownedUnresolvedRecoverableSessions } from './policy.mjs';
 
 export type UnresolvedRecordingGuard = {
   /** Whether the lookup has resolved (or was skipped because `enabled` is false). */
@@ -32,8 +32,15 @@ export function useUnresolvedRecordingGuard(
   enabled: boolean,
   excludeLectureId: string,
   activeRecoveryLectureIds: readonly string[],
+  courseId: string,
+  activeLectures: readonly { id: string; courseId: string }[],
 ): UnresolvedRecordingGuard {
   const [state, setState] = useState<UnresolvedRecordingGuard>({ checked: false, singleMatch: null, ambiguous: false });
+  // Read when the async native lookup lands (freshest lecture data) without making the lookup
+  // re-run on every lecture-list change: the effect's own deps stay [enabled, excludeLectureId,
+  // activeRecoveryLectureIds, courseId].
+  const activeLecturesRef = useRef(activeLectures);
+  activeLecturesRef.current = activeLectures;
 
   useEffect(() => {
     if (!enabled) {
@@ -49,7 +56,12 @@ export function useUnresolvedRecordingGuard(
         // current-account, active lecture IDs are authoritative ownership;
         // unknown, deleted, and cross-account sessions stay preserved but
         // cannot block or be adopted by this fresh-recording flow.
-        const matches = ownedUnresolvedRecoverableSessions(sessions, excludeLectureId, activeRecoveryLectureIds);
+        const owned = ownedUnresolvedRecoverableSessions(sessions, excludeLectureId, activeRecoveryLectureIds);
+        // P0 (2026-09-12) COURSE SCOPING: recovery belongs to a course, not the whole account. A native
+        // session carries only `lectureId`; a candidate is proven to belong to `courseId` only through its
+        // own active lecture's canonical courseId (exact id, never a title/name). An unfinished recording in
+        // another course has zero effect on this course's "Start New Lecture"; it stays preserved on disk.
+        const matches = courseScopedUnresolvedSessions(owned, activeLecturesRef.current, courseId);
         if (matches.length === 0) setState({ checked: true, singleMatch: null, ambiguous: false });
         else if (matches.length === 1) setState({ checked: true, singleMatch: matches[0], ambiguous: false });
         else setState({ checked: true, singleMatch: null, ambiguous: true });
@@ -64,7 +76,7 @@ export function useUnresolvedRecordingGuard(
     return () => {
       mounted = false;
     };
-  }, [enabled, excludeLectureId, activeRecoveryLectureIds]);
+  }, [enabled, excludeLectureId, activeRecoveryLectureIds, courseId]);
 
   return state;
 }

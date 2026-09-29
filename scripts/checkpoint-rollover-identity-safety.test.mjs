@@ -190,15 +190,52 @@ check('the guard is only consulted for the param-less path — an explicit lectu
 check('exactly one real unresolved match redirects to it via the SAME existing /recording route with an explicit lectureId — reusing the existing recovery UI, not inventing a new one', () => {
   const effectBody = recordingScreen.slice(
     recordingScreen.indexOf('useEffect(() => {\n    if (isResume || isGuest || visualFixture) return;'),
-    recordingScreen.indexOf('useEffect(() => {\n    if (isResume || isGuest || visualFixture) return;') + 1600,
+    recordingScreen.indexOf('useEffect(() => {\n    if (isResume || isGuest || visualFixture) return;') + 2600,
   );
   assert.match(effectBody, /router\.replace\(\{ pathname: '\/recording', params: \{ lectureId: matchedLectureId \} \}\)/);
+});
+
+console.log('\nFIX C2 (2026-09-11) — a single match must offer a real choice, never silently and permanently hijack "Start New Lecture"');
+
+const guardEffectBody = () => recordingScreen.slice(
+  recordingScreen.indexOf('useEffect(() => {\n    if (isResume || isGuest || visualFixture) return;'),
+  recordingScreen.indexOf('useEffect(() => {\n    if (isResume || isGuest || visualFixture) return;') + 2600,
+);
+check('a single match is no longer an automatic, silent router.replace — it shows an Alert with both a Resume and a Start-New option', () => {
+  const effectBody = guardEffectBody();
+  assert.match(effectBody, /t\('recording\.unresolvedFoundTitle'\)/);
+  assert.match(effectBody, /t\('recording\.unresolvedFoundBody'\)/);
+  assert.match(effectBody, /text: t\('recording\.startNewAnyway'\)/);
+  assert.match(effectBody, /text: t\('recording\.resume'\)/);
+  const resumeIdx = effectBody.indexOf("text: t('recording.resume')");
+  const startNewIdx = effectBody.indexOf("text: t('recording.startNewAnyway')");
+  const replaceIdx = effectBody.indexOf('router.replace(');
+  assert.ok(startNewIdx > -1 && resumeIdx > startNewIdx, 'Start New must be offered before/alongside Resume, never as an afterthought');
+  assert.ok(replaceIdx > resumeIdx, 'router.replace must be reachable only from the Resume choice, not unconditionally');
+});
+
+check('choosing "Start New" never deletes, finishes, or otherwise mutates the old recoverable lecture — it only records that this exact match was dismissed for this mount', () => {
+  const effectBody = guardEffectBody();
+  const startNewOnPress = effectBody.slice(
+    effectBody.indexOf("text: t('recording.startNewAnyway')"),
+    effectBody.indexOf('},', effectBody.indexOf("text: t('recording.startNewAnyway')")),
+  );
+  assert.match(startNewOnPress, /onPress: \(\) => setDismissedSingleMatchId\(matchedLectureId\)/);
+  assert.doesNotMatch(startNewOnPress, /delete|discard|finish|updateLecture/i);
+});
+
+check('a dismissed single match stops blocking: the pending-choice flag is derived from the dismissed id', () => {
+  assert.match(recordingScreen, /const \[dismissedSingleMatchId, setDismissedSingleMatchId\] = useState<string \| null>\(null\);/);
+  assert.match(
+    recordingScreen,
+    /const singleMatchPendingChoice =\s*\n\s*unresolvedGuard\.singleMatch !== null && unresolvedGuard\.singleMatch\.lectureId !== dismissedSingleMatchId;/,
+  );
 });
 
 check('a matched lectureId is cross-checked against the current active lecture record — unknown historical sessions are never adopted by blind reattachment', () => {
   const effectBody = recordingScreen.slice(
     recordingScreen.indexOf('useEffect(() => {\n    if (isResume || isGuest || visualFixture) return;'),
-    recordingScreen.indexOf('useEffect(() => {\n    if (isResume || isGuest || visualFixture) return;') + 1600,
+    recordingScreen.indexOf('useEffect(() => {\n    if (isResume || isGuest || visualFixture) return;') + 2600,
   );
   assert.match(effectBody, /if \(matchedLecture\?\.status === 'in_progress'\)/);
   assert.doesNotMatch(effectBody, /!matchedLecture \|\|/);
@@ -207,21 +244,23 @@ check('a matched lectureId is cross-checked against the current active lecture r
 check('ambiguous (more than one real unresolved session) blocks the fresh recording with a choice, never guessing', () => {
   const effectBody = recordingScreen.slice(
     recordingScreen.indexOf('useEffect(() => {\n    if (isResume || isGuest || visualFixture) return;'),
-    recordingScreen.indexOf('useEffect(() => {\n    if (isResume || isGuest || visualFixture) return;') + 1600,
+    recordingScreen.indexOf('useEffect(() => {\n    if (isResume || isGuest || visualFixture) return;') + 2600,
   );
   assert.match(effectBody, /unresolvedGuard\.ambiguous/);
   assert.match(effectBody, /Alert\.alert\(/);
   assert.match(effectBody, /router\.back\(\)/);
 });
 
-check('auto-start itself is gated on the guard resolving cleanly — it never fires while the lookup is in flight, nor when a match/ambiguity was found', () => {
+check('auto-start itself is gated on the guard resolving cleanly — it never fires while the lookup is in flight, nor while ambiguous, nor while a single match still needs the owner\'s Resume/Start-New choice', () => {
+  // 2026-09-12: checking unresolvedGuard.singleMatch directly here WAS the "Preparing microphone…" hang's root
+  // cause (that object never becomes null again once found). See course-scoped-recovery.test.mjs.
   const autoStartEffect = recordingScreen.slice(
     recordingScreen.indexOf('// Begin recording automatically when the screen opens'),
-    recordingScreen.indexOf('// Begin recording automatically when the screen opens') + 1800,
+    recordingScreen.indexOf('// Begin recording automatically when the screen opens') + 2400,
   );
   assert.match(
     autoStartEffect,
-    /if \(!isResume && \(!dataLoaded \|\| !unresolvedGuard\.checked \|\| unresolvedGuard\.singleMatch \|\| unresolvedGuard\.ambiguous\)\) return;/,
+    /if \(!isResume && \(!dataLoaded \|\| !unresolvedGuard\.checked \|\| singleMatchPendingChoice \|\| unresolvedGuard\.ambiguous\)\) return;/,
   );
 });
 
