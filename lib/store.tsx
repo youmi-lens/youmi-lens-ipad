@@ -32,8 +32,9 @@ import {
   parseTombstones,
   toTombstoneIndex,
 } from './deletionTombstones.mjs';
-import { confirmsDeletionWrite, resolveDeletionState } from './deletionSync.mjs';
+import { confirmsDeletionWrite, resolveCourseDeletionState, resolveDeletionState } from './deletionSync.mjs';
 import { batchSoftDeleteIsEmpty, buildBatchSoftDelete } from './lectureBatchDelete.mjs';
+import { courseRestorePatchForNewCommit } from './courseRestoreOnCommit.mjs';
 import { buildLectureMove } from './lectureMove.mjs';
 import { resolveMergedLectureTitle } from './lectureTitle.mjs';
 import {
@@ -565,6 +566,7 @@ function mergeRemoteRecordingsIntoStore(
   restoredLectureCount: number;
   derivedCourseCount: number;
   courseIdFixups: { id: string; course_id: string }[];
+  courseRestoreFixups: { id: string; deletionUpdatedAt: string }[];
 } {
   // Permanently-deleted rows are dropped here (before anything materializes) so
   // a purged lecture/course is never rebuilt from its still-live remote row.
@@ -610,17 +612,31 @@ function mergeRemoteRecordingsIntoStore(
   //    no `courses` table this list is empty and the legacy name-derivation in
   //    step 2 is the whole story (production compatibility).
   const cloudCourseIds = new Set<string>();
+  const courseRestoreFixups: { id: string; deletionUpdatedAt: string }[] = [];
   for (const cr of remoteCourses) {
     const name = normalizedCourseName(cr.name);
     if (isPurgedCourseName(purged, name)) continue;
     const local = localCoursesById.get(cr.id);
     const preset = choosePreset(coursesById.size);
-    const deletion = resolveDeletionState({
+    // resolveCourseDeletionState wraps resolveDeletionState: it only differs from a plain call when a local
+    // lecture was newly committed to this course AFTER the remote tombstone's own freshness clock — the stale
+    // pre-merge hydration race (see its doc comment). Every other case (including a genuinely deleted course)
+    // behaves exactly like the plain resolveDeletionState call this replaces.
+    const deletion = resolveCourseDeletionState({
       localDeletedAt: local?.deletedAt,
       localDeletionUpdatedAt: local?.deletionUpdatedAt,
       remoteDeletedAt: cr.deleted_at,
       remoteDeletionUpdatedAt: cr.deletion_updated_at,
+      courseId: cr.id,
+      localLectures,
     });
+    // Only true when the race guard actually changed the outcome: remote AND this device's own prior cache both
+    // said deleted, yet the guard (because a newly committed local lecture proved the deletion predates it) came
+    // back active. A legitimate pre-existing local restore already has its own cloud write (restoreCourse) and
+    // would have local?.deletedAt === null already, so it never reaches here.
+    if (cr.deleted_at && local?.deletedAt && deletion.deletedAt === null) {
+      courseRestoreFixups.push({ id: cr.id, deletionUpdatedAt: deletion.deletionUpdatedAt ?? new Date().toISOString() });
+    }
     cloudCourseIds.add(cr.id);
     addCourse({
       id: cr.id,
@@ -938,6 +954,7 @@ function mergeRemoteRecordingsIntoStore(
     restoredLectureCount: mergedRemoteLectures.length,
     derivedCourseCount: coursesById.size,
     courseIdFixups,
+    courseRestoreFixups,
   };
 }
 
@@ -1210,6 +1227,20 @@ export function DataProvider({ children }: { children: ReactNode }) {
           .eq('user_id', currentUserId)
           .then(({ error }) => {
             if (error) console.info('[store] course_id heal skipped', { message: error.message });
+          });
+      }
+
+      // Push the stale-hydration-race course restore (see resolveCourseDeletionState) back to the cloud so other
+      // devices see the same correction, not just this one. Fire-and-forget and idempotent, same shape as the
+      // course_id heal above.
+      for (const fix of merged.courseRestoreFixups) {
+        void supabase
+          .from('courses')
+          .update({ deleted_at: null, deletion_updated_at: fix.deletionUpdatedAt })
+          .eq('id', fix.id)
+          .eq('user_id', currentUserId)
+          .then(({ error }) => {
+            if (error) console.info('[store] course restore heal skipped (kept local)', { message: error.message });
           });
       }
 
@@ -1502,7 +1533,22 @@ export function DataProvider({ children }: { children: ReactNode }) {
     return { ok: true, course };
   }, [currentUserId]);
 
+  // Shared by createLecture and saveInProgressLecture — see the call sites for why a brand-new commit must never be
+  // allowed to land on a deleted course. Mirrors restoreCourse's own field-freshness contract exactly (same
+  // deletionUpdatedAt clock, same cloud write) so a later explicit delete on another device still wins if it is
+  // genuinely newer.
+  const restoreCourseIfDeletedForNewCommit = useCallback((courseId: string | undefined) => {
+    const patch = courseRestorePatchForNewCommit(courseId, coursesRef.current);
+    if (!patch) return;
+    const now = new Date().toISOString();
+    setCourses((prev) =>
+      prev.map((c) => (c.id === patch.courseId ? { ...c, deletedAt: null, deletionUpdatedAt: now, deletedReason: null } : c)),
+    );
+    if (currentUserId) writeCourseDeletion(currentUserId, patch.courseId, patch.courseName, null, now);
+  }, [currentUserId]);
+
   const createLecture = useCallback((input: NewLectureInput): Lecture => {
+    restoreCourseIfDeletedForNewCommit(input.courseId);
     const lecture: Lecture = {
       id: input.id ?? makeId('lecture'),
       courseId: input.courseId,
@@ -1538,7 +1584,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
     };
     setLectures((prev) => [...prev, lecture]);
     return lecture;
-  }, []);
+  }, [restoreCourseIfDeletedForNewCommit]);
 
   // Resilient cloud write for recordings. Fire-and-forget by contract (local
   // state already updated; a failed push is retried on the next merge). The
@@ -1671,6 +1717,8 @@ export function DataProvider({ children }: { children: ReactNode }) {
   // first call creates the row with status 'in_progress'; later calls patch it.
   // Keeps prior audio if a fresh segment URI isn't provided this save.
   const saveInProgressLecture = useCallback((input: NewLectureInput): Lecture => {
+    // Same stale-courseId hazard as createLecture — see restoreCourseIfDeletedForNewCommit above.
+    restoreCourseIfDeletedForNewCommit(input.courseId);
     const id = input.id ?? makeId('lecture');
     let saved: Lecture | null = null;
     setLectures((prev) => {
@@ -1750,7 +1798,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
       return [...prev, lecture];
     });
     return saved ?? ({ id } as Lecture);
-  }, []);
+  }, [restoreCourseIfDeletedForNewCommit]);
 
   const renameCourse = useCallback((courseId: string, newName: string) => {
     const trimmed = newName.trim();
