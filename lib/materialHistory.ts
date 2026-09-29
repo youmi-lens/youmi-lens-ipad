@@ -10,10 +10,9 @@
  * as before; this module only computes what the NEXT array should look like
  * given a recorded action and a direction (undo/redo), as a pure function.
  *
- * Scope: one history per open page (the caller clears it on page navigation,
- * matching the pre-existing per-page redo-stack behavior this replaces). Not
- * persisted across app restarts — annotations persist as always; only the
- * undo/redo log itself starts fresh on reopen.
+ * Scope: one history per open material/editing session. Each action carries
+ * its page number, so scrolling does not discard earlier actions. The log
+ * is not persisted across app restarts; annotations persist as before.
  */
 import type { MaterialAnnotationStroke, MaterialTextAnnotation } from './models';
 
@@ -30,6 +29,44 @@ export type MaterialHistoryAction =
   | { kind: 'text-create'; pageNumber: number; annotation: MaterialTextAnnotation }
   | { kind: 'text-delete'; pageNumber: number; annotation: MaterialTextAnnotation }
   | { kind: 'text-edit'; pageNumber: number; annotationId: string; before: string; after: string }
+  | {
+      kind: 'page-clear';
+      pageNumber: number;
+      beforeStrokes: MaterialAnnotationStroke[];
+      afterStrokes: MaterialAnnotationStroke[];
+      beforeTextAnnotations: MaterialTextAnnotation[];
+      afterTextAnnotations: MaterialTextAnnotation[];
+    }
+  | {
+      kind: 'selection-change';
+      pageNumber: number;
+      beforeStrokes: MaterialAnnotationStroke[];
+      afterStrokes: MaterialAnnotationStroke[];
+    }
+  | {
+      /** One completed drag of selected ink: exact geometry before and after. */
+      kind: 'selection-move';
+      pageNumber: number;
+      strokeIds: string[];
+      beforeStrokes: MaterialAnnotationStroke[];
+      afterStrokes: MaterialAnnotationStroke[];
+    }
+  | {
+      /** One completed two-finger pinch of selected ink: exact geometry before and after. */
+      kind: 'selection-scale';
+      pageNumber: number;
+      strokeIds: string[];
+      beforeStrokes: MaterialAnnotationStroke[];
+      afterStrokes: MaterialAnnotationStroke[];
+    }
+  | {
+      /** One completed structured-shape handle drag: exact geometry before and after. */
+      kind: 'shape-edit';
+      pageNumber: number;
+      strokeId: string;
+      beforeStrokes: MaterialAnnotationStroke[];
+      afterStrokes: MaterialAnnotationStroke[];
+    }
   | {
       kind: 'text-move';
       pageNumber: number;
@@ -74,7 +111,7 @@ export type MaterialHistoryApplyResult = {
   textAnnotations: MaterialTextAnnotation[];
   /**
    * Stroke ids that just disappeared from `strokes` as a direct result of
-   * this step (undo of a stroke-add, or redo of a stroke-erase). The caller
+   * this step (undo of a stroke-add, or redo of an erase/page-clear). The caller
    * must notify the native view's markStrokeRemovalIntent with these BEFORE
    * committing the new annotationsByPage snapshot — see
    * AnnotationOverlay.markStrokeRemovalIntent's doc comment for why: without
@@ -100,6 +137,24 @@ export function applyMaterialHistoryUndo(
       };
     case 'stroke-erase':
       return { strokes: action.before, textAnnotations, removedStrokeIds: [] };
+    case 'page-clear':
+      return {
+        strokes: action.beforeStrokes,
+        textAnnotations: action.beforeTextAnnotations,
+        removedStrokeIds: [],
+      };
+    case 'selection-move':
+    case 'selection-scale':
+    case 'shape-edit':
+      return { strokes: action.beforeStrokes, textAnnotations, removedStrokeIds: [] };
+    case 'selection-change': {
+      const beforeIds = new Set(action.beforeStrokes.map((stroke) => stroke.id));
+      return {
+        strokes: action.beforeStrokes,
+        textAnnotations,
+        removedStrokeIds: action.afterStrokes.filter((stroke) => !beforeIds.has(stroke.id)).map((stroke) => stroke.id),
+      };
+    }
     case 'text-create':
       return {
         strokes,
@@ -140,6 +195,26 @@ export function applyMaterialHistoryRedo(
       const afterIds = new Set(action.after.map((s) => s.id));
       const removedStrokeIds = action.before.filter((s) => !afterIds.has(s.id)).map((s) => s.id);
       return { strokes: action.after, textAnnotations, removedStrokeIds };
+    }
+    case 'page-clear': {
+      const afterIds = new Set(action.afterStrokes.map((stroke) => stroke.id));
+      return {
+        strokes: action.afterStrokes,
+        textAnnotations: action.afterTextAnnotations,
+        removedStrokeIds: action.beforeStrokes.filter((stroke) => !afterIds.has(stroke.id)).map((stroke) => stroke.id),
+      };
+    }
+    case 'selection-move':
+    case 'selection-scale':
+    case 'shape-edit':
+      return { strokes: action.afterStrokes, textAnnotations, removedStrokeIds: [] };
+    case 'selection-change': {
+      const afterIds = new Set(action.afterStrokes.map((stroke) => stroke.id));
+      return {
+        strokes: action.afterStrokes,
+        textAnnotations,
+        removedStrokeIds: action.beforeStrokes.filter((stroke) => !afterIds.has(stroke.id)).map((stroke) => stroke.id),
+      };
     }
     case 'text-create':
       return { strokes, textAnnotations: [...textAnnotations, action.annotation], removedStrokeIds: [] };

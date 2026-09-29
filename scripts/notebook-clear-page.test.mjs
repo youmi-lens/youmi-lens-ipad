@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import ts from 'typescript';
+import { makeDispatchSelection } from './fixtures/selection-dispatch-harness.mjs';
 
 const source = readFileSync(new URL('../components/NotebookCanvas.tsx', import.meta.url), 'utf8');
 const parsed = ts.createSourceFile('NotebookCanvas.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -74,6 +75,7 @@ function harness(scale, scrollY, viewportHeight = 400) {
     Alert: { alert: (...args) => alerts.push(args) },
     t: (key, params) => ({ key, ...params }),
   };
+  environment.dispatchSelection = makeDispatchSelection({ selectedIdsRef: environment.selectedIdsRef, setSelectedIds: environment.setSelectedIds });
   const execute = new Function(...Object.keys(environment), `${callbacks}\nreturn { pageForScroll, clearPage, undo, redo };`);
   return { ...execute(...Object.values(environment)), state, alerts, environment };
 }

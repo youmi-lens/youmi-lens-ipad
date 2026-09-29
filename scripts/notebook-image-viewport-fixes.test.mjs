@@ -54,7 +54,8 @@ const touchesDownBody = canvas.slice(touchesDownStart, touchesDownEnd);
 check('the deselect check runs before the mode-validity gate AND the pointerType gate — not just the second one (the Round 1 mistake)', () => {
   const deselectIdx = touchesDownBody.indexOf("activeMode !== 'select' && point && selectedIdsRef.current.size > 0 && !findImageAtPoint(point)");
   const modeGateIdx = touchesDownBody.indexOf("activeMode !== 'write' && activeMode !== 'highlight' && activeMode !== 'erase' && activeMode !== 'select'");
-  const pointerGateIdx = touchesDownBody.indexOf("activeMode !== 'select' && event.pointerType !== PointerType.STYLUS");
+  // Selection/drawing are Apple Pencil only in every mode (selectionAcceptsPointer).
+  const pointerGateIdx = touchesDownBody.indexOf("!selectionAcceptsPointer(isStylusTouch ? 'stylus' : 'touch')");
   assert.ok(deselectIdx > 0, 'deselect check must exist');
   assert.ok(modeGateIdx > 0, 'the mode-validity gate must still exist (it fails Insert/Scroll/Type before Round 1\'s check position)');
   assert.ok(pointerGateIdx > 0, 'the pointerType gate must still exist');
@@ -63,16 +64,19 @@ check('the deselect check runs before the mode-validity gate AND the pointerType
 });
 
 check('the deselect check does not require a specific mode allowlist — it runs for every mode except Select, so Insert mode (the exact reported repro) is covered without special-casing it', () => {
-  const deselectLine = touchesDownBody.match(/if \(activeMode !== 'select' && point[^\n]+\) \{/);
+  const deselectLine = touchesDownBody.match(/if \(activeMode !== 'select' && point[^{]+\{/);
   assert.ok(deselectLine, 'deselect check must exist');
   assert.doesNotMatch(deselectLine[0], /activeMode === 'write'|activeMode === 'insert'/, 'must not be a positive allowlist of specific modes — that was the Round 1 gap');
 });
 
 check('nothing between "numberOfTouches > 1" and the deselect check can return/fail early for a single-touch tap — Insert mode reaches the deselect unconditionally', () => {
-  const multiTouchGuardIdx = touchesDownBody.indexOf('if (event.numberOfTouches > 1) return;');
+  // Selection Interaction Phase: a second finger may upgrade a selection move to a scale, then returns.
+  const multiTouchGuardIdx = touchesDownBody.indexOf('if (event.numberOfTouches > 1) {');
+  const multiTouchGuard = 'if (event.numberOfTouches > 1) {\n            beginFingerScaleIfEligible(event, manager);\n            return;\n          }';
+  assert.ok(touchesDownBody.includes(multiTouchGuard), 'the multi-touch branch only ever calls the scale helper and returns');
   const deselectIdx = touchesDownBody.indexOf("if (activeMode !== 'select' && point");
   assert.ok(multiTouchGuardIdx > 0 && deselectIdx > multiTouchGuardIdx);
-  const between = touchesDownBody.slice(multiTouchGuardIdx + 'if (event.numberOfTouches > 1) return;'.length, deselectIdx);
+  const between = touchesDownBody.slice(multiTouchGuardIdx + multiTouchGuard.length, deselectIdx);
   // Strip comments first — the explanatory comment in this exact block
   // legitimately mentions "manager.fail()" in prose, which must not be
   // mistaken for actual code by this check.
@@ -106,16 +110,20 @@ check('selectImage traces which mode was active at the moment of selection, so a
 });
 
 check('the deselect check is scoped OUT of Select mode, which already owns deselection via the full selection bounding box (strokes + images + padding)', () => {
-  const deselectLine = touchesDownBody.match(/if \(activeMode !== 'select' && point[^\n]+\)/);
+  // The condition now spans lines (it also spares a tapped shape's handles/outline and finger-downs).
+  const deselectLine = touchesDownBody.match(/if \(activeMode !== 'select' && point[^{]+\{/);
   assert.ok(deselectLine, 'deselect check must exist');
   assert.match(deselectLine[0], /activeMode !== 'select'/);
 });
 
 check('the deselect check clears BOTH the ref and the state, matching every other deselect site in the file', () => {
   const idx = touchesDownBody.indexOf("if (activeMode !== 'select' && point && selectedIdsRef.current.size > 0");
-  const block = touchesDownBody.slice(idx, idx + 200);
-  assert.match(block, /selectedIdsRef\.current = new Set\(\);/);
-  assert.match(block, /setSelectedIds\(new Set\(\)\);/);
+  const block = touchesDownBody.slice(idx, idx + 600);
+  // Selection Interaction Phase: the deselect is the explicit TAP_BLANK event; the ONE dispatcher
+  // then clears BOTH the ref and the state (no more ad-hoc clear sites).
+  assert.match(block, /dispatchSelection\(\{ type: 'TAP_BLANK' \}/);
+  const dispatcher = canvas.slice(canvas.indexOf('const dispatchSelection = useCallback'), canvas.indexOf('const selectionShapeRef'));
+  assert.match(dispatcher, /selectedIdsRef\.current = next;\s*setSelectedIds\(next\);/);
 });
 
 check('the check only clears when the touch is NOT on any image — tapping a different image must still be free to select it via that image\'s own Tap gesture', () => {

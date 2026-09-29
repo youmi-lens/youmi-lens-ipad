@@ -1,4 +1,5 @@
 import { requireNativeModule, requireNativeViewManager } from 'expo-modules-core';
+import type { AnnotationShape } from '../../lib/annotationShape';
 
 export type NativePdfPageChangedEvent = {
   pageNumber: number;
@@ -53,6 +54,8 @@ export type NativePdfAnnotationStroke = {
   width: number;
   opacity?: number;
   points: [number, number][];
+  /** Structured shape (PDF-page coordinates); `points` are derived from it. Absent on ordinary ink. */
+  shape?: AnnotationShape;
   createdAt: string;
 };
 
@@ -114,7 +117,50 @@ export type NativePdfTextAnnotationActionEvent = {
   anchor?: 'top-left';
 };
 
-export type NativePdfAnnotationMode = 'scroll' | 'pen' | 'highlighter' | 'eraser' | 'text';
+export type NativePdfAnnotationMode = 'scroll' | 'pen' | 'highlighter' | 'eraser' | 'text' | 'select';
+export type NativePdfSelectionShape = 'rect' | 'lasso';
+export type NativePdfSelectionChangedEvent = {
+  pageNumber: number;
+  strokeIds: string[];
+};
+/** Draw-and-hold reached with an eligible stroke (page-space points). Answer with `applyShapeSnap(token, points)`. */
+export type NativePdfShapeHoldEvent = {
+  token: number;
+  pageNumber: number;
+  points: [number, number][];
+  scale: number;
+};
+/** Apple Pencil touched down (`active: true`) or lifted/cancelled (`active: false`) with an ink tool. */
+export type NativePdfPencilActivityEvent = { active: boolean };
+/** One completed Pencil drag of the selected ink; dx/dy are PDF page-space units. */
+export type NativePdfSelectionMovedEvent = {
+  pageNumber: number;
+  strokeIds: string[];
+  dx: number;
+  dy: number;
+};
+
+/**
+ * One completed Pencil drag of a structured-shape handle. `x`/`y` is the final target of the
+ * handle in PDF page space (grab offset already applied); JS applies the shared
+ * `dragShapeHandle` semantics, regenerates points and records ONE history action.
+ */
+export type NativePdfShapeEditedEvent = {
+  pageNumber: number;
+  strokeId: string;
+  handleIndex: number;
+  x: number;
+  y: number;
+};
+
+/** One completed two-finger pinch of the selected ink; `factor` scales about (centerX, centerY), PDF page space. */
+export type NativePdfSelectionScaledEvent = {
+  pageNumber: number;
+  strokeIds: string[];
+  factor: number;
+  centerX: number;
+  centerY: number;
+};
 
 export type ExpoPdfAnnotationViewProps = {
   fileUri?: string;
@@ -122,6 +168,7 @@ export type ExpoPdfAnnotationViewProps = {
   initialViewport?: NativePdfViewport;
   /** "scroll" (default) lets PDFKit own all touches; "pen" turns the overlay on. */
   annotationMode?: NativePdfAnnotationMode;
+  selectionShape?: NativePdfSelectionShape;
   /** Hex color for new pen strokes. */
   penColor?: string;
   /** Stroke width for new pen strokes, in PDF points. */
@@ -144,6 +191,15 @@ export type ExpoPdfAnnotationViewProps = {
   onAnnotationsChanged?: (event: { nativeEvent: NativePdfAnnotationsChangedEvent }) => void;
   onEraserGestureEnded?: (event: { nativeEvent: NativePdfEraserGestureEndedEvent }) => void;
   onTextAnnotationAction?: (event: { nativeEvent: NativePdfTextAnnotationActionEvent }) => void;
+  onSelectionChanged?: (event: { nativeEvent: NativePdfSelectionChangedEvent }) => void;
+  onSelectionMoved?: (event: { nativeEvent: NativePdfSelectionMovedEvent }) => void;
+  onShapeEdited?: (event: { nativeEvent: NativePdfShapeEditedEvent }) => void;
+  onSelectionScaled?: (event: { nativeEvent: NativePdfSelectionScaledEvent }) => void;
+  onPencilActivity?: (event: { nativeEvent: NativePdfPencilActivityEvent }) => void;
+  onShapeHold?: (event: { nativeEvent: NativePdfShapeHoldEvent }) => void;
+  shapeSnapEnabled?: boolean;
+  shapeSnapHoldMs?: number;
+  shapeSnapTolerancePt?: number;
   onViewportDiagnostic?: (event: { nativeEvent: NativePdfViewportDiagnosticEvent }) => void;
   style?: unknown;
 };
@@ -155,6 +211,9 @@ export type ExpoPdfAnnotationNativeRef = {
   markStrokeRemovalIntentAsync?: (ids: string[]) => Promise<void>;
   markStrokeRestorationIntentAsync?: (ids: string[]) => Promise<void>;
   setTextHistoryIntentAsync?: (pageNumber: number, annotations: NativePdfTextAnnotation[]) => Promise<void>;
+  clearSelectionAsync?: () => Promise<void>;
+  setSelectionAsync?: (pageNumber: number, ids: string[]) => Promise<void>;
+  applyShapeSnapAsync?: (token: number, points: [number, number][], shape?: AnnotationShape) => Promise<void>;
 };
 
 export const ExpoPdfAnnotationView = requireNativeViewManager<ExpoPdfAnnotationViewProps>(

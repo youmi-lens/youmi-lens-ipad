@@ -46,7 +46,11 @@ const lectureScreen = read('../app/lecture/[id].tsx');
 const recordingScreen = read('../app/recording.tsx');
 const deviceClass = read('../constants/deviceClass.ts');
 const miniScreen = read('../app/mini-caption.tsx');
-const materialToolbar = read('../components/MaterialFloatingToolbar.tsx');
+// PK4-C1 retired MaterialFloatingToolbar.tsx — Course Material now renders
+// the same SharedAnnotationToolbar component Notebook does (not a second,
+// Material-specific toolbar), so that's what this out-of-scope check reads.
+const materialScreen = read('../app/lecture-material/[lectureId]/[materialId].tsx');
+const sharedToolbar = read('../components/SharedAnnotationToolbar.tsx');
 const materialOverlay = read('../components/MaterialAnnotationOverlay.tsx');
 const models = read('../lib/models.ts');
 
@@ -169,8 +173,9 @@ check('exactly two <NotebookCanvas mounts exist, and both are reached only throu
 });
 
 console.log('Out of scope, confirmed separate: Material annotation is untouched by this fix');
-check('MaterialFloatingToolbar/MaterialAnnotationOverlay never import or mount NotebookCanvas (separate feature)', () => {
-  assert.doesNotMatch(materialToolbar, /from '@\/components\/NotebookCanvas'/);
+check('Course Material (screen, shared toolbar, overlay) never imports or mounts NotebookCanvas (separate feature)', () => {
+  assert.doesNotMatch(materialScreen, /from '@\/components\/NotebookCanvas'/);
+  assert.doesNotMatch(sharedToolbar, /from '@\/components\/NotebookCanvas'/);
   assert.doesNotMatch(materialOverlay, /from '@\/components\/NotebookCanvas'/);
 });
 

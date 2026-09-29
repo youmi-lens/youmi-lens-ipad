@@ -99,7 +99,9 @@ check('the fragile imageActionBarRef pattern that crashed physically ("Cannot re
 check('the action bar bounds are recomputed inline inside onTouchesDown, using only refs already proven to work from inside this exact closure (selectedIdsRef, imagesRef, containerSizeRef, pageGeomRef, selectionMoveOffsetRef, editableRef) — none of them declared after drawGesture', () => {
   assert.match(touchesDownBody, /const bar = \(\(\) => \{/);
   assert.match(touchesDownBody, /if \(!editableRef\.current \|\| selectedIdsRef\.current\.size !== 1\) return null;/);
-  assert.match(touchesDownBody, /imagesRef\.current\.find\(\(image\) => image\.id === selectedId\)/);
+  // Shape System Phase 2: the same inline anchor lookup now also covers a selected structured shape.
+  assert.match(touchesDownBody, /selectionActionRect\(selectedId, strokesRef\.current, imagesRef\.current\)/);
+  assert.match(canvas, /images\.find\(\(candidate\) => candidate\.id === id\)/, 'the shared helper still resolves images first');
   assert.match(touchesDownBody, /containerSizeRef\.current\.width/);
   assert.match(touchesDownBody, /pageGeomRef\.current\.canvasHeight/);
   assert.match(touchesDownBody, /selectionMoveOffsetRef\.current/);
@@ -144,7 +146,7 @@ check('[NotebookImageAction] traces exist for callback entry/completion on both 
 console.log('\nIssue 1 — Copy/Delete contract itself (data level, unaffected by the touch-routing fix)');
 
 const deleteStart = canvas.indexOf('const deleteSelectedObjects = useCallback(() => {');
-const deleteEnd = canvas.indexOf('}, [recordHistory]);', deleteStart);
+const deleteEnd = canvas.indexOf('}, [dispatchSelection, recordHistory]);', deleteStart);
 const deleteBody = canvas.slice(deleteStart, deleteEnd);
 
 check('delete removes only the selected ids, leaving unrelated images and strokes untouched', () => {
@@ -162,7 +164,7 @@ check('delete is one logical history operation (single recordHistory call), not 
 });
 
 const duplicateStart = canvas.indexOf('const duplicateSelected = useCallback(() => {');
-const duplicateEnd = canvas.indexOf('}, [recordHistory]);', duplicateStart);
+const duplicateEnd = canvas.indexOf('}, [recordHistory, selectIds]);', duplicateStart);
 const duplicateBody = canvas.slice(duplicateStart, duplicateEnd);
 
 check('copy gives the duplicate a new unique id via makeImageId(), never reusing the original id', () => {
@@ -191,7 +193,7 @@ check('copy is one logical history operation, not per duplicated item', () => {
 console.log('\nIssue 2 — Apple Pencil draws through an image instead of selecting/moving it');
 
 check('drawGesture only yields to an image for a NON-stylus touch (or in Select mode, where Pencil should still select) — not unconditionally', () => {
-  assert.match(touchesDownBody, /const stylusDrawingOverImage = activeMode !== 'select' && event\.pointerType === PointerType\.STYLUS;/);
+  assert.match(touchesDownBody, /const stylusDrawingOverImage = \(activeMode !== 'select' && event\.pointerType === PointerType\.STYLUS\) \|\| fingerSelectionMove;/);
   assert.match(touchesDownBody, /if \(hitImageForInkRouting && !stylusDrawingOverImage\)/);
   assert.doesNotMatch(touchesDownBody, /if \(findImageAtPoint\(point\)\) \{\s*\n\s*manager\.fail\(\);/, 'the old unconditional-on-any-pointer-type version must be gone');
 });

@@ -4,15 +4,22 @@ import { readFileSync } from 'node:fs';
 const read = p => readFileSync(new URL(p, import.meta.url), 'utf8');
 const pdfAnnotationView = read('../modules/expo-pdf-annotation/ios/PdfAnnotationView.swift');
 const expoPdfAnnotationIndex = read('../modules/expo-pdf-annotation/index.ts');
-const toolbar = read('../components/MaterialFloatingToolbar.tsx');
 const materialScreen = read('../app/lecture-material/[lectureId]/[materialId].tsx');
 const moduleSource = read('../modules/expo-pdf-annotation/ios/PdfAnnotationModule.swift');
 let passed = 0;
 const check = (name, fn) => { fn(); passed++; console.log('ok ' + name); };
 check('Text mode remains a native tool', () => {
   assert.match(expoPdfAnnotationIndex, /\| 'text'/);
-  assert.match(toolbar, /showTextTool = false/);
-  assert.match(toolbar, /showTextTool \? renderToolButton\(TEXT_TOOL\)/);
+  // PK4-C1: MaterialFloatingToolbar.tsx (and its showTextTool prop) was
+  // retired — Course Material now renders SharedAnnotationToolbar directly,
+  // with each call site's tool list capability-filtered from the runtime
+  // branch it's actually in (native PDFKit path: usingNativePdfViewer true,
+  // text included; legacy JS-overlay path: false, text excluded). Same
+  // gate, same result: Text only ever appears on the native path.
+  assert.match(materialScreen, /courseMaterialSharedTools\(courseMaterialCapabilities\(\{ usingNativePdfViewer: true \}\)\)/);
+  assert.match(materialScreen, /courseMaterialSharedTools\(courseMaterialCapabilities\(\{ usingNativePdfViewer: false \}\)\)/);
+  assert.match(materialScreen, /<SharedAnnotationToolbar/);
+  assert.doesNotMatch(materialScreen, /MaterialFloatingToolbar/);
 });
 check('only create/edit/delete actions survive the product simplification', () => {
   assert.match(expoPdfAnnotationIndex, /action: 'create' \| 'edit' \| 'delete'/);
@@ -33,8 +40,9 @@ check('tap gesture is finger-only and only admitted in Text mode', () => {
   assert.match(pdfAnnotationView, /guard gestureRecognizer === textTapGesture else \{ return true \}/);
   assert.match(pdfAnnotationView, /return annotationMode == "text"/);
 });
-check('scroll/zoom retains original simultaneous recognition, without drag priority', () => {
-  assert.match(pdfAnnotationView, /shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer\s*\) -> Bool \{ true \}/);
+check('scroll/zoom retains simultaneous recognition except in Select mode', () => {
+  // The Pencil AND finger selection recognisers never share touches with PDFView's own recognisers.
+  assert.match(pdfAnnotationView, /shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer\s*\) -> Bool \{[^}]*let owned: \[UIGestureRecognizer\] = \[selectionGesture, selectionFingerGesture\]\s*return !owned\.contains \{ \$0 === gestureRecognizer \|\| \$0 === otherGestureRecognizer \}/);
   assert.doesNotMatch(pdfAnnotationView, /textDragGesture/);
 });
 console.log('\nEraser gesture batching: one continuous erase drag = ONE stroke-erase history action, not one per stroke crossed');

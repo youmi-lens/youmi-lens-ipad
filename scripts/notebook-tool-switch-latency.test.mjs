@@ -14,6 +14,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import ts from 'typescript';
+import { makeDispatchSelection } from './fixtures/selection-dispatch-harness.mjs';
 
 const source = readFileSync(new URL('../components/NotebookCanvas.tsx', import.meta.url), 'utf8');
 const parsed = ts.createSourceFile('NotebookCanvas.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -48,6 +49,8 @@ function harness(initial) {
     setLassoPoints: (v) => { calls.setLassoPoints.push(v); lassoPointsRef.current = v; },
     setMode: (v) => { calls.setMode.push(v); },
   };
+  // Production changeMode now clears selection through the shared state machine (TOOL_CHANGE).
+  environment.dispatchSelection = makeDispatchSelection({ selectedIdsRef, setSelectedIds: environment.setSelectedIds });
   const execute = new Function(...Object.keys(environment), `${changeModeCode}\nreturn changeMode;`);
   const changeMode = execute(...Object.values(environment));
   return { changeMode, calls, modeRef, temporaryEraserRef, previousDrawingToolRef, selectedIdsRef, lassoPointsRef };

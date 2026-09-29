@@ -32,7 +32,8 @@ check('cloneStroke (the per-point deep clone) has been removed entirely', () => 
 });
 
 check('cloneSnapshot copies strokes/images by shallow array reference, not by deep-cloning each one', () => {
-  const fn = src.slice(src.indexOf('function cloneSnapshot('), src.indexOf('/** Ray-casting point-in-polygon'));
+  const fnStart = src.indexOf('function cloneSnapshot(');
+  const fn = src.slice(fnStart, src.indexOf('\n}\n', fnStart) + 3);
   assert.match(fn, /strokes:\s*snapshot\.strokes\.slice\(\)/, 'strokes must be a shallow .slice(), not a per-stroke map');
   assert.match(fn, /images:\s*snapshot\.images\.slice\(\)/, 'images must be a shallow .slice(), not a per-image map');
   assert.doesNotMatch(fn, /\.map\(cloneStroke\)/, 'must not still map every stroke through a deep clone');

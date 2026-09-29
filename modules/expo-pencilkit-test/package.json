@@ -1,0 +1,7 @@
+{
+  "name": "expo-pencilkit-test",
+  "version": "1.0.0",
+  "description": "PK1 isolated Apple PencilKit physical spike for Youmi Lens (Dev-only, disposable, no persistence). Compares native Apple ink rendering against the custom Youmi Natural Pen renderer.",
+  "main": "index.ts",
+  "private": true
+}

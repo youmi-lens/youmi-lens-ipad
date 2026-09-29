@@ -1012,6 +1012,8 @@ export default function LectureDetailScreen() {
             onTextChange={setNotesDraft}
             onImagesChange={setImagesDraft}
             showFixedHistory
+            noteId={lecture.id}
+            notebookOpen={notesOpen}
           />
         </SafeAreaView>
       </Modal>

@@ -123,10 +123,13 @@ check('the notify call is gated on removedStrokeIds actually being non-empty (ne
   assert.match(applyStepFn, /if \(result\.removedStrokeIds\.length > 0\) \{\s*\n\s*pdfRef\.current\?\.markStrokeRemovalIntent\(result\.removedStrokeIds\)/);
 });
 
-check('a stroke-kind action goes through the stroke store; every other kind goes through the text store — never both', () => {
-  assert.match(applyStepFn, /if \(action\.kind === 'stroke-add' \|\| action\.kind === 'stroke-erase'\) \{/);
-  const strokeBranch = applyStepFn.slice(applyStepFn.indexOf("if (action.kind === 'stroke-add'"), applyStepFn.indexOf('return;\n      }'));
-  assert.doesNotMatch(strokeBranch, /saveTextAnnotations/);
+check('ink and selection actions use only the stroke store; Page Clear alone changes text', () => {
+  assert.match(applyStepFn, /if \(action\.kind === 'stroke-add' \|\| action\.kind === 'stroke-erase' \|\| action\.kind === 'page-clear' \|\| action\.kind === 'selection-change' \|\| action\.kind === 'selection-move' \|\| action\.kind === 'selection-scale' \|\| action\.kind === 'shape-edit'\) \{/);
+  const strokeStoreIdx = applyStepFn.indexOf('replaceMaterialPageAnnotationStrokesForMaterial(mid, action.pageNumber, result.strokes');
+  const pageClearGateIdx = applyStepFn.indexOf("if (action.kind !== 'page-clear') return;", strokeStoreIdx);
+  const textStoreIdx = applyStepFn.indexOf('saveTextAnnotations(action.pageNumber, result.textAnnotations)', pageClearGateIdx);
+  assert.ok(strokeStoreIdx < pageClearGateIdx && pageClearGateIdx < textStoreIdx,
+    'stroke-add/erase/selection return before text; Page Clear continues to text after committing strokes');
 });
 
 console.log('\nUndo pops from the unified undo stack; Redo pops from the unified redo stack');

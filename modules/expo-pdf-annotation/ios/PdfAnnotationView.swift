@@ -54,6 +54,13 @@ public final class PdfAnnotationView: ExpoView {
     v.isOpaque = false
     // Pure rendering — gesture recognizer below drives stroke input.
     v.isUserInteractionEnabled = false
+    v.onShapeHold = { [weak self] token, pageNumber, points in
+      guard let self else { return }
+      self.onShapeHold([
+        "token": token, "pageNumber": pageNumber, "scale": Double(self.pdfView.scaleFactor),
+        "points": points.map { [Double($0.x), Double($0.y)] },
+      ])
+    }
     return v
   }()
 
@@ -65,6 +72,37 @@ public final class PdfAnnotationView: ExpoView {
     g.delaysTouchesEnded = false
     g.delegate = self
     g.isEnabled = false              // turned on by annotationMode = "pen"
+    return g
+  }()
+
+  private lazy var selectionGesture: PageSelectionGestureRecognizer = {
+    let gesture = PageSelectionGestureRecognizer(target: self, action: #selector(handleSelectionGesture(_:)))
+    gesture.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.pencil.rawValue)]
+    gesture.cancelsTouchesInView = true
+    gesture.delegate = self
+    gesture.isEnabled = false
+    return gesture
+  }()
+
+  /// ONE finger that begins INSIDE the selected region moves it; two fingers beginning inside scale it.
+  /// A finger that begins anywhere else fails at once, so PDFView keeps panning/zooming (never locked).
+  private lazy var selectionFingerGesture: SelectionFingerGestureRecognizer = {
+    let gesture = SelectionFingerGestureRecognizer(target: self, action: #selector(handleSelectionFingerGesture(_:)))
+    gesture.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+    gesture.cancelsTouchesInView = true
+    gesture.delegate = self
+    gesture.isEnabled = false
+    gesture.beginsInside = { [weak self] point in self?.annotationOverlay.fingerHitsSelection(at: point) ?? false }
+    return gesture
+  }()
+
+  /// Finger tap in Select: on a structured shape's outline selects it; on blank paper is an explicit deselect.
+  private lazy var selectionTapGesture: UITapGestureRecognizer = {
+    let g = UITapGestureRecognizer(target: self, action: #selector(handleSelectionTap(_:)))
+    g.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+    g.cancelsTouchesInView = false
+    g.delegate = self
+    g.isEnabled = false
     return g
   }()
 
@@ -252,6 +290,14 @@ public final class PdfAnnotationView: ExpoView {
   let onAnnotationsChanged = EventDispatcher()
   let onEraserGestureEnded = EventDispatcher()
   let onTextAnnotationAction = EventDispatcher()
+  let onSelectionChanged = EventDispatcher()
+  let onSelectionMoved = EventDispatcher()
+  let onShapeEdited = EventDispatcher()
+  let onSelectionScaled = EventDispatcher()
+  /// Pencil touched down / lifted (ink tools). JS holds heavy prop pushes while active.
+  let onPencilActivity = EventDispatcher()
+  /// Draw-and-hold reached with an eligible stroke. JS runs the shared recognizer and answers with applyShapeSnap.
+  let onShapeHold = EventDispatcher()
   let onViewportDiagnostic = EventDispatcher()
 
   var fileUri: String? {
@@ -345,6 +391,7 @@ public final class PdfAnnotationView: ExpoView {
         #endif
         annotationOverlay.mode = annotationMode
         updateGestureMode()
+        if annotationMode != "select" { selectionToolChanged() }
         // Leaving "text" mode (e.g. switching to Pen) must never leave an
         // inline editor dangling open — commit whatever was being typed
         // first, exactly as if the user had tapped away.
@@ -365,6 +412,26 @@ public final class PdfAnnotationView: ExpoView {
     }
   }
 
+  var selectionShape: String = "lasso" {
+    didSet { if selectionShape != oldValue { annotationOverlay.cancelRegion() } }
+  }
+
+  func setSelection(pageNumber: Int, ids: [String]) {
+    annotationOverlay.setSelection(pageNumber: pageNumber, ids: ids)
+    onSelectionChanged(["pageNumber": ids.isEmpty ? 0 : pageNumber, "strokeIds": ids])
+  }
+
+  func clearSelection() {
+    annotationOverlay.clearSelection()
+    onSelectionChanged(["pageNumber": 0, "strokeIds": []])
+  }
+
+  /// Leaving the Select tool is one of the explicit deselection events.
+  private func selectionToolChanged() {
+    annotationOverlay.toolChanged(to: annotationMode)
+    onSelectionChanged(["pageNumber": 0, "strokeIds": []])
+  }
+
   var penColor: String = "#061B34" {
     didSet { annotationOverlay.penColor = penColor }
   }
@@ -383,6 +450,23 @@ public final class PdfAnnotationView: ExpoView {
 
   var eraserRadius: Double = 26 {
     didSet { annotationOverlay.eraserRadius = eraserRadius }
+  }
+
+  var shapeSnapEnabled: Bool = false {
+    didSet { annotationOverlay.shapeSnapEnabled = shapeSnapEnabled }
+  }
+  var shapeSnapHoldMs: Double = 650 {
+    didSet { annotationOverlay.shapeSnapHoldSeconds = shapeSnapHoldMs / 1000 }
+  }
+  var shapeSnapTolerancePt: Double = 3.5 {
+    didSet { annotationOverlay.shapeSnapTolerancePt = shapeSnapTolerancePt }
+  }
+
+  func applyShapeSnap(token: Int, points: [[Double]], shape: [String: Any]? = nil) {
+    annotationOverlay.applyShapeSnap(
+      token: token,
+      points: points.compactMap { $0.count == 2 ? CGPoint(x: $0[0], y: $0[1]) : nil },
+      shape: StrokeShape.parse(shape))
   }
 
   /// Strokes to render, keyed by 1-based page number. Coords in PDF page space.
@@ -461,6 +545,12 @@ public final class PdfAnnotationView: ExpoView {
     // Attach Pencil-only gesture recognizer to PDFView. allowedTouchTypes
     // is the OS-level filter that actually works (vs the hitTest dance).
     pdfView.addGestureRecognizer(pencilGesture)
+    pdfView.addGestureRecognizer(selectionGesture)
+    pdfView.addGestureRecognizer(selectionFingerGesture)
+    pdfView.addGestureRecognizer(selectionTapGesture)
+    annotationOverlay.onSelectionReconciled = { [weak self] page, ids in
+      self?.onSelectionChanged(["pageNumber": page, "strokeIds": ids])
+    }
     let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleFingerLongPress(_:)))
     longPress.minimumPressDuration = 0.45
     longPress.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
@@ -999,8 +1089,15 @@ public final class PdfAnnotationView: ExpoView {
   // MARK: - Gesture mode management
 
   private func updateGestureMode() {
-    let isAnnotationTool = annotationMode == "pen" || annotationMode == "highlighter" || annotationMode == "eraser"
-    pencilGesture.isEnabled = isAnnotationTool
+    selectionGesture.isEnabled = annotationMode == "select"
+    // Finger manipulation of an existing selection (and finger tap select/deselect) works while Select, Pen or
+    // Highlighter is active. Both fail at touch-down unless a selection exists and the touch is inside it.
+    let selectionTouchModes = annotationMode == "select" || annotationMode == "pen" || annotationMode == "highlighter"
+    selectionFingerGesture.isEnabled = selectionTouchModes
+    selectionTapGesture.isEnabled = selectionTouchModes
+    let isInkTool = annotationMode == "pen" || annotationMode == "highlighter" || annotationMode == "eraser"
+    let isAnnotationTool = isInkTool || annotationMode == "select"
+    pencilGesture.isEnabled = isInkTool
     applyPdfGestureTouchPolicy()
 
     guard let scrollView = observedScrollView ?? findInnerScrollView(in: pdfView) else {
@@ -1032,11 +1129,158 @@ public final class PdfAnnotationView: ExpoView {
     #endif
   }
 
+  /// Pencil-down inside the current selection drags it; anywhere else it
+  /// starts a new selection region. Both are Pencil-only, so a finger always
+  /// remains PDF navigation.
+  private var isMovingSelection = false
+  private var isDraggingShapeHandle = false
+  private let inkRecorder = InkPerfRecorder()
+
+  @objc private func handleSelectionGesture(_ recognizer: PageSelectionGestureRecognizer) {
+    guard annotationMode == "select" else { return }
+    switch recognizer.state {
+    case .began:
+      setNonPencilGesturesEnabled(false)
+      let start = recognizer.location(in: pdfView)
+      if annotationOverlay.beginHandleDragIfHit(at: start) {
+        isDraggingShapeHandle = true
+        isMovingSelection = false
+      } else if annotationOverlay.beginMoveIfHit(at: start) {
+        isMovingSelection = true
+      } else {
+        isMovingSelection = false
+        annotationOverlay.beginSelection(at: start, shape: selectionShape)
+      }
+    case .changed:
+      if isDraggingShapeHandle {
+        if let point = recognizer.confirmedPoints.last { annotationOverlay.updateHandleDrag(at: point) }
+      } else if isMovingSelection {
+        if let point = recognizer.confirmedPoints.last { annotationOverlay.updateMove(at: point) }
+      } else {
+        for point in recognizer.confirmedPoints { annotationOverlay.appendSelection(at: point) }
+      }
+    case .ended:
+      if isDraggingShapeHandle {
+        let end = recognizer.confirmedPoints.last ?? recognizer.location(in: pdfView)
+        if let edit = annotationOverlay.finishHandleDrag(at: end) {
+          onShapeEdited(["pageNumber": edit.pageNumber, "strokeId": edit.strokeId, "handleIndex": edit.handleIndex,
+                         "x": Double(edit.x), "y": Double(edit.y)])
+        }
+      } else if isMovingSelection {
+        if let point = recognizer.confirmedPoints.last { annotationOverlay.updateMove(at: point) }
+        if let moved = annotationOverlay.finishMove() {
+          onSelectionMoved(["pageNumber": moved.pageNumber, "strokeIds": moved.strokeIds, "dx": Double(moved.dx), "dy": Double(moved.dy)])
+        }
+      } else {
+        for point in recognizer.confirmedPoints { annotationOverlay.appendSelection(at: point) }
+        if let result = annotationOverlay.finishSelection() {
+          onSelectionChanged(["pageNumber": result.pageNumber, "strokeIds": result.strokeIds])
+        } else {
+          // The state machine already cleared it for an explicit reason (blank tap / empty region).
+          onSelectionChanged(["pageNumber": 0, "strokeIds": []])
+        }
+      }
+      isMovingSelection = false
+      isDraggingShapeHandle = false
+      setNonPencilGesturesEnabled(true)
+    case .cancelled, .failed:
+      // A cancelled/failed gesture is NOT a deselection: it only abandons what it was doing.
+      if isDraggingShapeHandle { annotationOverlay.cancelHandleDrag() }
+      else if isMovingSelection { annotationOverlay.cancelMove() } else { annotationOverlay.cancelRegion() }
+      isMovingSelection = false
+      isDraggingShapeHandle = false
+      setNonPencilGesturesEnabled(true)
+    default: break
+    }
+  }
+
   // MARK: - Pencil gesture callback
+
+  private enum FingerSelectionMode { case none, move, scale }
+  private var fingerSelectionMode = FingerSelectionMode.none
+
+  /// One finger inside the selection moves it; two fingers inside scale it. The page is left alone:
+  /// a finger that began elsewhere never reaches this handler (the recogniser fails at touch-down).
+  @objc private func handleSelectionFingerGesture(_ recognizer: SelectionFingerGestureRecognizer) {
+    guard annotationMode == "select" || annotationMode == "pen" || annotationMode == "highlighter" else { return }
+    let points = recognizer.points
+    switch recognizer.state {
+    case .began:
+      setNonPencilGesturesEnabled(false)   // PDFView pan/pinch stand down for this touch sequence only
+      if points.count >= 2, annotationOverlay.beginScale(at: points[0], and: points[1]) {
+        fingerSelectionMode = .scale
+      } else if let first = points.first, annotationOverlay.beginMoveIfHit(at: first, padPt: SelectionLimits.touchPadPt) {
+        fingerSelectionMode = .move
+      } else {
+        fingerSelectionMode = .none
+      }
+    case .changed:
+      if fingerSelectionMode == .move, points.count >= 2, annotationOverlay.beginScale(at: points[0], and: points[1]) {
+        fingerSelectionMode = .scale   // the second finger joined: the move upgrades to a scale
+      }
+      switch fingerSelectionMode {
+      case .move: if let first = points.first { annotationOverlay.updateMove(at: first) }
+      case .scale: if points.count >= 2 { annotationOverlay.updateScale(at: points[0], and: points[1]) }
+      case .none: break
+      }
+    case .ended:
+      switch fingerSelectionMode {
+      case .move:
+        if let first = points.first { annotationOverlay.updateMove(at: first) }
+        if let moved = annotationOverlay.finishMove() {
+          onSelectionMoved(["pageNumber": moved.pageNumber, "strokeIds": moved.strokeIds, "dx": Double(moved.dx), "dy": Double(moved.dy)])
+        }
+      case .scale:
+        if points.count >= 2, let scaled = annotationOverlay.finishScale(at: points[0], and: points[1]) {
+          onSelectionScaled(["pageNumber": scaled.pageNumber, "strokeIds": scaled.strokeIds, "factor": Double(scaled.factor),
+                             "centerX": Double(scaled.centerX), "centerY": Double(scaled.centerY)])
+        } else {
+          annotationOverlay.cancelScale()
+        }
+      case .none: break
+      }
+      fingerSelectionMode = .none
+      setNonPencilGesturesEnabled(true)
+    case .cancelled, .failed:
+      // Abandons the manipulation only; the selection itself is untouched.
+      switch fingerSelectionMode {
+      case .move: annotationOverlay.cancelMove()
+      case .scale: annotationOverlay.cancelScale()
+      case .none: break
+      }
+      if fingerSelectionMode != .none || recognizer.state == .cancelled { setNonPencilGesturesEnabled(true) }
+      fingerSelectionMode = .none
+    default: break
+    }
+  }
+
+  @objc private func handleSelectionTap(_ recognizer: UITapGestureRecognizer) {
+    guard annotationMode == "select" || annotationMode == "pen" || annotationMode == "highlighter", recognizer.state == .ended else { return }
+    let point = recognizer.location(in: pdfView)
+    if annotationOverlay.fingerHitsSelection(at: point) { return }   // inside the selection: never a deselect
+    if let hit = annotationOverlay.fingerTap(at: point) {
+      onSelectionChanged(["pageNumber": hit.pageNumber, "strokeIds": hit.strokeIds])
+    } else {
+      onSelectionChanged(["pageNumber": 0, "strokeIds": []])
+    }
+  }
 
   @objc private func handlePencilGesture(_ recognizer: PencilDrawGestureRecognizer) {
     switch recognizer.state {
     case .began:
+      // A structured shape is directly interactive whichever drawing tool is active: the Pencil on a HANDLE of the
+      // selected shape reshapes it (no ink). Any other Pencil-down releases a selection (blank touch) and writes.
+      if annotationMode == "pen" || annotationMode == "highlighter" {
+        let downPoint = recognizer.location(in: pdfView)
+        if annotationOverlay.beginHandleDragIfHit(at: downPoint) {
+          isDraggingShapeHandle = true
+          setNonPencilGesturesEnabled(false)
+          return
+        }
+        if annotationOverlay.penDownDeselectIfElsewhere(at: downPoint) {
+          onSelectionChanged(["pageNumber": 0, "strokeIds": []])
+        }
+      }
       // Exclusive interaction priority while a Pencil stroke is physically
       // in progress: a resting palm or stray finger is `.direct`-type touch,
       // which the mode-level allowedTouchTypes restriction above already
@@ -1053,7 +1297,10 @@ public final class PdfAnnotationView: ExpoView {
       armViewportTrace("Pencil began")
       traceViewportMutation("pencil-begin", reason: "before non-Pencil disable", force: true)
       #endif
+      onPencilActivity(["active": true])
+      let toggleStart = ProcessInfo.processInfo.systemUptime
       setNonPencilGesturesEnabled(false)
+      inkRecorder.beginStroke(toggleMs: (ProcessInfo.processInfo.systemUptime - toggleStart) * 1000, overlay: annotationOverlay, mode: annotationMode)
       #if DEBUG
       traceViewportMutation("non-pencil-gestures", reason: "disabled for Pencil", force: true)
       #endif
@@ -1079,6 +1326,10 @@ public final class PdfAnnotationView: ExpoView {
       }
 
     case .changed:
+      if isDraggingShapeHandle {
+        if let point = recognizer.confirmedPoints.last { annotationOverlay.updateHandleDrag(at: point) }
+        return
+      }
       let p = recognizer.location(in: pdfView)
       let overlayPoint = recognizer.location(in: annotationOverlay)
       if annotationMode == "eraser" {
@@ -1091,11 +1342,23 @@ public final class PdfAnnotationView: ExpoView {
           traceViewportMutation("pencil-first-sample", reason: "confirmed samples=\(recognizer.confirmedPoints.count)")
         }
         #endif
-        for point in recognizer.confirmedPoints { annotationOverlay.appendPoint(at: point) }
+        annotationOverlay.appendPoints(at: recognizer.confirmedPoints)
+        inkRecorder.noteEvent(coalesced: recognizer.confirmedPoints.count)
       }
 
     case .ended:
+      if isDraggingShapeHandle {
+        let end = recognizer.confirmedPoints.last ?? recognizer.location(in: pdfView)
+        if let edit = annotationOverlay.finishHandleDrag(at: end) {
+          onShapeEdited(["pageNumber": edit.pageNumber, "strokeId": edit.strokeId, "handleIndex": edit.handleIndex,
+                         "x": Double(edit.x), "y": Double(edit.y)])
+        }
+        isDraggingShapeHandle = false
+        setNonPencilGesturesEnabled(true)
+        return
+      }
       setNonPencilGesturesEnabled(true)
+      defer { onPencilActivity(["active": false]) }
       #if DEBUG
       pencilStrokeActive = false
       strokeJustEnded = true
@@ -1111,14 +1374,28 @@ public final class PdfAnnotationView: ExpoView {
         annotationOverlay.hideEraserPreview()
         emitEraserGestureEnded(at: recognizer.location(in: pdfView))
       } else {
-        for point in recognizer.confirmedPoints { annotationOverlay.appendPoint(at: point) }
-        if let commit = annotationOverlay.endStroke() {
+        annotationOverlay.appendPoints(at: recognizer.confirmedPoints)
+        // TAP vs DRAW, decided once at Pencil-up: a quick tap on an existing structured shape selects it and
+        // suppresses the dot; a drag/slow press/snap/blank tap keeps ordinary Pen behavior (dots included).
+        if let tapped = annotationOverlay.penTapShapeTarget() {
+          annotationOverlay.cancelStroke()
+          annotationOverlay.selectShapeFromPenTap(tapped.stroke, pageNumber: tapped.pageNumber)
+          onSelectionChanged(["pageNumber": tapped.pageNumber, "strokeIds": [tapped.stroke.id]])
+          inkRecorder.cancel()
+          return
+        }
+        let commitStart = ProcessInfo.processInfo.systemUptime
+        let committedStroke = annotationOverlay.endStroke()
+        if let commit = committedStroke {
         #if DEBUG
         traceViewportMutation("annotation-committed", reason: "page=\(commit.pageNumber) points=\(commit.stroke.points.count)", force: true)
         print("[PdfAnnotationView] pencil .ended commit page=\(commit.pageNumber) points=\(commit.stroke.points.count)")
         #endif
         emitStrokeCommitted(commit.stroke, pageNumber: commit.pageNumber)
+        if annotationOverlay.clearSelectionAfterInk() { onSelectionChanged(["pageNumber": 0, "strokeIds": []]) }
+        inkRecorder.endStroke(commitMs: (ProcessInfo.processInfo.systemUptime - commitStart) * 1000, overlay: annotationOverlay)
         } else {
+        inkRecorder.cancel()
         #if DEBUG
         print("[PdfAnnotationView] pencil .ended NO commit (empty stroke)")
         #endif
@@ -1126,7 +1403,15 @@ public final class PdfAnnotationView: ExpoView {
       }
 
     case .cancelled, .failed:
+      if isDraggingShapeHandle {
+        annotationOverlay.cancelHandleDrag()
+        isDraggingShapeHandle = false
+        setNonPencilGesturesEnabled(true)
+        return
+      }
       setNonPencilGesturesEnabled(true)
+      onPencilActivity(["active": false])
+      inkRecorder.cancel()
       #if DEBUG
       pencilStrokeActive = false
       strokeJustEnded = true
@@ -1167,6 +1452,7 @@ public final class PdfAnnotationView: ExpoView {
     traceViewportMutation("annotation-layout-change", reason: "PDFKit scale/visible pages notification")
     #endif
     annotationOverlay.setNeedsDisplay()
+    annotationOverlay.refreshSelectionChrome()
     if inlineTextEditingContext != nil || pendingInlineTextHandoff != nil { scheduleInlineTextEditorReposition() }
     completeInlineTextHandoffIfReady()
     scheduleViewportSnapshot()
@@ -1237,7 +1523,7 @@ public final class PdfAnnotationView: ExpoView {
     #if DEBUG
     traceViewportMutation("setNonPencilGesturesEnabled-before", reason: "enabled=\(enabled)")
     #endif
-    for recognizer in allGestureRecognizers(in: pdfView) where recognizer !== pencilGesture {
+    for recognizer in allGestureRecognizers(in: pdfView) where recognizer !== pencilGesture && recognizer !== selectionGesture && recognizer !== selectionFingerGesture && recognizer !== selectionTapGesture {
       recognizer.isEnabled = enabled
     }
     #if DEBUG
@@ -1246,14 +1532,14 @@ public final class PdfAnnotationView: ExpoView {
   }
 
   private func applyPdfGestureTouchPolicy() {
-    let isAnnotationTool = annotationMode == "pen" || annotationMode == "highlighter" || annotationMode == "eraser"
+    let isAnnotationTool = annotationMode == "pen" || annotationMode == "highlighter" || annotationMode == "eraser" || annotationMode == "select"
     let fingerTouchTypes = [
       NSNumber(value: UITouch.TouchType.direct.rawValue),
       NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)
     ]
 
     for recognizer in allGestureRecognizers(in: pdfView) {
-      if recognizer === pencilGesture { continue }
+      if recognizer === pencilGesture || recognizer === selectionGesture || recognizer === selectionFingerGesture || recognizer === selectionTapGesture { continue }
       let key = ObjectIdentifier(recognizer)
       if defaultAllowedTouchTypesByRecognizer[key] == nil {
         defaultAllowedTouchTypesByRecognizer[key] = recognizer.allowedTouchTypes as? [NSNumber] ?? []
@@ -1604,7 +1890,7 @@ public final class PdfAnnotationView: ExpoView {
   }
 
   private func serializeStroke(_ stroke: AnnotationStroke) -> [String: Any] {
-    return [
+    var payload: [String: Any] = [
       "id": stroke.id,
       "tool": stroke.tool,
       "color": stroke.color,
@@ -1613,6 +1899,8 @@ public final class PdfAnnotationView: ExpoView {
       "points": stroke.points.map { [$0.x, $0.y] },
       "createdAt": stroke.createdAt
     ]
+    if let shape = stroke.shape { payload["shape"] = shape.json }
+    return payload
   }
 
   private func url(from fileUri: String) -> URL? {
@@ -1628,7 +1916,11 @@ extension PdfAnnotationView: UIGestureRecognizerDelegate {
   public func gestureRecognizer(
     _ gestureRecognizer: UIGestureRecognizer,
     shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
-  ) -> Bool { true }
+  ) -> Bool {
+    // The selection recognisers (Pencil region/move, finger move/scale) never share touches with PDFView's own.
+    let owned: [UIGestureRecognizer] = [selectionGesture, selectionFingerGesture]
+    return !owned.contains { $0 === gestureRecognizer || $0 === otherGestureRecognizer }
+  }
 
   public func gestureRecognizer(
     _ gestureRecognizer: UIGestureRecognizer,
@@ -1660,6 +1952,108 @@ extension PdfAnnotationView: UITextViewDelegate {
 }
 
 // MARK: - PencilDrawGestureRecognizer
+
+/// Pencil-only selection samples. One touch owns one PDF page for the
+/// complete gesture; multi-touch is rejected so a pinch cannot become a lasso.
+final class PageSelectionGestureRecognizer: UIGestureRecognizer {
+  private(set) var confirmedPoints: [CGPoint] = []
+  private var activeTouch: UITouch?
+
+  override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+    super.touchesBegan(touches, with: event)
+    guard isEnabled, activeTouch == nil, touches.count == 1,
+          let touch = touches.first, touch.type == .pencil else {
+      state = .failed; return
+    }
+    activeTouch = touch
+    confirmedPoints = [touch.location(in: view)]
+    state = .began
+  }
+
+  override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+    super.touchesMoved(touches, with: event)
+    guard let touch = activeTouch, touches.contains(touch) else { return }
+    confirmedPoints = (event.coalescedTouches(for: touch) ?? [touch]).map { $0.location(in: view) }
+    state = .changed
+  }
+
+  override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+    super.touchesEnded(touches, with: event)
+    guard let touch = activeTouch, touches.contains(touch) else { return }
+    confirmedPoints = [touch.location(in: view)]
+    activeTouch = nil
+    state = .ended
+  }
+
+  override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+    super.touchesCancelled(touches, with: event)
+    activeTouch = nil
+    confirmedPoints = []
+    state = .cancelled
+  }
+
+  override func reset() {
+    super.reset()
+    activeTouch = nil
+    confirmedPoints = []
+  }
+}
+
+/// Finger recogniser for manipulating the CURRENT selection. It begins only when the first touch lands inside the
+/// selected region (`beginsInside`); otherwise it fails at once and PDFView's own pan/pinch handle the touch. A
+/// second finger that also lands inside upgrades the gesture to a two-finger scale.
+final class SelectionFingerGestureRecognizer: UIGestureRecognizer {
+  var beginsInside: ((CGPoint) -> Bool)?
+  private var tracked: [UITouch] = []
+  /// Locations of the tracked touches (in the attached view's coordinates), first finger first.
+  private(set) var points: [CGPoint] = []
+
+  private func refreshPoints() {
+    guard let view else { return }
+    points = tracked.map { $0.location(in: view) }
+  }
+
+  override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+    super.touchesBegan(touches, with: event)
+    guard isEnabled, let view else { state = .failed; return }
+    for touch in touches.sorted(by: { $0.timestamp < $1.timestamp }) where touch.type == .direct && tracked.count < 2 {
+      guard beginsInside?(touch.location(in: view)) == true else {
+        if tracked.isEmpty { state = .failed; return }
+        continue   // a second finger outside the region is ignored
+      }
+      tracked.append(touch)
+    }
+    guard !tracked.isEmpty else { state = .failed; return }
+    refreshPoints()
+    state = state == .possible ? .began : .changed
+  }
+
+  override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+    super.touchesMoved(touches, with: event)
+    guard tracked.contains(where: { touches.contains($0) }) else { return }
+    refreshPoints()
+    state = .changed
+  }
+
+  override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+    super.touchesEnded(touches, with: event)
+    guard tracked.contains(where: { touches.contains($0) }) else { return }
+    refreshPoints()
+    state = .ended
+  }
+
+  override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+    super.touchesCancelled(touches, with: event)
+    guard tracked.contains(where: { touches.contains($0) }) else { return }
+    state = .cancelled
+  }
+
+  override func reset() {
+    super.reset()
+    tracked.removeAll()
+    points = []
+  }
+}
 
 /// Pencil-only gesture recognizer. `allowedTouchTypes = [.pencil]` is the
 /// OS-level filter that reliably routes only Apple Pencil touches to us.
@@ -1704,15 +2098,24 @@ final class PencilDrawGestureRecognizer: UIGestureRecognizer {
 
 // MARK: - AnnotationOverlay (pure rendering)
 
-/// Each live chunk has at most 32 samples: assigning its CGPath never copies
-/// the entire stroke. The parent opacity composites chunk joins uniformly.
+/// Ink geometry policy = Notebook's production `strokeToPath`
+/// (lib/notebookStroke.ts): M s0, then `Q s[i] mid(s[i], s[i+1])` for every
+/// interior sample, then `L last`. Live and committed strokes go through this
+/// same class, so a stroke never changes shape when it is committed.
+///
+/// Each CAShapeLayer chunk holds at most 32 curves: assigning its CGPath never
+/// copies the entire stroke. The parent opacity composites chunk joins
+/// uniformly. A whole touch event's coalesced samples are applied in ONE
+/// CATransaction with ONE path assignment.
 final class PageInkStrokeLayer: CALayer {
   private let inkColor: CGColor
   private let inkWidth: CGFloat
   private var chunk = CAShapeLayer()
-  private var path = CGMutablePath()
+  private var committed = CGMutablePath()
+  private var curveEnd = CGPoint.zero
+  private var curvesInChunk = 0
+  private var last: CGPoint?
   private var sampleCount = 0
-  private var lastPoint: CGPoint?
   private var dot: CAShapeLayer?
 
   init(color: String, width: Double, opacity: Double) {
@@ -1722,7 +2125,7 @@ final class PageInkStrokeLayer: CALayer {
     self.opacity = Float(opacity)
     allowsGroupOpacity = true
     masksToBounds = false
-    startChunk()
+    startChunk(at: nil)
   }
   override init(layer: Any) {
     let source = layer as! PageInkStrokeLayer
@@ -1732,7 +2135,7 @@ final class PageInkStrokeLayer: CALayer {
   }
   required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-  private func startChunk() {
+  private func startChunk(at start: CGPoint?) {
     chunk = CAShapeLayer()
     chunk.strokeColor = inkColor
     chunk.fillColor = nil
@@ -1741,32 +2144,54 @@ final class PageInkStrokeLayer: CALayer {
     chunk.lineJoin = .round
     chunk.actions = ["path": NSNull(), "position": NSNull(), "bounds": NSNull()]
     addSublayer(chunk)
-    path = CGMutablePath()
-    sampleCount = 0
-    if let lastPoint { path.move(to: lastPoint) }
+    committed = CGMutablePath()
+    curvesInChunk = 0
+    if let start { committed.move(to: start) }
   }
 
-  func append(_ point: CGPoint) {
-    if point == lastPoint { return }
+  func append(_ point: CGPoint) { append(contentsOf: [point]) }
+
+  func append(contentsOf points: [CGPoint]) {
+    guard !points.isEmpty else { return }
     CATransaction.begin()
     CATransaction.setDisableActions(true)
-    if lastPoint == nil {
-      let first = CAShapeLayer()
-      first.fillColor = inkColor
-      first.path = CGPath(ellipseIn: CGRect(x: point.x - inkWidth / 2, y: point.y - inkWidth / 2,
-                                            width: inkWidth, height: inkWidth), transform: nil)
-      addSublayer(first)
-      dot = first
-      path.move(to: point)
-    } else {
-      if sampleCount >= 32 { startChunk() }
-      path.addLine(to: point)
-      chunk.path = path
+    var changed = false
+    for point in points {
+      if point == last { continue }
+      guard let previous = last else {
+        let first = CAShapeLayer()
+        first.fillColor = inkColor
+        first.path = CGPath(ellipseIn: CGRect(x: point.x - inkWidth / 2, y: point.y - inkWidth / 2,
+                                              width: inkWidth, height: inkWidth), transform: nil)
+        addSublayer(first)
+        dot = first
+        committed.move(to: point)
+        curveEnd = point
+        last = point
+        sampleCount = 1
+        continue
+      }
+      if sampleCount >= 2 {
+        if curvesInChunk >= 32 {
+          chunk.path = committed
+          startChunk(at: curveEnd)
+        }
+        let mid = CGPoint(x: (previous.x + point.x) / 2, y: (previous.y + point.y) / 2)
+        committed.addQuadCurve(to: mid, control: previous)
+        curveEnd = mid
+        curvesInChunk += 1
+      }
+      last = point
+      sampleCount += 1
+      changed = true
+    }
+    if changed, let tip = last {
+      let drawn = committed.mutableCopy() ?? CGMutablePath()
+      drawn.addLine(to: tip)
+      chunk.path = drawn
       dot?.removeFromSuperlayer()
       dot = nil
     }
-    sampleCount += 1
-    lastPoint = point
     CATransaction.commit()
   }
 }
@@ -1857,6 +2282,26 @@ final class AnnotationOverlay: UIView {
   var highlighterWidth: Double = 18
   var eraserRadius: Double = 26
 
+  // ---- Shape Snap (draw-and-hold) ----
+  // Bounded by design: per accepted sample it is one distance compare; ONE
+  // main-runloop Timer per stroke re-arms itself for the remaining time (never
+  // reset per sample); recognition itself is shared TS and only runs when the
+  // hold fires (one event out, one answer back). Nothing here touches props,
+  // loadAnnotations, the overlay's draw pass, or file IO.
+  var shapeSnapEnabled = false
+  var shapeSnapHoldSeconds = 0.65
+  var shapeSnapTolerancePt = 3.5
+  var onShapeHold: ((Int, Int, [CGPoint]) -> Void)?
+  private var holdTimer: Timer?
+  private var holdAnchor = CGPoint.zero
+  private var holdAnchorUptime = 0.0
+  private var holdLast = CGPoint.zero
+  private var holdFired = false
+  private var holdSamples = 0
+  private var holdTravelPt = 0.0
+  private var strokeToken = 0
+  private var snapFrozen = false
+
   /// Committed strokes loaded from JS, keyed by 1-based page number.
   private var pagedStrokes: [Int: [AnnotationStroke]] = [:]
   /// IDs of strokes committed here (via `endStroke`) that a subsequent
@@ -1880,6 +2325,38 @@ final class AnnotationOverlay: UIView {
   private var pageTextLayers: [Int: PageTextAnnotationLayer] = [:]
   private weak var textDocumentView: UIView?
   private var pagedTextAnnotations: [Int: [TextAnnotation]] = [:]
+  private var selectionPageNumber: Int?
+  private var selectionShape = "lasso"
+  private var selectionPoints: [CGPoint] = []
+  private var selectedStrokeIds: Set<String> = []
+  private var selectionLayer: CAShapeLayer?
+  /// Region being drawn (Box/Lasso) lives on its OWN page layer, separate from the selection outline,
+  /// so the previous selection can stay visible until the drag proves it is a new region.
+  private var regionPageNumber: Int?
+  private var regionLayer: CAShapeLayer?
+  private var regionDragged = false
+  /// The ONE authoritative selection state machine; `selectedStrokeIds` is its projection.
+  private var machine: SelectionState = .idle
+  var selectionStateKind: String { machine.kind }
+  /// Ids selected programmatically that native has not seen yet (Duplicate copies still in flight).
+  private var unseenSelectedIds: Set<String> = []
+  /// Called when a reload/undo/redo changed what is selected (JS keeps its Duplicate/Delete state in sync).
+  var onSelectionReconciled: ((Int, [String]) -> Void)?
+  private struct ScaleSession {
+    let pageNumber: Int
+    let originals: [AnnotationStroke]
+    let center: CGPoint
+    let startDistance: CGFloat
+    let span: CGFloat
+    var factor: CGFloat
+  }
+  private var scaleSession: ScaleSession?
+  private var scalePreviewLayers: [String: CAShapeLayer] = [:]
+  private var scalePreviewBounds: CGRect?
+  private var moveStartPagePoint: CGPoint?
+  /// Cheap always-on counters (fixture + DEV recorder read them).
+  var perf = InkPerfCounters()
+  private var moveOffset: CGPoint = .zero
   /// Native visual commits, keyed by the SAME id JS persists. An older prop
   /// cannot remove/revert the glyph during the asynchronous persistence echo.
   /// This is transient render reconciliation, not another persisted annotation.
@@ -1899,8 +2376,782 @@ final class AnnotationOverlay: UIView {
   private var inProgressColor: String = "#061B34"
   private var inProgressWidth: Double = 2.4
   private var inProgressOpacity: Double = 1
+  /// Structured shape produced by a Shape Snap for the live stroke (committed with it on lift).
+  private var inProgressShape: StrokeShape?
+  /// Start of the live Pen/Highlighter stroke: a TAP is decided from extent + duration at Pencil-up (never per sample).
+  private var penStrokeStartUptime = 0.0
+  /// Mirrors lib/penTapSelect.ts (PEN_TAP_MAX_DURATION_MS).
+  static let penTapMaxDurationSeconds = 0.45
+
+  // ---- Structured shape editing (Shape System Phase 2) ----
+  // Handles are UI only: page-space CAShapeLayers sized `screenPt / scale`, redrawn with the
+  // selection chrome. A handle drag runs entirely natively on a lightweight preview layer
+  // (exact primitives) and emits ONE event on release; no props, no per-sample JS.
+  private static let handleRadiusPt: CGFloat = 9
+  private static let handleHitPt: CGFloat = 24
+  private static let tapSelectPt: CGFloat = 16
+  private static let tapMaxExtentPt: CGFloat = 10
+  private var handleLayer: CAShapeLayer?
+  private var shapePreviewLayer: CAShapeLayer?
+  private struct ShapeHandleDrag {
+    let strokeId: String
+    let pageNumber: Int
+    let index: Int
+    let grabOffset: CGPoint
+    let original: StrokeShape
+    var geometry: StrokeShapeGeometry
+    var changed: Bool
+  }
+  private var handleDrag: ShapeHandleDrag?
+  /// Set from release until JS echoes the edited stroke (or the fallback fires).
+  var shapeEditAwaitingId: String?
+  private var shapeEditOverrideGeometry: StrokeShapeGeometry?
+  private var shapeEditFallback: Timer?
+  /// The stored ink layer hidden while its live preview stands in for it.
+  private var hiddenInkStrokeId: String?
 
   var annotationCount: Int { pagedStrokes.values.reduce(0) { $0 + $1.count } }
+
+  @discardableResult
+  private func dispatch(_ event: SelectionEvent) -> String? {
+    let (next, cleared) = SelectionMachine.reduce(machine, event)
+    machine = next
+    selectedStrokeIds = Set(SelectionMachine.selectedIds(next))
+    if selectedStrokeIds.isEmpty { dropSelectionVisuals() }
+    return cleared
+  }
+
+  /// Removes the selection outline / handles. Only ever called when the machine holds no selection.
+  private func dropSelectionVisuals() {
+    abortManipulations()
+    selectionPageNumber = nil
+    unseenSelectedIds.removeAll()
+    selectionLayer?.removeFromSuperlayer()
+    selectionLayer = nil
+    handleLayer?.removeFromSuperlayer()
+    handleLayer = nil
+  }
+
+  /// Cancels any in-flight move / scale / handle drag WITHOUT touching the selection itself.
+  private func abortManipulations() {
+    if moveStartPagePoint != nil { applyMoveTransforms(.zero) }
+    moveStartPagePoint = nil
+    moveOffset = .zero
+    if handleDrag != nil { cancelHandleDrag() }
+    if scaleSession != nil { cancelScale() }
+    clearShapeEditPreview()
+  }
+
+  private func regionCleanup() {
+    selectionPoints.removeAll()
+    regionPageNumber = nil
+    regionDragged = false
+    regionLayer?.removeFromSuperlayer()
+    regionLayer = nil
+  }
+
+  /// Explicit cancel (also what JS uses after Delete). Ambient events never call this.
+  func clearSelection() {
+    abortManipulations()
+    regionCleanup()
+    dispatch(.cancel)
+    dropSelectionVisuals()
+  }
+
+  /// Leaving the Select tool is one of the explicit deselection events.
+  func toolChanged(to mode: String) {
+    guard mode != "select" else { return }
+    abortManipulations()
+    regionCleanup()
+    dispatch(.toolChange(mode))
+    dropSelectionVisuals()
+  }
+
+  /// A Pencil gesture that began as a new region was cancelled: the previous selection is restored, never lost.
+  func cancelRegion() {
+    dispatch(.regionCancelled)
+    regionCleanup()
+    if selectionPageNumber != nil { drawSelectionChrome() }
+  }
+
+  /// The single selected structured stroke, if the selection is exactly one shape.
+  private func selectedShapeStroke() -> (stroke: AnnotationStroke, pageNumber: Int)? {
+    guard let number = selectionPageNumber, selectedStrokeIds.count == 1,
+          let stroke = (pagedStrokes[number] ?? []).first(where: { selectedStrokeIds.contains($0.id) }),
+          stroke.shape != nil else { return nil }
+    return (stroke, number)
+  }
+
+  private func outlineDistance(_ points: [CGPoint], to p: CGPoint) -> CGFloat {
+    var best = CGFloat.infinity
+    if points.count == 1 { return hypot(points[0].x - p.x, points[0].y - p.y) }
+    for index in 1..<max(1, points.count) {
+      let a = points[index - 1], b = points[index]
+      let dx = b.x - a.x, dy = b.y - a.y
+      let len2 = dx * dx + dy * dy
+      let t = len2 == 0 ? 0 : max(0, min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2))
+      best = min(best, hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t)))
+    }
+    return best
+  }
+
+  /// The structured stroke whose outline is within `tolerance` (page units) of `p`; topmost wins ties.
+  private func structuredStroke(onPage number: Int, near p: CGPoint, tolerance: CGFloat) -> AnnotationStroke? {
+    var best: AnnotationStroke?
+    var bestDistance = tolerance
+    for stroke in pagedStrokes[number] ?? [] where stroke.shape != nil {
+      let d = outlineDistance(stroke.points, to: p)
+      if d <= bestDistance { bestDistance = d; best = stroke }
+    }
+    return best
+  }
+
+  /// Union of the selected strokes' page-space points (before any live drag offset).
+  private func selectedPageBounds() -> CGRect {
+    guard let number = selectionPageNumber else { return .null }
+    if let preview = scalePreviewBounds { return preview }
+    var bounds = CGRect.null
+    for stroke in pagedStrokes[number] ?? [] where selectedStrokeIds.contains(stroke.id) {
+      for point in stroke.points { bounds = bounds.union(CGRect(origin: point, size: .zero)) }
+    }
+    return bounds
+  }
+
+  /// Starts dragging when the Pencil lands inside the selected ink's bounds.
+  func beginMoveIfHit(at viewPoint: CGPoint, padPt: CGFloat = SelectionLimits.pencilPadPt) -> Bool {
+    guard !selectedStrokeIds.isEmpty, selectionPoints.isEmpty, scaleSession == nil,
+          let number = selectionPageNumber, let pdfView, let document = pdfView.document,
+          let page = document.page(at: number - 1), pdfView.page(for: viewPoint, nearest: false) === page else { return false }
+    let bounds = selectedPageBounds()
+    guard !bounds.isNull else { return false }
+    let pad = padPt / max(0.01, pdfView.scaleFactor)
+    let point = pdfView.convert(viewPoint, to: page)
+    guard bounds.insetBy(dx: -pad, dy: -pad).contains(point) else { return false }
+    // The Pencil touching ANOTHER structured shape's outline is a (tap-)select of that shape, not a move.
+    // A finger inside the selected region always belongs to the selection.
+    if padPt == SelectionLimits.pencilPadPt {
+      let tapTolerance = Self.tapSelectPt / max(0.01, pdfView.scaleFactor)
+      if let other = structuredStroke(onPage: number, near: point, tolerance: tapTolerance), !selectedStrokeIds.contains(other.id) {
+        return false
+      }
+    }
+    moveStartPagePoint = point
+    moveOffset = .zero
+    dispatch(.beginMove)
+    return true
+  }
+
+  /// A finger TAP outside the selected region: selects the structured shape under it, otherwise it is
+  /// an explicit deselect (blank tap). Returns the new selection, or nil when nothing is selected.
+  func fingerTap(at viewPoint: CGPoint) -> (pageNumber: Int, strokeIds: [String])? {
+    guard scaleSession == nil, handleDrag == nil, regionPageNumber == nil, let pdfView, let document = pdfView.document else { return nil }
+    if let page = pdfView.page(for: viewPoint, nearest: false) {
+      let number = document.index(for: page) + 1
+      let point = pdfView.convert(viewPoint, to: page)
+      let unit = 1 / max(0.01, pdfView.scaleFactor)
+      if number > 0, let hit = structuredStroke(onPage: number, near: point, tolerance: Self.tapSelectPt * unit) {
+        selectionPageNumber = number
+        unseenSelectedIds.removeAll()
+        dispatch(.tapShape(hit.id))
+        drawSelectionChrome()
+        return (number, [hit.id])
+      }
+    }
+    dispatch(.tapBlank)
+    return nil
+  }
+
+  /// True when a FINGER touch-down at `viewPoint` lands inside the selected region (screen-point tolerance),
+  /// i.e. the touch belongs to the selection; anywhere else it belongs to the page.
+  func fingerHitsSelection(at viewPoint: CGPoint) -> Bool {
+    guard !selectedStrokeIds.isEmpty, regionPageNumber == nil, scaleSession == nil, handleDrag == nil,
+          let number = selectionPageNumber, let pdfView, let document = pdfView.document,
+          let page = document.page(at: number - 1), pdfView.page(for: viewPoint, nearest: true) === page else { return false }
+    let bounds = selectedPageBounds()
+    guard !bounds.isNull else { return false }
+    let pad = SelectionLimits.touchPadPt / max(0.01, pdfView.scaleFactor)
+    return bounds.insetBy(dx: -pad, dy: -pad).contains(pdfView.convert(viewPoint, to: page))
+  }
+
+  /// The delta is computed in the selection page's own space, so zoom, scroll
+  /// and page rotation cannot skew it. It is clamped so ink stays on its page.
+  func updateMove(at viewPoint: CGPoint) {
+    guard let start = moveStartPagePoint, let number = selectionPageNumber,
+          let pdfView, let document = pdfView.document, let page = document.page(at: number - 1) else { return }
+    let point = pdfView.convert(viewPoint, to: page)
+    var dx = point.x - start.x, dy = point.y - start.y
+    let bounds = selectedPageBounds(), box = page.bounds(for: .mediaBox)
+    if !bounds.isNull {
+      if bounds.width <= box.width { dx = min(max(dx, box.minX - bounds.minX), box.maxX - bounds.maxX) }
+      if bounds.height <= box.height { dy = min(max(dy, box.minY - bounds.minY), box.maxY - bounds.maxY) }
+    }
+    moveOffset = CGPoint(x: dx, y: dy)
+    applyMoveTransforms(moveOffset)
+    drawSelectionChrome()
+  }
+
+  private func applyMoveTransforms(_ offset: CGPoint) {
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    for id in selectedStrokeIds {
+      savedInkLayers[id]?.setAffineTransform(CGAffineTransform(translationX: offset.x, y: offset.y))
+    }
+    CATransaction.commit()
+  }
+
+  /// Commits the drag into the native model at once (so no stale prop can
+  /// snap the ink back) and reports ONE page-space delta for JS history.
+  func finishMove() -> (pageNumber: Int, strokeIds: [String], dx: CGFloat, dy: CGFloat)? {
+    guard moveStartPagePoint != nil, let number = selectionPageNumber else { return nil }
+    dispatch(.endMove)
+    let dx = moveOffset.x, dy = moveOffset.y
+    // The drag is over: the live offset must be zero BEFORE the strokes are
+    // rebuilt at their moved coordinates and the outline is recomputed from
+    // them, otherwise the offset would be applied to the outline twice.
+    moveStartPagePoint = nil
+    moveOffset = .zero
+    guard abs(dx) >= 0.5 || abs(dy) >= 0.5 else {
+      applyMoveTransforms(.zero)
+      drawSelectionChrome()
+      return nil
+    }
+    let ids = selectedStrokeIds
+    pagedStrokes[number] = (pagedStrokes[number] ?? []).map { stroke in
+      guard ids.contains(stroke.id) else { return stroke }
+      return AnnotationStroke(
+        id: stroke.id, tool: stroke.tool, color: stroke.color, width: stroke.width,
+        opacity: stroke.opacity, points: stroke.points.map { CGPoint(x: $0.x + dx, y: $0.y + dy) },
+        createdAt: stroke.createdAt,
+        shape: stroke.shape.map { StrokeShape(origin: $0.origin, geometry: $0.geometry.translated(dx: dx, dy: dy)) })
+    }
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    for id in ids { savedInkLayers.removeValue(forKey: id)?.removeFromSuperlayer() }
+    syncPageInk()
+    CATransaction.commit()
+    drawSelectionChrome()
+    return (number, ids.sorted(), dx, dy)
+  }
+
+  func cancelMove() {
+    dispatch(.manipulationCancelled)
+    moveStartPagePoint = nil
+    moveOffset = .zero
+    applyMoveTransforms(.zero)
+    drawSelectionChrome()
+  }
+
+  // MARK: Direct shape tap from a drawing tool (Pen / Highlighter)
+
+  /// The structured shape a just-finished Pen/Highlighter stroke TAPPED, or nil when it is ordinary writing / a
+  /// dot on blank paper. Same rule as lib/penTapSelect.ts: tiny extent, short duration, not hold-snapped, and it
+  /// lands on a shape outline (screen-point tolerance). Evaluated once at Pencil-up.
+  func penTapShapeTarget() -> (stroke: AnnotationStroke, pageNumber: Int)? {
+    guard inProgressStrokeId != nil, !snapFrozen, inProgressShape == nil, let number = inProgressPageNumber, let pdfView,
+          let first = inProgressPoints.first else { return nil }
+    guard ProcessInfo.processInfo.systemUptime - penStrokeStartUptime <= Self.penTapMaxDurationSeconds else { return nil }
+    let extent = inProgressPoints.reduce(CGRect.null) { $0.union(CGRect(origin: $1, size: .zero)) }
+    let unit = 1 / max(0.01, pdfView.scaleFactor)
+    guard max(extent.width, extent.height) < Self.tapMaxExtentPt * unit else { return nil }
+    guard let hit = structuredStroke(onPage: number, near: first, tolerance: Self.tapSelectPt * unit) else { return nil }
+    return (hit, number)
+  }
+
+  /// Selects the tapped shape (SELECTED_SHAPE, handles appear). The drawing tool, colour and width are untouched.
+  func selectShapeFromPenTap(_ stroke: AnnotationStroke, pageNumber: Int) {
+    selectionPageNumber = pageNumber
+    unseenSelectedIds.removeAll()
+    dispatch(.tapShape(stroke.id))
+    drawSelectionChrome()
+  }
+
+  /// A Pencil-down with a drawing tool while a shape is selected: the shape's handles and outline stay (a re-tap /
+  /// reshape); anywhere else it is an explicit "blank" touch and the selection is released. Returns true if cleared.
+  func penDownDeselectIfElsewhere(at viewPoint: CGPoint) -> Bool {
+    guard !selectedStrokeIds.isEmpty, let number = selectionPageNumber, let pdfView,
+          let page = pdfView.document?.page(at: number - 1), pdfView.page(for: viewPoint, nearest: true) === page else { return false }
+    let point = pdfView.convert(viewPoint, to: page)
+    let unit = 1 / max(0.01, pdfView.scaleFactor)
+    if let selected = selectedShapeStroke() {
+      if selected.stroke.shape?.geometry.nearestHandle(to: point, radius: Self.handleHitPt * unit) != nil { return false }
+      if outlineDistance(selected.stroke.points, to: point) <= Self.tapSelectPt * unit { return false }
+    }
+    dispatch(.tapBlank)
+    return true
+  }
+
+  /// Real ink was committed while a shape was selected: writing elsewhere releases the selection. Returns true if cleared.
+  func clearSelectionAfterInk() -> Bool {
+    guard !selectedStrokeIds.isEmpty else { return false }
+    dispatch(.tapBlank)
+    return true
+  }
+
+  // MARK: Structured shape handle drag
+
+  /// Pencil-down on a handle of the single selected structured shape starts a live reshape.
+  func beginHandleDragIfHit(at viewPoint: CGPoint) -> Bool {
+    guard selectionPoints.isEmpty, handleDrag == nil, let (stroke, number) = selectedShapeStroke(),
+          let shape = stroke.shape, let pdfView, let document = pdfView.document,
+          let page = document.page(at: number - 1), pdfView.page(for: viewPoint, nearest: true) === page else { return false }
+    let point = pdfView.convert(viewPoint, to: page)
+    let radius = Self.handleHitPt / max(0.01, pdfView.scaleFactor)
+    guard let index = shape.geometry.nearestHandle(to: point, radius: radius) else { return false }
+    let handle = shape.geometry.handles[index]
+    handleDrag = ShapeHandleDrag(
+      strokeId: stroke.id, pageNumber: number, index: index,
+      grabOffset: CGPoint(x: handle.x - point.x, y: handle.y - point.y),
+      original: shape, geometry: shape.geometry, changed: false)
+    clearShapeEditPreview()
+    dispatch(.beginHandle)
+    return true
+  }
+
+  private func handleDragTarget(at viewPoint: CGPoint) -> CGPoint? {
+    guard let drag = handleDrag, let pdfView, let document = pdfView.document,
+          let page = document.page(at: drag.pageNumber - 1) else { return nil }
+    let point = pdfView.convert(viewPoint, to: page)
+    return CGPoint(x: point.x + drag.grabOffset.x, y: point.y + drag.grabOffset.y)
+  }
+
+  func updateHandleDrag(at viewPoint: CGPoint) {
+    guard var drag = handleDrag, let target = handleDragTarget(at: viewPoint), let pdfView else { return }
+    let unit = 1 / max(0.01, pdfView.scaleFactor)
+    if !drag.changed {
+      let original = drag.original.geometry.handles[drag.index]
+      if hypot(target.x - original.x, target.y - original.y) < 1.5 * unit { return }
+      drag.changed = true
+    }
+    drag.geometry = drag.original.geometry.dragged(handle: drag.index, to: target, minAxis: 2 * unit)
+    handleDrag = drag
+    shapeEditOverrideGeometry = drag.geometry
+    drawShapeEditPreview(for: drag)
+    drawSelectionChrome()
+  }
+
+  /// Ends the drag. Returns the event payload when the shape actually changed; the preview
+  /// then stays until JS echoes the edited stroke (or the fallback restores the original).
+  func finishHandleDrag(at viewPoint: CGPoint) -> (pageNumber: Int, strokeId: String, handleIndex: Int, x: CGFloat, y: CGFloat)? {
+    updateHandleDrag(at: viewPoint)
+    guard let drag = handleDrag else { return nil }
+    // The pointer target the handle followed (line/polygon: the vertex; ellipse: resolved along its axis by JS).
+    let target = handleDragTarget(at: viewPoint)
+    handleDrag = nil
+    // A completed handle edit returns to SELECTED_SHAPE: same shape, handles still visible.
+    dispatch(.endHandle)
+    guard drag.changed, let target else {
+      clearShapeEditPreview()
+      drawSelectionChrome()
+      return nil
+    }
+    shapeEditAwaitingId = drag.strokeId
+    shapeEditFallback?.invalidate()
+    let timer = Timer(timeInterval: 1.5, repeats: false) { [weak self] _ in
+      self?.clearShapeEditPreview()
+    }
+    RunLoop.main.add(timer, forMode: .common)
+    shapeEditFallback = timer
+    return (drag.pageNumber, drag.strokeId, drag.index, target.x, target.y)
+  }
+
+  func cancelHandleDrag() {
+    dispatch(.manipulationCancelled)
+    handleDrag = nil
+    clearShapeEditPreview()
+    drawSelectionChrome()
+  }
+
+  private func drawShapeEditPreview(for drag: ShapeHandleDrag) {
+    guard let stroke = (pagedStrokes[drag.pageNumber] ?? []).first(where: { $0.id == drag.strokeId }),
+          let pageLayer = pageInkLayer(drag.pageNumber) else { return }
+    let layer = shapePreviewLayer ?? CAShapeLayer()
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    savedInkLayers[drag.strokeId]?.isHidden = true
+    hiddenInkStrokeId = drag.strokeId
+    layer.path = drag.geometry.previewPath
+    layer.fillColor = UIColor.clear.cgColor
+    layer.strokeColor = (UIColor(annotationHex: stroke.color) ?? .black).cgColor
+    layer.lineWidth = CGFloat(stroke.width)
+    layer.lineCap = .round
+    layer.lineJoin = .round
+    layer.opacity = Float(stroke.opacity)
+    if layer.superlayer !== pageLayer { pageLayer.addSublayer(layer) }
+    CATransaction.commit()
+    shapePreviewLayer = layer
+  }
+
+  /// Removes the live preview and restores the (possibly re-created) stored ink layer.
+  func clearShapeEditPreview() {
+    shapeEditFallback?.invalidate()
+    shapeEditFallback = nil
+    let hadPreview = shapePreviewLayer != nil || shapeEditAwaitingId != nil || shapeEditOverrideGeometry != nil || hiddenInkStrokeId != nil
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    shapePreviewLayer?.removeFromSuperlayer()
+    shapePreviewLayer = nil
+    if let id = hiddenInkStrokeId { savedInkLayers[id]?.isHidden = false }
+    hiddenInkStrokeId = nil
+    CATransaction.commit()
+    shapeEditAwaitingId = nil
+    shapeEditOverrideGeometry = nil
+    if hadPreview { refreshSelectionChrome() }
+  }
+
+  // MARK: Two-finger scale of the selection
+
+  /// Ink geometry policy shared with `PageInkStrokeLayer`: M s0, `Q s[i-1] mid(s[i-1], s[i])` for i >= 2, L last.
+  private static func inkPath(_ points: [CGPoint]) -> CGPath {
+    let path = CGMutablePath()
+    guard let first = points.first else { return path }
+    path.move(to: first)
+    if points.count == 1 { path.addLine(to: first); return path }
+    if points.count >= 3 {
+      for index in 2..<points.count {
+        let previous = points[index - 1], point = points[index]
+        path.addQuadCurve(to: CGPoint(x: (previous.x + point.x) / 2, y: (previous.y + point.y) / 2), control: previous)
+      }
+    }
+    path.addLine(to: points[points.count - 1])
+    return path
+  }
+
+  private static func scaled(_ stroke: AnnotationStroke, about center: CGPoint, by factor: CGFloat) -> AnnotationStroke {
+    // Geometry scales; identity, colour, tool, opacity and PEN WIDTH are preserved.
+    AnnotationStroke(
+      id: stroke.id, tool: stroke.tool, color: stroke.color, width: stroke.width, opacity: stroke.opacity,
+      points: stroke.points.map { CGPoint(x: center.x + ($0.x - center.x) * factor, y: center.y + ($0.y - center.y) * factor) },
+      createdAt: stroke.createdAt,
+      shape: stroke.shape.map { StrokeShape(origin: $0.origin, geometry: $0.geometry.scaled(about: center, by: factor)) })
+  }
+
+  private func pagePoint(_ viewPoint: CGPoint, page number: Int) -> CGPoint? {
+    guard let pdfView, let document = pdfView.document, let page = document.page(at: number - 1) else { return nil }
+    return pdfView.convert(viewPoint, to: page)
+  }
+
+  /// Two fingers on the selected content start a scale. Everything is computed in PAGE space from the
+  /// ORIGINAL geometry captured here: the live factor never accumulates from already-scaled points.
+  func beginScale(at v1: CGPoint, and v2: CGPoint) -> Bool {
+    guard scaleSession == nil, handleDrag == nil, regionPageNumber == nil, !selectedStrokeIds.isEmpty,
+          let number = selectionPageNumber,
+          let p1 = pagePoint(v1, page: number), let p2 = pagePoint(v2, page: number) else { return false }
+    let originals = (pagedStrokes[number] ?? []).filter { selectedStrokeIds.contains($0.id) }
+    guard !originals.isEmpty else { return false }
+    // Any move preview is discarded: the scale always starts from the original geometry.
+    if moveStartPagePoint != nil { applyMoveTransforms(.zero) }
+    moveStartPagePoint = nil
+    moveOffset = .zero
+    var bounds = CGRect.null
+    for stroke in originals { for point in stroke.points { bounds = bounds.union(CGRect(origin: point, size: .zero)) } }
+    guard !bounds.isNull else { return false }
+    let distance = hypot(p2.x - p1.x, p2.y - p1.y)
+    guard distance > 0.001 else { return false }
+    scaleSession = ScaleSession(
+      pageNumber: number, originals: originals, center: CGPoint(x: bounds.midX, y: bounds.midY),
+      startDistance: distance, span: max(bounds.width, bounds.height), factor: 1)
+    dispatch(.beginScale)
+    return true
+  }
+
+  /// Live factor, clamped by the shared semantic limits (screen-point based, not document units).
+  func updateScale(at v1: CGPoint, and v2: CGPoint) {
+    guard var session = scaleSession, let pdfView,
+          let p1 = pagePoint(v1, page: session.pageNumber), let p2 = pagePoint(v2, page: session.pageNumber) else { return }
+    let raw = hypot(p2.x - p1.x, p2.y - p1.y) / session.startDistance
+    session.factor = SelectionLimits.clamp(raw, spanUnits: session.span, unitsPerPt: 1 / max(0.01, pdfView.scaleFactor))
+    scaleSession = session
+    drawScalePreview(session)
+    drawSelectionChrome()
+  }
+
+  private func drawScalePreview(_ session: ScaleSession) {
+    guard let pageLayer = pageInkLayer(session.pageNumber) else { return }
+    var bounds = CGRect.null
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    for original in session.originals {
+      let scaledStroke = Self.scaled(original, about: session.center, by: session.factor)
+      for point in scaledStroke.points { bounds = bounds.union(CGRect(origin: point, size: .zero)) }
+      let layer = scalePreviewLayers[original.id] ?? CAShapeLayer()
+      layer.path = Self.inkPath(scaledStroke.points)
+      layer.fillColor = UIColor.clear.cgColor
+      layer.strokeColor = (UIColor(annotationHex: original.color) ?? .black).cgColor
+      layer.lineWidth = CGFloat(original.width)
+      layer.lineCap = .round
+      layer.lineJoin = .round
+      layer.opacity = Float(original.opacity)
+      savedInkLayers[original.id]?.isHidden = true
+      if layer.superlayer !== pageLayer { pageLayer.addSublayer(layer) }
+      scalePreviewLayers[original.id] = layer
+    }
+    CATransaction.commit()
+    scalePreviewBounds = bounds.isNull ? nil : bounds
+    if session.originals.count == 1, let shape = session.originals[0].shape {
+      shapeEditOverrideGeometry = shape.geometry.scaled(about: session.center, by: session.factor)
+    }
+  }
+
+  private func tearDownScalePreview() {
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    for (id, layer) in scalePreviewLayers {
+      layer.removeFromSuperlayer()
+      savedInkLayers[id]?.isHidden = false
+    }
+    CATransaction.commit()
+    scalePreviewLayers.removeAll()
+    scalePreviewBounds = nil
+    shapeEditOverrideGeometry = nil
+  }
+
+  /// Commits the pinch into the native model at once (so no stale prop can snap the ink back) and
+  /// reports ONE page-space transform for JS history. The selection stays active.
+  func finishScale(at v1: CGPoint, and v2: CGPoint) -> (pageNumber: Int, strokeIds: [String], factor: CGFloat, centerX: CGFloat, centerY: CGFloat)? {
+    updateScale(at: v1, and: v2)
+    guard let session = scaleSession else { return nil }
+    scaleSession = nil
+    dispatch(.endScale)
+    guard abs(session.factor - 1) >= 0.005 else {
+      tearDownScalePreview()
+      drawSelectionChrome()
+      return nil
+    }
+    let ids = Set(session.originals.map(\.id))
+    pagedStrokes[session.pageNumber] = (pagedStrokes[session.pageNumber] ?? []).map { stroke in
+      ids.contains(stroke.id) ? Self.scaled(stroke, about: session.center, by: session.factor) : stroke
+    }
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    for id in ids { savedInkLayers.removeValue(forKey: id)?.removeFromSuperlayer() }
+    tearDownScalePreview()
+    syncPageInk()
+    CATransaction.commit()
+    drawSelectionChrome()
+    return (session.pageNumber, ids.sorted(), session.factor, session.center.x, session.center.y)
+  }
+
+  func cancelScale() {
+    scaleSession = nil
+    dispatch(.manipulationCancelled)
+    tearDownScalePreview()
+    drawSelectionChrome()
+  }
+
+  /// Programmatic selection (Duplicate re-selects its copies). Ids may not have
+  /// reached native yet; they are tracked as "unseen" so a stale reload cannot drop them,
+  /// and the chrome is recomputed when `loadAnnotations` lands.
+  func setSelection(pageNumber: Int, ids: [String]) {
+    guard pageNumber > 0, !ids.isEmpty else { clearSelection(); return }
+    abortManipulations()
+    regionCleanup()
+    selectionPageNumber = pageNumber
+    let strokes = pagedStrokes[pageNumber] ?? []
+    unseenSelectedIds = Set(ids).subtracting(strokes.map(\.id))
+    if ids.count == 1, strokes.first(where: { $0.id == ids[0] })?.shape != nil {
+      dispatch(.tapShape(ids[0]))
+    } else {
+      dispatch(.selectInk(ids))
+    }
+    drawSelectionChrome()
+  }
+
+  /// A Pencil-down that is not a handle/move starts a NEW region. The previous selection is NOT
+  /// cleared here: it stays until the drag proves this is a region (`.regionDragged`) or the
+  /// tap ends on blank paper (`.tapBlank`) — so a cancelled/failed gesture can never lose it.
+  func beginSelection(at viewPoint: CGPoint, shape: String) {
+    abortManipulations()
+    regionCleanup()
+    selectionShape = shape
+    dispatch(.beginRegion(shape))
+    guard let pdfView, let document = pdfView.document,
+          let page = pdfView.page(for: viewPoint, nearest: false) else { return }
+    let number = document.index(for: page) + 1
+    guard number > 0 else { return }
+    regionPageNumber = number
+    selectionPoints = [pdfView.convert(viewPoint, to: page)]
+    drawRegion()
+  }
+
+  func appendSelection(at viewPoint: CGPoint) {
+    guard let pdfView, let document = pdfView.document,
+          let number = regionPageNumber,
+          let page = document.page(at: number - 1) else { return }
+    // Stay in the page chosen at touch-down. Converting every sample through
+    // that same PDFPage handles zoom, scroll, rotation and continuous layout.
+    let point = pdfView.convert(viewPoint, to: page)
+    let bounds = page.bounds(for: .mediaBox)
+    let clamped = CGPoint(x: min(max(point.x, bounds.minX), bounds.maxX),
+                          y: min(max(point.y, bounds.minY), bounds.maxY))
+    if selectionPoints.last != clamped { selectionPoints.append(clamped) }
+    if !regionDragged {
+      let extent = selectionPoints.reduce(CGRect.null) { $0.union(CGRect(origin: $1, size: .zero)) }
+      if max(extent.width, extent.height) >= Self.tapMaxExtentPt / max(0.01, pdfView.scaleFactor) {
+        regionDragged = true
+        dispatch(.regionDragged)   // explicit "new selection": the previous one is dropped now
+      }
+    }
+    drawRegion()
+  }
+
+  func finishSelection() -> (pageNumber: Int, strokeIds: [String])? {
+    defer { regionCleanup() }
+    guard let number = regionPageNumber, let pdfView else {
+      dispatch(.regionCancelled)
+      dispatch(.tapBlank)
+      return nil
+    }
+    let extent = selectionPoints.reduce(CGRect.null) { $0.union(CGRect(origin: $1, size: .zero)) }
+    let unit = 1 / max(0.01, pdfView.scaleFactor)
+    if max(extent.width, extent.height) < Self.tapMaxExtentPt * unit {
+      // A TAP: selects the structured shape under it (handles appear), otherwise blank paper (explicit deselect).
+      if let first = selectionPoints.first,
+         let hit = structuredStroke(onPage: number, near: first, tolerance: Self.tapSelectPt * unit) {
+        selectionPageNumber = number
+        unseenSelectedIds.removeAll()
+        dispatch(.tapShape(hit.id))
+        drawSelectionChrome()
+        return (number, [hit.id])
+      }
+      dispatch(.regionCancelled)
+      dispatch(.tapBlank)
+      return nil
+    }
+    var ids: [String] = []
+    let bounds = selectionShape == "rect" ? boxBetweenFirstAndLastSelectionPoints() : extent
+    if selectionPoints.count >= 2, bounds.width >= 3, bounds.height >= 3,
+       selectionShape == "rect" || selectionPoints.count >= 3 {
+      let isRect = selectionShape == "rect"
+      ids = (pagedStrokes[number] ?? []).filter { stroke in
+        stroke.points.contains { point in
+          isRect ? bounds.contains(point) : Self.pointInPolygon(point, selectionPoints)
+        }
+      }.map(\.id)
+    }
+    if !regionDragged { dispatch(.regionDragged) }
+    dispatch(.regionComplete(ids))
+    guard !ids.isEmpty else { return nil }
+    selectionPageNumber = number
+    unseenSelectedIds.removeAll()
+    if ids.count == 1, (pagedStrokes[number] ?? []).first(where: { $0.id == ids[0] })?.shape != nil {
+      dispatch(.tapShape(ids[0]))
+    }
+    drawSelectionChrome()
+    return (number, ids.sorted())
+  }
+
+  /// Box selection is corner-to-corner: Pencil-down is corner A and the latest
+  /// Pencil point is corner B, never the bounds of the whole trajectory.
+  private func boxBetweenFirstAndLastSelectionPoints() -> CGRect {
+    guard let a = selectionPoints.first, let b = selectionPoints.last else { return .null }
+    return CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(b.x - a.x), height: abs(b.y - a.y))
+  }
+
+  private static func pointInPolygon(_ point: CGPoint, _ polygon: [CGPoint]) -> Bool {
+    guard polygon.count >= 3 else { return false }
+    var inside = false
+    var previous = polygon.count - 1
+    for index in polygon.indices {
+      let a = polygon[index], b = polygon[previous]
+      if (a.y > point.y) != (b.y > point.y),
+         point.x < (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x { inside.toggle() }
+      previous = index
+    }
+    return inside
+  }
+
+  /// The Box/Lasso region being drawn, on the REGION's own page layer.
+  private func drawRegion() {
+    guard let number = regionPageNumber, let pageLayer = pageInkLayer(number), !selectionPoints.isEmpty else {
+      regionLayer?.removeFromSuperlayer()
+      regionLayer = nil
+      return
+    }
+    let path = UIBezierPath()
+    if selectionShape == "rect" {
+      path.append(UIBezierPath(rect: boxBetweenFirstAndLastSelectionPoints()))
+    } else {
+      path.move(to: selectionPoints[0])
+      for point in selectionPoints.dropFirst() { path.addLine(to: point) }
+    }
+    let layer = regionLayer ?? CAShapeLayer()
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    layer.path = path.cgPath
+    layer.fillColor = UIColor.clear.cgColor
+    layer.strokeColor = UIColor.systemBlue.cgColor
+    layer.lineWidth = 1.5 / max(0.01, pdfView?.scaleFactor ?? 1)
+    layer.lineDashPattern = [5, 3]
+    if layer.superlayer !== pageLayer { pageLayer.addSublayer(layer) }
+    CATransaction.commit()
+    regionLayer = layer
+  }
+
+  /// The selection outline / handles, derived from CURRENT PREVIEW geometry (model + live drag
+  /// offset, or the live scale preview) so it stays attached during move, scale and handle drag.
+  private func drawSelectionChrome() {
+    guard let number = selectionPageNumber, !selectedStrokeIds.isEmpty, let pageLayer = pageInkLayer(number) else {
+      selectionLayer?.removeFromSuperlayer()
+      selectionLayer = nil
+      handleLayer?.removeFromSuperlayer()
+      handleLayer = nil
+      return
+    }
+    let path = UIBezierPath()
+    // A single structured shape shows HANDLES instead of the dashed bounding box.
+    let shapeSelection = selectedShapeStroke()
+    var selectionBounds = selectedPageBounds()
+    if !selectionBounds.isNull, shapeSelection == nil {
+      // moveOffset is always zero while a scale preview is live (beginScale discards any move preview).
+      selectionBounds = selectionBounds.offsetBy(dx: moveOffset.x, dy: moveOffset.y)
+      path.append(UIBezierPath(rect: selectionBounds.insetBy(dx: -5, dy: -5)))
+    }
+    drawShapeHandles(shapeSelection, on: pageLayer)
+    let layer = selectionLayer ?? CAShapeLayer()
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    layer.path = path.cgPath
+    layer.fillColor = UIColor.clear.cgColor
+    layer.strokeColor = UIColor.systemBlue.cgColor
+    layer.lineWidth = 1.5 / max(0.01, pdfView?.scaleFactor ?? 1)
+    layer.lineDashPattern = [5, 3]
+    if layer.superlayer !== pageLayer { pageLayer.addSublayer(layer) }
+    CATransaction.commit()
+    selectionLayer = layer
+  }
+
+  /// Handles (UI only, never stored): circles sized `screenPt / scale` in page space, following
+  /// the live edit geometry and any live body-drag offset.
+  private func drawShapeHandles(_ selection: (stroke: AnnotationStroke, pageNumber: Int)?, on pageLayer: CALayer) {
+    guard let shape = selection?.stroke.shape, let pdfView else {
+      handleLayer?.removeFromSuperlayer()
+      handleLayer = nil
+      return
+    }
+    let unit = 1 / max(0.01, pdfView.scaleFactor)
+    let geometry = shapeEditOverrideGeometry ?? shape.geometry
+    let path = UIBezierPath()
+    for handle in geometry.handles {
+      let center = CGPoint(x: handle.x + moveOffset.x, y: handle.y + moveOffset.y)
+      path.append(UIBezierPath(arcCenter: center, radius: Self.handleRadiusPt * unit, startAngle: 0, endAngle: .pi * 2, clockwise: true))
+    }
+    let layer = handleLayer ?? CAShapeLayer()
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    layer.path = path.cgPath
+    layer.fillColor = UIColor.white.cgColor
+    layer.strokeColor = UIColor.systemBlue.cgColor
+    layer.lineWidth = 2 * unit
+    layer.lineDashPattern = nil
+    if layer.superlayer !== pageLayer { pageLayer.addSublayer(layer) } else { layer.removeFromSuperlayer(); pageLayer.addSublayer(layer) }
+    CATransaction.commit()
+    handleLayer = layer
+  }
+
+  func refreshSelectionChrome() {
+    guard selectionPageNumber != nil else { return }
+    drawSelectionChrome()
+  }
 
   /// Eraser cursor — current Pencil location in overlay coordinates. Drawn as
   /// a circular outline on top of the ink so the user can see where the
@@ -2045,6 +3296,10 @@ final class AnnotationOverlay: UIView {
     inProgressColor = color
     inProgressWidth = width
     inProgressOpacity = tool == "highlighter" ? 0.34 : 1
+    strokeToken += 1
+    snapFrozen = false
+    penStrokeStartUptime = ProcessInfo.processInfo.systemUptime
+    beginHold(at: pagePoint)
     if let pageLayer = pageInkLayer(pageNumber) {
       let ink = PageInkStrokeLayer(color: color, width: width, opacity: inProgressOpacity)
       pageLayer.addSublayer(ink)
@@ -2056,14 +3311,95 @@ final class AnnotationOverlay: UIView {
     #endif
   }
 
-  func appendPoint(at viewPoint: CGPoint) {
+  func appendPoint(at viewPoint: CGPoint) { appendPoints(at: [viewPoint]) }
+
+  /// Applies one touch event's coalesced samples as ONE batch. Samples closer
+  /// than 1.8 screen points to the previous accepted one are dropped, matching
+  /// Notebook's NOTEBOOK_MIN_POINT_DISTANCE filter.
+  func appendPoints(at viewPoints: [CGPoint]) {
+    if snapFrozen { return }
     guard let pdfView, let document = pdfView.document else { return }
     guard let pageNumber = inProgressPageNumber else { return }
     guard let page = document.page(at: pageNumber - 1) else { return }
-    let pagePoint = pdfView.convert(viewPoint, to: page)
-    if inProgressPoints.last == pagePoint { return }
-    inProgressPoints.append(pagePoint)
-    liveInkLayer?.append(pagePoint)
+    let minimumDistance = 1.8 / max(0.01, pdfView.scaleFactor)
+    var accepted: [CGPoint] = []
+    for viewPoint in viewPoints {
+      let pagePoint = pdfView.convert(viewPoint, to: page)
+      if let reference = accepted.last ?? inProgressPoints.last,
+         hypot(pagePoint.x - reference.x, pagePoint.y - reference.y) < minimumDistance {
+        perf.filteredSamples += 1
+        continue
+      }
+      accepted.append(pagePoint)
+    }
+    perf.acceptedSamples += accepted.count
+    guard !accepted.isEmpty else { return }
+    inProgressPoints.append(contentsOf: accepted)
+    liveInkLayer?.append(contentsOf: accepted)
+    if shapeSnapEnabled { for point in accepted { noteHoldSample(point, scale: pdfView.scaleFactor) } }
+  }
+
+  // MARK: - Shape Snap hold tracking
+
+  private func beginHold(at pagePoint: CGPoint) {
+    holdTimer?.invalidate()
+    holdTimer = nil
+    guard shapeSnapEnabled else { return }
+    holdAnchor = pagePoint; holdLast = pagePoint
+    holdAnchorUptime = ProcessInfo.processInfo.systemUptime
+    holdFired = false; holdSamples = 1; holdTravelPt = 0
+    scheduleHoldTimer(after: shapeSnapHoldSeconds)
+  }
+
+  private func noteHoldSample(_ point: CGPoint, scale: CGFloat) {
+    holdSamples += 1
+    holdTravelPt += Double(hypot(point.x - holdLast.x, point.y - holdLast.y) * scale)
+    holdLast = point
+    if Double(hypot(point.x - holdAnchor.x, point.y - holdAnchor.y) * scale) > shapeSnapTolerancePt {
+      holdAnchor = point
+      holdAnchorUptime = ProcessInfo.processInfo.systemUptime
+      holdFired = false
+      if holdTimer == nil { scheduleHoldTimer(after: shapeSnapHoldSeconds) }
+    }
+  }
+
+  private func scheduleHoldTimer(after seconds: Double) {
+    holdTimer?.invalidate()
+    let timer = Timer(timeInterval: max(0.016, seconds), repeats: false) { [weak self] _ in self?.holdTimerFired() }
+    RunLoop.main.add(timer, forMode: .common)
+    holdTimer = timer
+  }
+
+  private func holdTimerFired() {
+    holdTimer = nil
+    guard shapeSnapEnabled, inProgressStrokeId != nil, !snapFrozen, let pageNumber = inProgressPageNumber else { return }
+    let remaining = shapeSnapHoldSeconds - (ProcessInfo.processInfo.systemUptime - holdAnchorUptime)
+    if remaining > 0.008 { scheduleHoldTimer(after: remaining); return }
+    guard !holdFired, holdSamples >= 8, holdTravelPt >= 30 else { return }
+    holdFired = true
+    onShapeHold?(strokeToken, pageNumber, inProgressPoints)
+  }
+
+  /// Replaces the LIVE stroke with the recognized clean geometry (page space). Nothing is
+  /// committed here: the snapped points are what `endStroke` commits when the Pencil lifts.
+  @discardableResult
+  func applyShapeSnap(token: Int, points: [CGPoint], shape: StrokeShape? = nil) -> Bool {
+    guard token == strokeToken, inProgressStrokeId != nil, !snapFrozen, points.count >= 2,
+          let pageNumber = inProgressPageNumber, let pageLayer = pageInkLayer(pageNumber) else { return false }
+    holdTimer?.invalidate(); holdTimer = nil
+    snapFrozen = true
+    inProgressShape = shape
+    inProgressPoints = points
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    liveInkLayer?.removeFromSuperlayer()
+    let ink = PageInkStrokeLayer(color: inProgressColor, width: inProgressWidth, opacity: inProgressOpacity)
+    ink.append(contentsOf: points)
+    pageLayer.addSublayer(ink)
+    liveInkLayer = ink
+    CATransaction.commit()
+    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    return true
   }
 
   /// Returns the committed stroke + its page number, or nil if the stroke
@@ -2083,7 +3419,8 @@ final class AnnotationOverlay: UIView {
       width: inProgressWidth,
       opacity: inProgressOpacity,
       points: inProgressPoints,
-      createdAt: AnnotationOverlay.isoFormatter.string(from: Date())
+      createdAt: AnnotationOverlay.isoFormatter.string(from: Date()),
+      shape: inProgressShape
     )
     pagedStrokes[pageNumber, default: []].append(stroke)
     pendingLocalStrokeIds.insert(id)
@@ -2100,6 +3437,10 @@ final class AnnotationOverlay: UIView {
   }
 
   private func clearInProgress() {
+    holdTimer?.invalidate()
+    holdTimer = nil
+    snapFrozen = false
+    inProgressShape = nil
     liveInkLayer?.removeFromSuperlayer()
     liveInkLayer = nil
     inProgressStrokeId = nil
@@ -2233,6 +3574,13 @@ final class AnnotationOverlay: UIView {
   // MARK: - Loading committed strokes from JS
 
   func loadAnnotations(_ annotationsByPage: [String: Any]?) {
+    let loadStart = ProcessInfo.processInfo.systemUptime
+    defer {
+      let now = ProcessInfo.processInfo.systemUptime
+      let points = pagedStrokes.values.reduce(0) { $0 + $1.reduce(0) { $0 + $1.points.count } }
+      perf.recentLoads.append((loadStart, (now - loadStart) * 1000, pagedStrokes.values.reduce(0) { $0 + $1.count }, points))
+      if perf.recentLoads.count > 8 { perf.recentLoads.removeFirst() }
+    }
     var loaded: [Int: [AnnotationStroke]] = [:]
     if let dict = annotationsByPage {
       for (key, value) in dict {
@@ -2251,7 +3599,7 @@ final class AnnotationOverlay: UIView {
           guard !points.isEmpty else { continue }
           strokes.append(AnnotationStroke(
             id: id, tool: tool, color: color, width: width, opacity: opacity,
-            points: points, createdAt: createdAt
+            points: points, createdAt: createdAt, shape: StrokeShape.parse(item["shape"])
           ))
         }
         if !strokes.isEmpty { loaded[pageNumber] = strokes }
@@ -2295,11 +3643,37 @@ final class AnnotationOverlay: UIView {
     for stroke in loaded.values.flatMap({ $0 }) {
       if let old = prior[stroke.id],
          old.points == stroke.points && old.color == stroke.color &&
-         old.width == stroke.width && old.opacity == stroke.opacity && old.tool == stroke.tool { continue }
+         old.width == stroke.width && old.opacity == stroke.opacity && old.tool == stroke.tool &&
+         old.shape == stroke.shape { continue }
       savedInkLayers.removeValue(forKey: stroke.id)?.removeFromSuperlayer()
+      // The edited geometry has arrived from JS: the live handle-drag preview has done its job.
+      if shapeEditAwaitingId == stroke.id { clearShapeEditPreview() }
+    }
+    perf.loadCalls += 1
+    // A prop resend with identical content (e.g. unrelated store churn) must
+    // not invalidate the overlay: that full redraw competes with live ink.
+    if loaded == pagedStrokes {
+      perf.loadSkipped += 1
+      return
     }
     pagedStrokes = loaded
+    reconcileSelectionAfterLoad()
+    refreshSelectionChrome()
     setNeedsDisplay()
+  }
+
+  /// Undo / redo / store echo / reload: keep every selected object that still exists; drop only what is
+  /// gone (`.contentChanged`). Ids never yet seen natively (Duplicate copies in flight) are kept.
+  private func reconcileSelectionAfterLoad() {
+    guard let number = selectionPageNumber, !selectedStrokeIds.isEmpty else { return }
+    let present = Set((pagedStrokes[number] ?? []).map(\.id))
+    unseenSelectedIds.subtract(present)
+    let before = machine
+    dispatch(.contentChanged(Array(present.union(unseenSelectedIds))))
+    if machine != before {
+      let ids = SelectionMachine.selectedIds(machine).sorted()
+      onSelectionReconciled?(ids.isEmpty ? 0 : number, ids)
+    }
   }
 
   func stageTextCommit(id: String, pageNumber: Int, annotation: TextAnnotation?) {
@@ -2385,6 +3759,7 @@ final class AnnotationOverlay: UIView {
     }
     if loaded == pagedTextAnnotations { return }
     pagedTextAnnotations = loaded
+    refreshSelectionChrome()
     setNeedsDisplay()
   }
 
@@ -2411,6 +3786,7 @@ final class AnnotationOverlay: UIView {
   // MARK: - Drawing
 
   override func draw(_ rect: CGRect) {
+    perf.drawPasses += 1
     guard let ctx = UIGraphicsGetCurrentContext(),
           let pdfView,
           pdfView.document != nil
@@ -2565,7 +3941,7 @@ final class AnnotationOverlay: UIView {
     return f
   }()
 
-  private static func coerceDouble(_ value: Any?) -> Double? {
+  fileprivate static func coerceDouble(_ value: Any?) -> Double? {
     if let d = value as? Double { return d }
     if let i = value as? Int { return Double(i) }
     if let n = value as? NSNumber { return n.doubleValue }
@@ -2646,7 +4022,319 @@ final class AnnotationOverlay: UIView {
 
 // MARK: - Types
 
-struct AnnotationStroke {
+/// Structured shape geometry (Shape System Phase 2), PDF page space. Mirrors
+/// `lib/annotationShape.ts`: the TS model is authoritative for edit semantics and point
+/// generation; native only parses/serializes it, hit-tests handles, and previews a live
+/// handle drag from exact primitives. `dragged` is pinned against the TS results by a fixture.
+enum StrokeShapeGeometry: Equatable {
+  case line(a: CGPoint, b: CGPoint)
+  case polygon([CGPoint])
+  /// ax / ay are semi-axis VECTORS from the center; handles: [top, right, bottom, left].
+  case ellipse(center: CGPoint, ax: CGPoint, ay: CGPoint)
+
+  private static func point(_ raw: Any?) -> CGPoint? {
+    guard let d = raw as? [String: Any], let x = AnnotationOverlay.coerceDouble(d["x"]),
+          let y = AnnotationOverlay.coerceDouble(d["y"]) else { return nil }
+    return CGPoint(x: x, y: y)
+  }
+  private static func json(_ p: CGPoint) -> [String: Any] { ["x": Double(p.x), "y": Double(p.y)] }
+
+  static func parse(_ raw: Any?) -> StrokeShapeGeometry? {
+    guard let d = raw as? [String: Any], let kind = d["kind"] as? String else { return nil }
+    switch kind {
+    case "line":
+      guard let a = point(d["a"]), let b = point(d["b"]) else { return nil }
+      return .line(a: a, b: b)
+    case "polygon":
+      guard let raw = d["vertices"] as? [Any] else { return nil }
+      let vertices = raw.compactMap { point($0) }
+      return vertices.count == raw.count && (3...4).contains(vertices.count) ? .polygon(vertices) : nil
+    case "ellipse":
+      guard let c = point(d["center"]), let ax = point(d["ax"]), let ay = point(d["ay"]) else { return nil }
+      return .ellipse(center: c, ax: ax, ay: ay)
+    default: return nil
+    }
+  }
+
+  var json: [String: Any] {
+    switch self {
+    case let .line(a, b): return ["kind": "line", "a": Self.json(a), "b": Self.json(b)]
+    case let .polygon(v): return ["kind": "polygon", "vertices": v.map { Self.json($0) }]
+    case let .ellipse(c, ax, ay): return ["kind": "ellipse", "center": Self.json(c), "ax": Self.json(ax), "ay": Self.json(ay)]
+    }
+  }
+
+  var handles: [CGPoint] {
+    switch self {
+    case let .line(a, b): return [a, b]
+    case let .polygon(v): return v
+    case let .ellipse(c, ax, ay):
+      return [CGPoint(x: c.x - ay.x, y: c.y - ay.y), CGPoint(x: c.x + ax.x, y: c.y + ax.y),
+              CGPoint(x: c.x + ay.x, y: c.y + ay.y), CGPoint(x: c.x - ax.x, y: c.y - ax.y)]
+    }
+  }
+
+  func nearestHandle(to p: CGPoint, radius: CGFloat) -> Int? {
+    var best: Int?
+    var bestDistance = radius
+    for (index, h) in handles.enumerated() {
+      let d = hypot(h.x - p.x, h.y - p.y)
+      if d <= bestDistance { bestDistance = d; best = index }
+    }
+    return best
+  }
+
+  func translated(dx: CGFloat, dy: CGFloat) -> StrokeShapeGeometry {
+    func move(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x + dx, y: p.y + dy) }
+    switch self {
+    case let .line(a, b): return .line(a: move(a), b: move(b))
+    case let .polygon(v): return .polygon(v.map(move))
+    case let .ellipse(c, ax, ay): return .ellipse(center: move(c), ax: ax, ay: ay)
+    }
+  }
+
+  /// Same semantics as TS `dragShapeHandle`: only what the handle controls changes.
+  func dragged(handle index: Int, to p: CGPoint, minAxis: CGFloat = 2) -> StrokeShapeGeometry {
+    switch self {
+    case let .line(a, b): return index == 0 ? .line(a: p, b: b) : .line(a: a, b: p)
+    case let .polygon(v):
+      return .polygon(v.enumerated().map { $0.offset == index ? p : $0.element })
+    case let .ellipse(c, ax, ay):
+      let horizontal = index == 1 || index == 3
+      let axis = horizontal ? ax : ay
+      let length = hypot(axis.x, axis.y)
+      guard length > 1e-9 else { return self }
+      let u = CGPoint(x: axis.x / length, y: axis.y / length)
+      let positive = index == 1 || index == 2
+      let anchor = positive ? CGPoint(x: c.x - axis.x, y: c.y - axis.y) : CGPoint(x: c.x + axis.x, y: c.y + axis.y)
+      let along = (p.x - anchor.x) * u.x + (p.y - anchor.y) * u.y
+      let full = max(2 * minAxis, positive ? along : -along)
+      let half = CGPoint(x: u.x * full / 2, y: u.y * full / 2)
+      let center = positive ? CGPoint(x: anchor.x + half.x, y: anchor.y + half.y)
+                            : CGPoint(x: anchor.x - half.x, y: anchor.y - half.y)
+      return horizontal ? .ellipse(center: center, ax: half, ay: ay) : .ellipse(center: center, ax: ax, ay: half)
+    }
+  }
+
+  /// Exact primitive for the live handle-drag preview (no sampled points involved).
+  var previewPath: CGPath {
+    switch self {
+    case let .line(a, b):
+      let path = CGMutablePath(); path.move(to: a); path.addLine(to: b); return path
+    case let .polygon(v):
+      let path = CGMutablePath(); path.addLines(between: v); path.closeSubpath(); return path
+    case let .ellipse(c, ax, ay):
+      var transform = CGAffineTransform(a: ax.x, b: ax.y, c: ay.x, d: ay.y, tx: c.x, ty: c.y)
+      return CGPath(ellipseIn: CGRect(x: -1, y: -1, width: 2, height: 2), transform: &transform)
+    }
+  }
+}
+
+struct StrokeShape: Equatable {
+  let origin: String
+  let geometry: StrokeShapeGeometry
+
+  static func parse(_ raw: Any?) -> StrokeShape? {
+    guard let d = raw as? [String: Any], let geometry = StrokeShapeGeometry.parse(d["geometry"]) else { return nil }
+    return StrokeShape(origin: (d["origin"] as? String) ?? "line", geometry: geometry)
+  }
+  var json: [String: Any] { ["origin": origin, "geometry": geometry.json] }
+}
+
+// MARK: - Selection state machine (mirrors lib/selectionMachine.ts case for case)
+
+/// The ONE authoritative model of what is selected. Selection changes only through explicit
+/// events; ambient things (gesture ended/cancelled, store echo, prop reload, Pencil lift,
+/// finger touching the selection, rerender, handle-drag completion) are `.noop` and can never
+/// clear it. The same case table (scripts/fixtures/selection-machine-cases.json) is replayed
+/// against this reducer by the native fixture.
+enum SettledSelection: Equatable {
+  case ink([String])
+  case shape(String)
+}
+
+indirect enum SelectionState: Equatable {
+  case idle
+  case selecting(shape: String, previous: SettledSelection?)
+  case selectedInk([String])
+  case selectedShape(String)
+  case moving(SettledSelection)
+  case scaling(SettledSelection)
+  case editingHandle(String)
+
+  var kind: String {
+    switch self {
+    case .idle: return "IDLE"
+    case .selecting: return "SELECTING"
+    case .selectedInk: return "SELECTED_INK"
+    case .selectedShape: return "SELECTED_SHAPE"
+    case .moving: return "MOVING_SELECTION"
+    case .scaling: return "SCALING_SELECTION"
+    case .editingHandle: return "EDITING_SHAPE_HANDLE"
+    }
+  }
+}
+
+enum SelectionEvent {
+  case beginRegion(String)
+  case regionDragged
+  case regionComplete([String])
+  case regionCancelled
+  case tapShape(String)
+  case tapBlank
+  case selectInk([String])
+  case beginMove, endMove, beginScale, endScale, beginHandle, endHandle, manipulationCancelled
+  case toolChange(String)
+  case delete
+  case pageChange(valid: Bool)
+  case contentChanged([String])
+  case cancel
+  case noop(String)
+}
+
+enum SelectionMachine {
+  static func settled(_ state: SelectionState) -> SettledSelection? {
+    switch state {
+    case let .selectedInk(ids): return .ink(ids)
+    case let .selectedShape(id): return .shape(id)
+    case let .moving(s), let .scaling(s): return s
+    case let .editingHandle(id): return .shape(id)
+    case let .selecting(_, previous): return previous
+    case .idle: return nil
+    }
+  }
+
+  static func selectedIds(_ state: SelectionState) -> [String] {
+    switch settled(state) {
+    case let .ink(ids)?: return ids
+    case let .shape(id)?: return [id]
+    case nil: return []
+    }
+  }
+
+  static func isManipulating(_ state: SelectionState) -> Bool {
+    switch state {
+    case .moving, .scaling, .editingHandle: return true
+    default: return false
+    }
+  }
+
+  private static func state(_ settled: SettledSelection) -> SelectionState {
+    switch settled {
+    case let .ink(ids): return .selectedInk(ids)
+    case let .shape(id): return .selectedShape(id)
+    }
+  }
+
+  private static func clear(_ reason: String, _ current: SelectionState) -> (SelectionState, String?) {
+    current == .idle ? (current, nil) : (.idle, reason)
+  }
+
+  static func reduce(_ state: SelectionState, _ event: SelectionEvent) -> (SelectionState, String?) {
+    let settled = self.settled(state)
+    switch event {
+    case .noop: return (state, nil)
+    case let .beginRegion(shape): return (.selecting(shape: shape, previous: settled), nil)
+    case .regionDragged:
+      guard case let .selecting(shape, previous) = state, previous != nil else { return (state, nil) }
+      return (.selecting(shape: shape, previous: nil), "new-selection")
+    case let .regionComplete(ids):
+      guard case let .selecting(_, previous) = state else { return (state, nil) }
+      if ids.isEmpty { return previous != nil ? (.idle, "region-empty") : (.idle, nil) }
+      return (.selectedInk(ids), nil)
+    case .regionCancelled:
+      guard case let .selecting(_, previous) = state else { return (state, nil) }
+      return (previous.map(self.state) ?? .idle, nil)
+    case let .tapShape(id): return (.selectedShape(id), nil)
+    case .tapBlank: return clear("blank-tap", settled != nil ? state : .idle)
+    case let .selectInk(ids): return ids.isEmpty ? clear("region-empty", state) : (.selectedInk(ids), nil)
+    case .beginMove:
+      if let settled, !isManipulating(state) { return (.moving(settled), nil) }
+      return (state, nil)
+    case .endMove:
+      if case let .moving(s) = state { return (self.state(s), nil) }
+      return (state, nil)
+    case .beginScale:
+      if let settled {
+        if case .editingHandle = state { return (state, nil) }
+        if case .scaling = state { return (state, nil) }
+        return (.scaling(settled), nil)
+      }
+      return (state, nil)
+    case .endScale:
+      if case let .scaling(s) = state { return (self.state(s), nil) }
+      return (state, nil)
+    case .beginHandle:
+      if case let .selectedShape(id) = state { return (.editingHandle(id), nil) }
+      return (state, nil)
+    case .endHandle:
+      if case let .editingHandle(id) = state { return (.selectedShape(id), nil) }
+      return (state, nil)
+    case .manipulationCancelled:
+      return isManipulating(state) ? (settled.map(self.state) ?? .idle, nil) : (state, nil)
+    case let .toolChange(tool): return tool == "select" ? (state, nil) : clear("tool-change", state)
+    case .delete: return clear("deleted", state)
+    case let .pageChange(valid): return valid ? (state, nil) : clear("page-change", state)
+    case .cancel: return clear("explicit-cancel", state)
+    case let .contentChanged(existingIds):
+      guard let settled else { return (state, nil) }
+      let existing = Set(existingIds)
+      switch settled {
+      case let .shape(id):
+        return existing.contains(id) ? (state, nil) : clear("object-removed", state)
+      case let .ink(ids):
+        let kept = ids.filter { existing.contains($0) }
+        if kept.isEmpty { return clear("object-removed", state) }
+        if kept.count == ids.count { return (state, nil) }
+        let next = SettledSelection.ink(kept)
+        switch state {
+        case .selectedInk: return (self.state(next), nil)
+        case .moving: return (.moving(next), nil)
+        case .scaling: return (.scaling(next), nil)
+        case let .selecting(shape, _): return (.selecting(shape: shape, previous: next), nil)
+        default: return (self.state(next), nil)
+        }
+      }
+    }
+  }
+}
+
+/// Shared selection-manipulation limits (mirror lib/selectionTransform.ts; semantic, not document units).
+enum SelectionLimits {
+  static let scaleMin: CGFloat = 0.2
+  static let scaleMax: CGFloat = 5
+  static let minSpanPt: CGFloat = 24
+  static let maxSpanPt: CGFloat = 6000
+  static let touchPadPt: CGFloat = 28
+  static let pencilPadPt: CGFloat = 18
+
+  /// Clamps a relative pinch factor so the result neither collapses, inverts nor explodes.
+  static func clamp(_ factor: CGFloat, spanUnits: CGFloat, unitsPerPt: CGFloat) -> CGFloat {
+    guard factor.isFinite, factor > 0 else { return 1 }
+    var f = min(scaleMax, max(scaleMin, factor))
+    if spanUnits > 0, unitsPerPt > 0 {
+      f = max(f, minSpanPt * unitsPerPt / spanUnits)
+      f = min(f, maxSpanPt * unitsPerPt / spanUnits)
+      if spanUnits < minSpanPt * unitsPerPt { f = max(f, 1) }
+    }
+    return f
+  }
+}
+
+extension StrokeShapeGeometry {
+  /// Same semantics as TS `scaleGeometry`: everything scales about `center`; ellipse axis vectors scale too.
+  func scaled(about center: CGPoint, by factor: CGFloat) -> StrokeShapeGeometry {
+    func s(_ p: CGPoint) -> CGPoint { CGPoint(x: center.x + (p.x - center.x) * factor, y: center.y + (p.y - center.y) * factor) }
+    switch self {
+    case let .line(a, b): return .line(a: s(a), b: s(b))
+    case let .polygon(v): return .polygon(v.map(s))
+    case let .ellipse(c, ax, ay):
+      return .ellipse(center: s(c), ax: CGPoint(x: ax.x * factor, y: ax.y * factor), ay: CGPoint(x: ay.x * factor, y: ay.y * factor))
+    }
+  }
+}
+
+struct AnnotationStroke: Equatable {
   let id: String
   let tool: String
   let color: String
@@ -2654,6 +4342,15 @@ struct AnnotationStroke {
   let opacity: Double
   let points: [CGPoint]
   let createdAt: String
+  /// Structured shape (authoritative geometry; `points` are derived by JS). nil for ordinary ink.
+  var shape: StrokeShape? = nil
+
+  /// Render identity: `createdAt` never affects ink, and legacy strokes may lack it
+  /// (parse then stamps "now"), so it must not defeat the no-op reload guard.
+  static func == (a: AnnotationStroke, b: AnnotationStroke) -> Bool {
+    a.id == b.id && a.tool == b.tool && a.color == b.color && a.width == b.width &&
+      a.opacity == b.opacity && a.points == b.points && a.shape == b.shape
+  }
 }
 
 struct TextAnnotation: Equatable {
@@ -2697,5 +4394,117 @@ private extension UIColor {
       blue: CGFloat(rgb & 0xFF) / 255.0,
       alpha: 1
     )
+  }
+}
+
+
+// MARK: - Ink performance counters + bounded DEV recorder
+
+struct InkPerfCounters {
+  var drawPasses = 0
+  var loadCalls = 0
+  var loadSkipped = 0
+  var acceptedSamples = 0
+  var filteredSamples = 0
+  /// Most recent prop deliveries (uptime, main-thread ms inside loadAnnotations, strokes, points).
+  var recentLoads: [(at: Double, ms: Double, strokes: Int, points: Int)] = []
+}
+
+/// Writes ONE short line per finished Pencil stroke to Library/Caches/ink-perf.log,
+/// only in the Dev bundle (`.dev` bundle id), capped at ~48 KB. The hot input path
+/// only captures raw numbers; formatting and ALL file IO run on a background
+/// utility queue so the recorder cannot add main-thread latency to the ink it
+/// measures. Source surface is always Course Material (native PDF overlay).
+final class InkPerfRecorder {
+  static let enabled = Bundle.main.bundleIdentifier?.hasSuffix(".dev") == true
+  private static let queue = DispatchQueue(label: "youmi.ink-perf", qos: .utility)
+  private var link: CADisplayLink?
+  private var linkTarget: InkLinkTarget?
+  private var startUptime = 0.0, lastEventUptime = 0.0
+  private var events = 0, coalescedTotal = 0, maxCoalesced = 0
+  private var intervalTotal = 0.0, maxInterval = 0.0, maxIntervalAt = 0.0
+  private var toggleMs = 0.0, mode = "pen"
+  private var base = InkPerfCounters()
+
+  func beginStroke(toggleMs: Double, overlay: AnnotationOverlay, mode: String) {
+    guard Self.enabled else { return }
+    self.toggleMs = toggleMs
+    self.mode = mode
+    base = overlay.perf
+    events = 0; coalescedTotal = 0; maxCoalesced = 0; intervalTotal = 0; maxInterval = 0; maxIntervalAt = 0
+    startUptime = ProcessInfo.processInfo.systemUptime
+    lastEventUptime = startUptime
+    let target = InkLinkTarget()
+    let displayLink = CADisplayLink(target: target, selector: #selector(InkLinkTarget.tick(_:)))
+    displayLink.add(to: .main, forMode: .common)
+    link = displayLink
+    linkTarget = target
+  }
+
+  func cancel() {
+    link?.invalidate(); link = nil
+    linkTarget = nil
+  }
+
+  func noteEvent(coalesced: Int) {
+    guard Self.enabled else { return }
+    let now = ProcessInfo.processInfo.systemUptime
+    let gap = now - lastEventUptime
+    lastEventUptime = now
+    events += 1
+    intervalTotal += gap
+    if gap > maxInterval { maxInterval = gap; maxIntervalAt = now - startUptime }
+    coalescedTotal += coalesced
+    maxCoalesced = max(maxCoalesced, coalesced)
+  }
+
+  func endStroke(commitMs: Double, overlay: AnnotationOverlay) {
+    guard Self.enabled else { return }
+    link?.invalidate(); link = nil
+    let frames = linkTarget?.frames ?? 0, longFrames = linkTarget?.longFrames ?? 0
+    let maxFrameMs = (linkTarget?.maxGap ?? 0) * 1000
+    let maxFrameAt = ((linkTarget?.maxGapAt ?? startUptime) - startUptime) * 1000
+    linkTarget = nil
+    let p = overlay.perf
+    let now = ProcessInfo.processInfo.systemUptime
+    let durationMs = (now - startUptime) * 1000
+    // Loads that landed inside this stroke, as "at+offset ms/duration ms(strokes,points)".
+    let loads = p.recentLoads.filter { $0.at >= startUptime && $0.at <= now }
+      .map { String(format: "@%.0fms/%.1fms(%ds,%dp)", ($0.at - startUptime) * 1000, $0.ms, $0.strokes, $0.points) }
+      .joined(separator: ",")
+    let snapshot = (mode, durationMs, events, intervalTotal, maxInterval * 1000, maxIntervalAt * 1000,
+                    coalescedTotal, maxCoalesced, p.acceptedSamples - base.acceptedSamples,
+                    p.filteredSamples - base.filteredSamples, frames, longFrames, maxFrameMs, maxFrameAt,
+                    p.drawPasses - base.drawPasses, p.loadCalls - base.loadCalls, p.loadSkipped - base.loadSkipped,
+                    toggleMs, commitMs, loads)
+    Self.queue.async {
+      let s = snapshot
+      let line = String(format: "%@ surface=material mode=%@ dur=%.0fms events=%d avgGap=%.1fms maxGap=%.1fms@%.0fms coalesced(avg=%.1f,max=%d) accepted=%d filtered=%d frames=%d long(>25ms)=%d maxFrame=%.1fms@%.0fms draws=%d loads=%d skipped=%d toggle=%.1fms commit=%.1fms loadsInStroke=[%@]\n",
+        ISO8601DateFormatter().string(from: Date()), s.0, s.1, s.2,
+        s.2 > 0 ? s.3 / Double(s.2) * 1000 : 0, s.4, s.5,
+        s.2 > 0 ? Double(s.6) / Double(s.2) : 0, s.7, s.8, s.9, s.10, s.11, s.12, s.13,
+        s.14, s.15, s.16, s.17, s.18, s.19)
+      guard let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return }
+      let url = dir.appendingPathComponent("ink-perf.log")
+      var existing = (try? Data(contentsOf: url)) ?? Data()
+      if existing.count > 48 * 1024 { existing = existing.suffix(24 * 1024) }
+      existing.append(Data(line.utf8))
+      try? existing.write(to: url, options: .atomic)
+    }
+  }
+}
+
+final class InkLinkTarget: NSObject {
+  var frames = 0, longFrames = 0
+  var maxGap = 0.0, maxGapAt = 0.0
+  private var previous = 0.0
+  @objc func tick(_ link: CADisplayLink) {
+    if previous > 0 {
+      let gap = link.timestamp - previous
+      frames += 1
+      if gap > maxGap { maxGap = gap; maxGapAt = link.timestamp }
+      if gap > 0.025 { longFrames += 1 }
+    }
+    previous = link.timestamp
   }
 }

@@ -1,10 +1,18 @@
 import { forwardRef, useImperativeHandle, useRef } from 'react';
 import { Platform, StyleProp, ViewStyle } from 'react-native';
+import type { AnnotationShape } from '@/lib/annotationShape';
 
 import {
   ExpoPdfAnnotationView,
   type ExpoPdfAnnotationNativeRef,
   type NativePdfAnnotationMode,
+  type NativePdfSelectionShape,
+  type NativePdfSelectionChangedEvent,
+  type NativePdfSelectionMovedEvent,
+  type NativePdfShapeEditedEvent,
+  type NativePdfSelectionScaledEvent,
+  type NativePdfPencilActivityEvent,
+  type NativePdfShapeHoldEvent,
   type NativePdfAnnotationsByPage,
   type NativePdfAnnotationsChangedEvent,
   type NativePdfEraserGestureEndedEvent,
@@ -43,6 +51,11 @@ export type NativePdfAnnotationViewRef = {
   markStrokeRestorationIntent: (ids: string[]) => void;
   /** Explicit Undo/Redo overrides a pending native text-render commit. */
   setTextHistoryIntent: (pageNumber: number, annotations: NativePdfTextAnnotation[]) => void;
+  clearSelection: () => void;
+  /** Selects existing ink by id (e.g. the copies produced by Duplicate). */
+  setSelection: (pageNumber: number, ids: string[]) => void;
+  /** Shape Snap: replace the live stroke (identified by the hold event's token) with clean geometry. */
+  applyShapeSnap: (token: number, points: [number, number][], shape?: AnnotationShape) => void;
 };
 
 export type NativePdfAnnotationViewProps = {
@@ -52,6 +65,7 @@ export type NativePdfAnnotationViewProps = {
   style?: StyleProp<ViewStyle>;
   /** "scroll" lets PDFKit own all touches; "pen" turns the Apple-Pencil overlay on. */
   annotationMode?: NativePdfAnnotationMode;
+  selectionShape?: NativePdfSelectionShape;
   penColor?: string;
   penWidth?: number;
   highlighterColor?: string;
@@ -67,6 +81,15 @@ export type NativePdfAnnotationViewProps = {
   onAnnotationsChanged?: (event: NativePdfAnnotationsChangedEvent) => void;
   onEraserGestureEnded?: (event: NativePdfEraserGestureEndedEvent) => void;
   onTextAnnotationAction?: (event: NativePdfTextAnnotationActionEvent) => void;
+  onSelectionChanged?: (event: NativePdfSelectionChangedEvent) => void;
+  onSelectionMoved?: (event: NativePdfSelectionMovedEvent) => void;
+  onShapeEdited?: (event: NativePdfShapeEditedEvent) => void;
+  onSelectionScaled?: (event: NativePdfSelectionScaledEvent) => void;
+  onPencilActivity?: (event: NativePdfPencilActivityEvent) => void;
+  onShapeHold?: (event: NativePdfShapeHoldEvent) => void;
+  shapeSnapEnabled?: boolean;
+  shapeSnapHoldMs?: number;
+  shapeSnapTolerancePt?: number;
   onViewportDiagnostic?: (event: NativePdfViewportDiagnosticEvent) => void;
 };
 
@@ -80,6 +103,7 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
       initialViewport,
       style,
       annotationMode,
+      selectionShape,
       penColor,
       penWidth,
       highlighterColor,
@@ -95,6 +119,15 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
       onAnnotationsChanged,
       onEraserGestureEnded,
       onTextAnnotationAction,
+      onSelectionChanged,
+      onSelectionMoved,
+      onShapeEdited,
+      onSelectionScaled,
+      onPencilActivity,
+      onShapeHold,
+      shapeSnapEnabled,
+      shapeSnapHoldMs,
+      shapeSnapTolerancePt,
       onViewportDiagnostic,
     },
     ref,
@@ -130,6 +163,21 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
           if (__DEV__) console.warn('[native-pdf] setTextHistoryIntentAsync failed', error);
         });
       },
+      clearSelection() {
+        nativeRef.current?.clearSelectionAsync?.().catch((error: unknown) => {
+          if (__DEV__) console.warn('[native-pdf] clearSelectionAsync failed', error);
+        });
+      },
+      applyShapeSnap(token, points, shape) {
+        nativeRef.current?.applyShapeSnapAsync?.(token, points, shape).catch((error: unknown) => {
+          if (__DEV__) console.warn('[native-pdf] applyShapeSnapAsync failed', error);
+        });
+      },
+      setSelection(pageNumber, ids) {
+        nativeRef.current?.setSelectionAsync?.(pageNumber, ids).catch((error: unknown) => {
+          if (__DEV__) console.warn('[native-pdf] setSelectionAsync failed', error);
+        });
+      },
     }), []);
 
     return (
@@ -140,6 +188,7 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
         initialPage={initialPage}
         initialViewport={initialViewport}
         annotationMode={annotationMode}
+        selectionShape={selectionShape}
         penColor={penColor}
         penWidth={penWidth}
         highlighterColor={highlighterColor}
@@ -155,6 +204,15 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
         onAnnotationsChanged={(event) => onAnnotationsChanged?.(event.nativeEvent)}
         onEraserGestureEnded={(event) => onEraserGestureEnded?.(event.nativeEvent)}
         onTextAnnotationAction={(event) => onTextAnnotationAction?.(event.nativeEvent)}
+        onSelectionChanged={(event) => onSelectionChanged?.(event.nativeEvent)}
+        onSelectionMoved={(event) => onSelectionMoved?.(event.nativeEvent)}
+        onShapeEdited={(event) => onShapeEdited?.(event.nativeEvent)}
+        onSelectionScaled={(event) => onSelectionScaled?.(event.nativeEvent)}
+        onPencilActivity={(event) => onPencilActivity?.(event.nativeEvent)}
+        onShapeHold={(event) => onShapeHold?.(event.nativeEvent)}
+        shapeSnapEnabled={shapeSnapEnabled}
+        shapeSnapHoldMs={shapeSnapHoldMs}
+        shapeSnapTolerancePt={shapeSnapTolerancePt}
         onViewportDiagnostic={(event) => onViewportDiagnostic?.(event.nativeEvent)}
       />
     );

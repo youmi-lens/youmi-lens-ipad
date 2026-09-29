@@ -6,6 +6,8 @@
  * mock "sample" content applied after the local recording is captured.
  */
 
+import type { AnnotationShape } from './annotationShape';
+
 export type LectureStatus =
   /** Recording started and has meaningful content but was not finished yet;
    *  it can be reopened and continued (draft / paused / in progress). */
@@ -61,6 +63,12 @@ export type NoteStroke = {
   /** Optional stroke opacity. Highlighter uses this to keep content readable. */
   opacity?: number;
   points: NotePoint[];
+  /**
+   * Structured shape (Shape System Phase 2): authoritative geometry for a snapped
+   * line/triangle/rectangle/circle/ellipse in canvas coordinates. `points` are always
+   * derived from it. Absent on every handwriting and historical stroke (no migration).
+   */
+  shape?: AnnotationShape;
   /** ISO timestamp. */
   createdAt: string;
 };
@@ -396,6 +404,8 @@ export type MaterialAnnotationStroke = {
   points: MaterialAnnotationPoint[];
   /** Coordinate space the points live in. See MaterialAnnotationCoordSpace. */
   coordSpace?: MaterialAnnotationCoordSpace;
+  /** Structured shape in PDF-page coordinates (see NoteStroke.shape). Absent on ordinary ink. */
+  shape?: AnnotationShape;
   createdAt: string;
 };
 

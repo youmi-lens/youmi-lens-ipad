@@ -77,7 +77,8 @@ check('Notebook coalesces decorative cursor rendering to an animation frame', ()
 console.log('Course Material native and fallback protection');
 
 check('native PDF eraser batches changed pages and emits no JS replacement from its changed-move case', () => {
-  const changedCase = native.slice(native.indexOf('case .changed:'), native.indexOf('case .ended:'));
+  const pencilHandler = native.slice(native.indexOf('func handlePencilGesture('));
+  const changedCase = pencilHandler.slice(pencilHandler.indexOf('case .changed:'), pencilHandler.indexOf('case .ended:'));
   assert.match(changedCase, /annotationOverlay\.continueErase/);
   assert.doesNotMatch(changedCase, /emitPageReplacement/);
   assert.match(native, /func endErase\(\) -> \[\(pageNumber: Int, strokes: \[AnnotationStroke\]\)\]/);

@@ -19,6 +19,12 @@ public final class ExpoPdfAnnotationModule: Module {
         "onAnnotationsChanged",
         "onEraserGestureEnded",
         "onTextAnnotationAction",
+        "onSelectionChanged",
+        "onSelectionMoved",
+        "onShapeEdited",
+        "onSelectionScaled",
+        "onPencilActivity",
+        "onShapeHold",
         "onViewportDiagnostic"
       )
 
@@ -35,6 +41,19 @@ public final class ExpoPdfAnnotationModule: Module {
 
       Prop("annotationMode") { (view: PdfAnnotationView, mode: String?) in
         view.annotationMode = mode ?? "scroll"
+      }
+      Prop("selectionShape") { (view: PdfAnnotationView, shape: String?) in
+        view.selectionShape = shape == "rect" ? "rect" : "lasso"
+      }
+
+      Prop("shapeSnapEnabled") { (view: PdfAnnotationView, enabled: Bool?) in
+        view.shapeSnapEnabled = enabled ?? false
+      }
+      Prop("shapeSnapHoldMs") { (view: PdfAnnotationView, ms: Double?) in
+        view.shapeSnapHoldMs = ms ?? 650
+      }
+      Prop("shapeSnapTolerancePt") { (view: PdfAnnotationView, pt: Double?) in
+        view.shapeSnapTolerancePt = pt ?? 3.5
       }
 
       Prop("penColor") { (view: PdfAnnotationView, color: String?) in
@@ -86,6 +105,15 @@ public final class ExpoPdfAnnotationModule: Module {
       }
       AsyncFunction("setTextHistoryIntentAsync") { (view: PdfAnnotationView, pageNumber: Int, annotations: [[String: Any]]) in
         view.setTextHistoryIntent(pageNumber: pageNumber, annotations: annotations)
+      }
+      AsyncFunction("applyShapeSnapAsync") { (view: PdfAnnotationView, token: Int, points: [[Double]], shape: [String: Any]?) in
+        view.applyShapeSnap(token: token, points: points, shape: shape)
+      }
+      AsyncFunction("clearSelectionAsync") { (view: PdfAnnotationView) in
+        view.clearSelection()
+      }
+      AsyncFunction("setSelectionAsync") { (view: PdfAnnotationView, pageNumber: Int, ids: [String]) in
+        view.setSelection(pageNumber: pageNumber, ids: ids)
       }
     }
   }
