@@ -34,6 +34,12 @@ Recording engine: **legacy** (unchanged). Backend: **not deployed, not modified*
 ## RC-1.1 — lint-neutral cleanup
 - Commit `fix: keep RC course restore integration lint-neutral` (single commit after the provenance commit; touches only `lib/store.tsx` + this doc). `restoreCourseIfDeletedForNewCommit` moved from an in-provider `useCallback` to a module-level function taking `(courseId, courses, setCourses, currentUserId)`; `createLecture`/`saveInProgressLecture` deps are `[currentUserId]` (previously the callback's own deps were `[currentUserId]`, so identity behavior is unchanged). Course restore/deletion semantics unchanged; focused course tests, full suite (same 3 baseline failures), tsc, diff-check pass.
 
+## RC-1.2 — Course Material finger handle editing parity
+- Commit `fix: align Course Material finger shape editing with Notebook` (after the RC-1.1 cleanup commit).
+- ROOT CAUSE: shared router `routeSelectionTouch` knew `shape-handle-edit` only for the Pencil. Notebook compensated locally (`beginShapeHandleEdit` before the body move); Course Material's native one-finger recogniser went scale -> `beginMoveIfHit`, and a handle lies inside the padded body bounds, so the body move swallowed the finger and `beginHandleDragIfHit` was reachable only from the Pencil recognisers.
+- FIX: router gets the finger-on-handle branch (handle > body move > page; two fingers still scale); Notebook passes `onHandle` into the router (same behavior); native `AnnotationOverlay.beginFingerManipulation` (scale -> handle -> move) is what the finger recogniser calls, with a `.handle` mode (live native preview, ONE `onShapeEdited` on release). Recognition, Shape Snap, geometry, hit radii, toolbar, Pencil paths: unchanged.
+- TESTS: new `selection-finger-handle-parity`; native fixture `NATIVE_FINGER_HANDLE_PASS` at 0.5x/1x/2x + rotated page; router cases in `selection-transform`; updated Notebook routing contracts and the shape-edit emit-site count (2 -> 3).
+
 ## Group 4 — Other explicitly authorized fixes
 - Other-account lecture lookup: **EXCLUDED** — not proven required by an accepted user-facing fix (integrated line's exact-ID ownership is stricter).
 - Legacy recorder health/watchdog: **EXCLUDED — STOPPED FOR REVIEW**. It changes recording lifecycle behavior materially (Decision 2(D) STOP clause). Inclusion would not be a Recording Release PASS.

@@ -145,6 +145,16 @@ check('Pencil on a handle beats everything (shape edit)', () => {
   assert.equal(routeSelectionTouch({ ...base, pointer: 'stylus', onHandle: true }), 'shape-handle-edit');
   assert.equal(routeSelectionTouch({ ...base, pointer: 'stylus', onHandle: true, insideSelection: false }), 'shape-handle-edit');
 });
+check('ONE finger on a handle edits it (same as the Pencil): handle > body move > page (RC-1.2 Notebook/Course Material parity)', () => {
+  assert.equal(routeSelectionTouch({ ...base, pointer: 'touch', onHandle: true }), 'shape-handle-edit');
+  assert.equal(routeSelectionTouch({ ...base, pointer: 'touch', onHandle: true, insideSelection: false }), 'shape-handle-edit');
+  assert.equal(routeSelectionTouch({ ...base, pointer: 'touch', onHandle: false }), 'selection-move', 'inside the body but off every handle: move');
+  assert.equal(routeSelectionTouch({ ...base, pointer: 'touch', insideSelection: false }), 'page-navigation', 'outside: the page keeps the finger');
+  assert.equal(routeSelectionTouch({ ...base, pointer: 'touch', hasSelection: false, onHandle: true }), 'page-navigation', 'no selection: no handles exist');
+  assert.equal(routeSelectionTouch({ ...base, pointer: 'touch', touchCount: 2, onHandle: true, secondInsideSelection: true }), 'selection-scale', 'two fingers never edit a handle: pinch scale wins');
+  assert.equal(routeSelectionTouch({ ...base, pointer: 'touch', touchCount: 2, onHandle: true, secondInsideSelection: false }), 'page-navigation');
+  assert.equal(routeSelectionTouch({ ...base, pointer: 'other', onHandle: true }), 'page-navigation');
+});
 check('Pencil inside the selection moves it; Pencil elsewhere starts a NEW Box/Lasso', () => {
   assert.equal(routeSelectionTouch({ ...base, pointer: 'stylus' }), 'selection-move');
   assert.equal(routeSelectionTouch({ ...base, pointer: 'stylus', insideSelection: false }), 'new-selection');

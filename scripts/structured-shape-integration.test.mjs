@@ -179,9 +179,11 @@ const swift = read('modules/expo-pdf-annotation/ios/PdfAnnotationView.swift');
 check('native handle drag: preview only — no event, no prop write, no file IO per sample; ONE onShapeEdited on release', () => {
   const update = slice(swift, '  func updateHandleDrag(at viewPoint: CGPoint)', '  /// Ends the drag.');
   assert.doesNotMatch(update, /onShapeEdited|onAnnotationsChanged|loadAnnotations|pagedStrokes\[|FileHandle|write\(|serialize/);
-  // Two recognisers (Select's Pencil gesture, and the Pen/Highlighter Pencil gesture) each emit once per completed drag.
-  assert.equal((swift.match(/onShapeEdited\(\[/g) ?? []).length, 2);
+  // Three recognisers (Select's Pencil gesture, the Pen/Highlighter Pencil gesture, and — RC-1.2, Notebook parity — the
+  // one-finger selection gesture) each emit exactly once per completed drag.
+  assert.equal((swift.match(/onShapeEdited\(\[/g) ?? []).length, 3);
   assert.equal((swift.match(/if let edit = annotationOverlay\.finishHandleDrag\(at: end\) \{\s*onShapeEdited\(\[/g) ?? []).length, 2);
+  assert.equal((swift.match(/if let end = points\.first, let edit = annotationOverlay\.finishHandleDrag\(at: end\) \{\s*onShapeEdited\(\[/g) ?? []).length, 1);
   assert.match(swift, /if let edit = annotationOverlay\.finishHandleDrag\(at: end\)/);
 });
 check('JS applies an edit as ONE explicit history action and bypasses the ink write gate', () => {

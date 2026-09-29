@@ -2898,8 +2898,10 @@ export const NotebookCanvas = memo(function NotebookCanvas({
               touchCount: 1,
               hasSelection: selectedNow.length > 0,
               insideSelection: point !== null && insideSelectionRegion(region, point, SELECTION_TOUCH_PAD_PT / (canvasScaleRef.current || 1)),
+              onHandle: point !== null && selectedNow.length === 1 && isStructuredStroke(selectedNow[0]) &&
+                nearestShapeHandle(selectedNow[0].shape.geometry, point, SHAPE_HANDLE_HIT_PT / (canvasScaleRef.current || 1)) !== null,
             });
-            if (route !== 'selection-move') {
+            if (route !== 'selection-move' && route !== 'shape-handle-edit') {
               manager.fail();
               return;
             }

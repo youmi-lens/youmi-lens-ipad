@@ -1196,8 +1196,7 @@ public final class PdfAnnotationView: ExpoView {
 
   // MARK: - Pencil gesture callback
 
-  private enum FingerSelectionMode { case none, move, scale }
-  private var fingerSelectionMode = FingerSelectionMode.none
+  private var fingerSelectionMode = AnnotationOverlay.FingerManipulation.none
 
   /// One finger inside the selection moves it; two fingers inside scale it. The page is left alone:
   /// a finger that began elsewhere never reaches this handler (the recogniser fails at touch-down).
@@ -1207,24 +1206,27 @@ public final class PdfAnnotationView: ExpoView {
     switch recognizer.state {
     case .began:
       setNonPencilGesturesEnabled(false)   // PDFView pan/pinch stand down for this touch sequence only
-      if points.count >= 2, annotationOverlay.beginScale(at: points[0], and: points[1]) {
-        fingerSelectionMode = .scale
-      } else if let first = points.first, annotationOverlay.beginMoveIfHit(at: first, padPt: SelectionLimits.touchPadPt) {
-        fingerSelectionMode = .move
-      } else {
-        fingerSelectionMode = .none
-      }
+      // Same arbitration as Notebook (lib/selectionTransform.routeSelectionTouch): a handle beats the body.
+      fingerSelectionMode = annotationOverlay.beginFingerManipulation(at: points)
     case .changed:
       if fingerSelectionMode == .move, points.count >= 2, annotationOverlay.beginScale(at: points[0], and: points[1]) {
         fingerSelectionMode = .scale   // the second finger joined: the move upgrades to a scale
       }
       switch fingerSelectionMode {
+      case .handle: if let first = points.first { annotationOverlay.updateHandleDrag(at: first) }
       case .move: if let first = points.first { annotationOverlay.updateMove(at: first) }
       case .scale: if points.count >= 2 { annotationOverlay.updateScale(at: points[0], and: points[1]) }
       case .none: break
       }
     case .ended:
       switch fingerSelectionMode {
+      case .handle:
+        if let end = points.first, let edit = annotationOverlay.finishHandleDrag(at: end) {
+          onShapeEdited(["pageNumber": edit.pageNumber, "strokeId": edit.strokeId, "handleIndex": edit.handleIndex,
+                         "x": Double(edit.x), "y": Double(edit.y)])
+        } else {
+          annotationOverlay.cancelHandleDrag()
+        }
       case .move:
         if let first = points.first { annotationOverlay.updateMove(at: first) }
         if let moved = annotationOverlay.finishMove() {
@@ -1244,6 +1246,7 @@ public final class PdfAnnotationView: ExpoView {
     case .cancelled, .failed:
       // Abandons the manipulation only; the selection itself is untouched.
       switch fingerSelectionMode {
+      case .handle: annotationOverlay.cancelHandleDrag()
       case .move: annotationOverlay.cancelMove()
       case .scale: annotationOverlay.cancelScale()
       case .none: break
@@ -2685,6 +2688,23 @@ final class AnnotationOverlay: UIView {
     guard !selectedStrokeIds.isEmpty else { return false }
     dispatch(.tapBlank)
     return true
+  }
+
+  // MARK: Finger arbitration
+
+  enum FingerManipulation { case none, handle, move, scale }
+
+  /// What a finger touch-down on the current selection becomes. Mirrors lib/selectionTransform.routeSelectionTouch,
+  /// which is the product contract Notebook follows: TWO fingers both inside -> scale; ONE finger -> a handle of the
+  /// single selected structured shape (live reshape) beats the selection body (move); otherwise `.none` and the touch
+  /// stays with the page. Every begin* below is what the accepted Pencil paths already use, so hit radii, page-space
+  /// conversion and the state machine are identical for a finger.
+  func beginFingerManipulation(at points: [CGPoint]) -> FingerManipulation {
+    if points.count >= 2, beginScale(at: points[0], and: points[1]) { return .scale }
+    guard let first = points.first else { return .none }
+    if beginHandleDragIfHit(at: first) { return .handle }
+    if beginMoveIfHit(at: first, padPt: SelectionLimits.touchPadPt) { return .move }
+    return .none
   }
 
   // MARK: Structured shape handle drag

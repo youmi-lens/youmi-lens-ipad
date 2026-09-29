@@ -14,7 +14,7 @@ assert.equal(selectionAcceptsPointer('stylus'), true);
 // Selection CREATION stays Pencil-only; a finger may only MANIPULATE an existing selection (routeSelectionTouch).
 assert.match(notebook, /else if \(!selectionAcceptsPointer\(isStylusTouch \? 'stylus' : 'touch'\)\)/);
 assert.match(notebook, /routeSelectionTouch\(\{\s*pointer: 'touch',\s*touchCount: 1,/);
-assert.match(notebook, /if \(route !== 'selection-move'\) \{\s*manager\.fail\(\);/, 'a finger outside the selection fails so the page navigates');
+assert.match(notebook, /if \(route !== 'selection-move' && route !== 'shape-handle-edit'\) \{\s*manager\.fail\(\);/, 'a finger outside the selection (and not on a handle) fails so the page navigates');
 assert.match(native, /selectionGesture: PageSelectionGestureRecognizer[\s\S]*?allowedTouchTypes = \[NSNumber\(value: UITouch\.TouchType\.pencil\.rawValue\)\]/);
 assert.match(native, /let touch = touches\.first, touch\.type == \.pencil/);
 assert.match(native, /let isAnnotationTool = isInkTool \|\| annotationMode == "select"/);

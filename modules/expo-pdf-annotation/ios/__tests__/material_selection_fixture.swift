@@ -523,6 +523,134 @@ final class MaterialSelectionFixture: UIResponder, UIApplicationDelegate {
       print("NATIVE_SHAPE_ROTATED_PASS")
       print("NATIVE_SHAPE_FIXTURE_PASS")
 
+      // ================= FINGER handle editing parity (RC-1.2) =================
+      // Notebook is the reference: ONE finger on a handle of the selected structured shape edits that handle
+      // (handle > body move > page); TWO fingers inside scale; a finger outside stays with the page. Same native
+      // hit test, page-space conversion, live preview and single release event as the accepted Pencil path.
+      let quadVerts = [ptJSON(330, 380), ptJSON(430, 380), ptJSON(430, 480), ptJSON(330, 480)]
+      let quadStroke: [String: Any] = [
+        "id": "quad", "tool": "pen", "color": "#061B34", "width": 3.0,
+        "points": [[330.0, 380.0], [430.0, 380.0], [430.0, 480.0], [330.0, 480.0], [330.0, 380.0]],
+        "shape": ["origin": "rectangle", "geometry": ["kind": "polygon", "vertices": quadVerts]],
+      ]
+      func fingerDict() -> [String: Any] {
+        var d = shapeDict()
+        var arr = d["1"] as! [[String: Any]]
+        arr.append(quadStroke)
+        d["1"] = arr
+        return d
+      }
+      func fingerCase(_ scale: CGFloat, rotated: Bool) {
+        viewer.pdfView.scaleFactor = scale
+        viewer.pdfView.go(to: PDFDestination(page: first, at: CGPoint(x: 0, y: 720)))
+        viewer.pdfView.layoutDocumentView()
+        func fv(_ x: CGFloat, _ y: CGFloat) -> CGPoint { viewer.pdfView.convert(CGPoint(x: x, y: y), from: first) }
+        let tag = "scale \(scale)\(rotated ? " rotated" : "")"
+        loadShapes(fingerDict())
+        overlay.setSelection(pageNumber: 1, ids: ["quad"])
+        precondition(overlay.selectionStateKind == "SELECTED_SHAPE", "quad selected (\(tag))")
+        precondition(overlay.handleLayer != nil, "four handles are shown (\(tag))")
+        let quadHandles = (overlay.pagedStrokes[1]!.first { $0.id == "quad" }!.shape!.geometry).handles
+        precondition(quadHandles.count == 4, "a quadrilateral has four handles")
+
+        // QUADRILATERAL: the recogniser's gate accepts a touch 20 screen-pt off the corner, and it is a HANDLE, not a move.
+        precondition(overlay.fingerHitsSelection(at: fv(430 + 20 / scale, 380)), "the finger recogniser must begin on a handle touch (\(tag))")
+        // ROOT-CAUSE GUARD: the body-move test on its own ALSO claims a handle touch (handles sit on the outline, inside the
+        // padded bounds). That is exactly what the finger recogniser did before RC-1.2, so the handle test MUST run first.
+        precondition(overlay.beginMoveIfHit(at: fv(430, 380), padPt: SelectionLimits.touchPadPt), "a body-move test alone would swallow a handle touch (\(tag))")
+        overlay.cancelMove()
+        precondition(overlay.beginFingerManipulation(at: [fv(430 + 20 / scale, 380)]) == .handle, "finger on a handle edits the handle, not the body (\(tag))")
+        precondition(overlay.selectionStateKind == "EDITING_SHAPE_HANDLE", "EDITING_SHAPE_HANDLE (\(tag))")
+        overlay.updateHandleDrag(at: fv(470 + 20 / scale, 350))
+        precondition(overlay.shapePreviewLayer != nil, "live native preview, no JS round trip (\(tag))")
+        // (Tolerance: the rotated page round-trips the finger through a 90° view transform.)
+        guard case let .polygon(dragged) = overlay.handleDrag!.geometry, dragged.count == 4,
+              closePt(dragged[0], CGPoint(x: 330, y: 380), 1e-6), closePt(dragged[1], CGPoint(x: 470, y: 350), 1e-6),
+              closePt(dragged[2], CGPoint(x: 430, y: 480), 1e-6), closePt(dragged[3], CGPoint(x: 330, y: 480), 1e-6) else {
+          fatalError("only the dragged corner follows the finger; the quad is NOT forced back to a rectangle (\(tag)): \(overlay.handleDrag!.geometry)")
+        }
+        let quadEdit = overlay.finishHandleDrag(at: fv(470 + 20 / scale, 350))
+        precondition(quadEdit != nil && quadEdit!.strokeId == "quad" && quadEdit!.handleIndex == 1 && quadEdit!.pageNumber == 1, "ONE edit event on release (\(tag))")
+        precondition(abs(quadEdit!.x - 470) < 0.05 && abs(quadEdit!.y - 350) < 0.05, "reported corner is in PDF page space, no zoom drift (\(tag)): \(quadEdit!.x),\(quadEdit!.y)")
+        precondition(overlay.selectionStateKind == "SELECTED_SHAPE" && overlay.handleLayer != nil, "release keeps the shape selected with its handles (\(tag))")
+        precondition(overlay.moveOffset == .zero && overlay.moveStartPagePoint == nil, "a handle drag is never also a body move (\(tag))")
+        // The JS echo of the committed edit ends the preview; undo echo restores the exact previous geometry.
+        var edited = fingerDict()
+        var editedArr = edited["1"] as! [[String: Any]]
+        editedArr[editedArr.count - 1]["shape"] = ["origin": "rectangle", "geometry": ["kind": "polygon", "vertices": [ptJSON(330, 380), ptJSON(470, 350), ptJSON(430, 480), ptJSON(330, 480)]]]
+        edited["1"] = editedArr
+        loadShapes(edited)
+        precondition(overlay.shapePreviewLayer == nil && overlay.selectionStateKind == "SELECTED_SHAPE", "echo ends the preview, selection persists (\(tag))")
+        loadShapes(fingerDict())
+        precondition(overlay.pagedStrokes[1]!.first { $0.id == "quad" }!.shape!.geometry == .polygon([CGPoint(x: 330, y: 380), CGPoint(x: 430, y: 380), CGPoint(x: 430, y: 480), CGPoint(x: 330, y: 480)]), "undo echo restores the exact geometry (\(tag))")
+        precondition(overlay.selectionStateKind == "SELECTED_SHAPE", "undo keeps the selection (\(tag))")
+
+        // PRECEDENCE: body (inside, away from every handle) moves; far outside belongs to the page; a stationary press is no edit.
+        precondition(overlay.beginFingerManipulation(at: [fv(380, 430)]) == .move, "a finger inside the body but outside every handle moves the shape (\(tag))")
+        precondition(overlay.handleDrag == nil && overlay.selectionStateKind == "MOVING_SELECTION", "body move, not a handle edit (\(tag))")
+        overlay.cancelMove()
+        precondition(overlay.beginFingerManipulation(at: [fv(40, 700)]) == .none, "a finger outside the selection is left to PDF navigation (\(tag))")
+        precondition(overlay.selectionStateKind == "SELECTED_SHAPE", "an ignored finger never changes the selection (\(tag))")
+        precondition(overlay.beginFingerManipulation(at: [fv(330, 480)]) == .handle, "handle beats body at a corner (\(tag))")
+        precondition(overlay.finishHandleDrag(at: fv(330, 480)) == nil && overlay.shapePreviewLayer == nil, "a stationary finger on a handle is not an edit (\(tag))")
+        precondition(overlay.selectionStateKind == "SELECTED_SHAPE" && overlay.handleLayer != nil, "…and keeps the handles (\(tag))")
+        // CANCEL (system takes the touch): nothing changes, nothing deselects.
+        precondition(overlay.beginFingerManipulation(at: [fv(330, 380)]) == .handle, "begin for cancel (\(tag))")
+        overlay.updateHandleDrag(at: fv(300, 340))
+        overlay.cancelHandleDrag()
+        precondition(overlay.selectionStateKind == "SELECTED_SHAPE" && overlay.shapePreviewLayer == nil && overlay.handleLayer != nil && overlay.savedInkLayers["quad"]?.isHidden != true, "cancel restores the original and keeps the selection (\(tag))")
+
+        // PINCH: two fingers both inside still scale; a handle drag already in progress is never upgraded to a scale.
+        precondition(overlay.beginFingerManipulation(at: [fv(350, 400), fv(410, 460)]) == .scale, "two fingers inside scale the selected shape (\(tag))")
+        overlay.cancelScale()
+        precondition(overlay.beginFingerManipulation(at: [fv(430, 380)]) == .handle, "handle drag in progress (\(tag))")
+        precondition(!overlay.beginScale(at: fv(430, 380), and: fv(380, 430)), "a second finger cannot steal an active handle drag (\(tag))")
+        overlay.cancelHandleDrag()
+
+        // TRIANGLE (3 handles): vertex 1 at (300,500).
+        overlay.setSelection(pageNumber: 1, ids: ["tri"])
+        precondition(overlay.beginFingerManipulation(at: [fv(300 + 20 / scale, 500)]) == .handle, "triangle vertex handle (\(tag))")
+        let triEdit = overlay.finishHandleDrag(at: fv(330 + 20 / scale, 520))
+        precondition(triEdit != nil && triEdit!.strokeId == "tri" && triEdit!.handleIndex == 1 && abs(triEdit!.x - 330) < 0.05 && abs(triEdit!.y - 520) < 0.05, "triangle finger edit (\(tag)): \(String(describing: triEdit))")
+        overlay.clearShapeEditPreview()
+        loadShapes(fingerDict())
+
+        // LINE (2 endpoint handles): endpoint 1 at (220,190).
+        overlay.setSelection(pageNumber: 1, ids: ["ln"])
+        precondition(overlay.beginFingerManipulation(at: [fv(220 + 20 / scale, 190)]) == .handle, "line endpoint handle (\(tag))")
+        let lineEdit = overlay.finishHandleDrag(at: fv(260 + 20 / scale, 230))
+        precondition(lineEdit != nil && lineEdit!.strokeId == "ln" && lineEdit!.handleIndex == 1 && abs(lineEdit!.x - 260) < 0.05 && abs(lineEdit!.y - 230) < 0.05, "line finger edit (\(tag)): \(String(describing: lineEdit))")
+        overlay.clearShapeEditPreview()
+        loadShapes(fingerDict())
+
+        // ELLIPSE / CIRCLE (4 handles [top,right,bottom,left]): right handle at (440,300); opposite side stays anchored.
+        overlay.setSelection(pageNumber: 1, ids: ["circ"])
+        precondition(overlay.handleLayer != nil, "ellipse shows its handles (\(tag))")
+        precondition(overlay.fingerHitsSelection(at: fv(440 + 20 / scale, 300)), "recogniser begins on an ellipse handle (\(tag))")
+        precondition(overlay.beginFingerManipulation(at: [fv(440 + 20 / scale, 300)]) == .handle, "ellipse right handle (\(tag))")
+        overlay.updateHandleDrag(at: fv(480 + 20 / scale, 300))
+        precondition(overlay.handleDrag!.geometry == .ellipse(center: CGPoint(x: 420, y: 300), ax: CGPoint(x: 60, y: 0), ay: CGPoint(x: 0, y: 40)), "ellipse finger edit keeps the left side anchored (\(tag)): \(overlay.handleDrag!.geometry)")
+        let ellEdit = overlay.finishHandleDrag(at: fv(480 + 20 / scale, 300))
+        precondition(ellEdit != nil && ellEdit!.strokeId == "circ" && ellEdit!.handleIndex == 1 && abs(ellEdit!.x - 480) < 0.05 && abs(ellEdit!.y - 300) < 0.05, "ellipse finger edit event (\(tag)): \(String(describing: ellEdit))")
+        precondition(overlay.selectionStateKind == "SELECTED_SHAPE" && overlay.handleLayer != nil, "ellipse keeps selection + handles (\(tag))")
+        overlay.clearShapeEditPreview()
+        loadShapes(fingerDict())
+        overlay.setSelection(pageNumber: 1, ids: [])
+      }
+      for scale: CGFloat in [0.5, 1, 2] {
+        fingerCase(scale, rotated: false)
+        print("NATIVE_FINGER_HANDLE_PASS scale=\(scale)")
+      }
+      first.rotation = 90
+      fingerCase(1, rotated: true)
+      first.rotation = 0
+      viewer.pdfView.scaleFactor = 1
+      viewer.pdfView.go(to: first)
+      viewer.pdfView.layoutDocumentView()
+      loadShapes(shapeDict())
+      overlay.setSelection(pageNumber: 1, ids: [])
+      print("NATIVE_FINGER_HANDLE_PARITY_PASS")
+
 
       // ================= Selection interaction (state machine, finger move, pinch scale) =================
       first.rotation = 0

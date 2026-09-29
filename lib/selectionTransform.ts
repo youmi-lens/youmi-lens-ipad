@@ -115,7 +115,7 @@ export type TouchRouteInput = {
   hasSelection: boolean;
   /** First touch inside the selected region (screen-tolerance padded). */
   insideSelection: boolean;
-  /** Pencil is on a handle of the single selected shape. */
+  /** The (first) touch — Pencil OR one finger — is on a handle of the single selected structured shape. */
   onHandle?: boolean;
   /** For two touches: the second one is also inside the selected region. */
   secondInsideSelection?: boolean;
@@ -124,7 +124,8 @@ export type TouchRouteInput = {
 /**
  * Arbitration priority (highest first):
  *   Pencil on a handle > Pencil inside selection (move) > Pencil elsewhere (new Box/Lasso) ;
- *   finger(s) inside the selection > page navigation for any finger outside it.
+ *   ONE finger on a handle > ONE finger inside the selection (move) > page navigation for any finger outside it;
+ *   TWO fingers both inside the selection (scale) > page navigation.
  * The page is NEVER made unscrollable just because something is selected: a finger that
  * begins outside the selected region always belongs to the page.
  */
@@ -135,7 +136,12 @@ export function routeSelectionTouch(input: TouchRouteInput): TouchRoute {
     return 'new-selection';
   }
   if (input.pointer === 'touch') {
-    if (!input.hasSelection || !input.insideSelection) return 'page-navigation';
+    if (!input.hasSelection) return 'page-navigation';
+    // ONE finger on a handle of the single selected shape edits that handle (same as the Pencil): a handle beats
+    // the body move and the page. Notebook consumes this; Course Material's native finger recognizer mirrors it
+    // (AnnotationOverlay.beginFingerManipulation) and scripts/selection-finger-handle-parity.test.mjs pins both.
+    if (input.touchCount < 2 && input.onHandle) return 'shape-handle-edit';
+    if (!input.insideSelection) return 'page-navigation';
     if (input.touchCount >= 2) return input.secondInsideSelection ? 'selection-scale' : 'page-navigation';
     return 'selection-move';
   }

@@ -149,7 +149,7 @@ check('Notebook: finger routing is routeSelectionTouch; a finger outside the reg
   const down = slice(nb, '.onTouchesDown((event, manager) => {', '.onTouchesMove((event) => {');
   assert.match(down, /if \(!isStylusTouch && isSelectionInteractiveMode\(activeMode\) && \(activeMode === 'select' \|\| selectedIdsRef\.current\.size > 0\)\)/);
   assert.match(down, /pointer: 'touch',\s*touchCount: 1,/);
-  assert.match(down, /if \(route !== 'selection-move'\) \{\s*manager\.fail\(\);\s*return;/);
+  assert.match(down, /if \(route !== 'selection-move' && route !== 'shape-handle-edit'\) \{\s*manager\.fail\(\);\s*return;/);
   assert.match(down, /fingerSelectionMove = true;/);
   assert.match(down, /SELECTION_TOUCH_PAD_PT : SELECTION_PENCIL_PAD_PT/, 'screen-point tolerance, finger looser than Pencil');
   assert.match(down, /fingerManipulationRef\.current = fingerSelectionMove;\s*beginStylusScrollLock\(\);/, 'the page scroll is locked ONLY once a finger owns a selection move');

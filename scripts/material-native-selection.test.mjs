@@ -64,6 +64,11 @@ assert.match(output, /NATIVE_SHAPE_EDIT_PASS scale=0.5/);
 assert.match(output, /NATIVE_SHAPE_EDIT_PASS scale=1.0/);
 assert.match(output, /NATIVE_SHAPE_EDIT_PASS scale=2.0/);
 assert.match(output, /NATIVE_SHAPE_ROTATED_PASS/);
+// Finger handle editing parity with Notebook (RC-1.2): handle > body move > page, at every zoom and on a rotated page.
+assert.match(output, /NATIVE_FINGER_HANDLE_PASS scale=0.5/);
+assert.match(output, /NATIVE_FINGER_HANDLE_PASS scale=1.0/);
+assert.match(output, /NATIVE_FINGER_HANDLE_PASS scale=2.0/);
+assert.match(output, /NATIVE_FINGER_HANDLE_PARITY_PASS/);
 assert.equal((output.match(/SELECTION_PASS/g) ?? []).length, 6);
 assert.match(output, /SELECTION_BOX_CORNER_PASS/);
 assert.equal((output.match(/SELECTION_MOVE_PASS/g) ?? []).length, 3);
