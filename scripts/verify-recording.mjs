@@ -9,6 +9,7 @@ const passed = await runSteps('Native recording verification', [
   nodeStep('capture engine (AAC segments)', 'scripts/durable-recorder-audio.test.mjs'),
   nodeStep('checkpoint policy + long-session counts', 'scripts/durable-recorder-checkpoint.test.mjs'),
   nodeStep('rollover diagnostics contract (evidence only, no behavior change)', 'scripts/durable-rollover-diagnostics.test.mjs'),
+  nodeStep('production build default engine (nativeDurable, strict parse, precedence)', 'scripts/recording-build-default-engine.test.mjs'),
   nodeStep('bounded checkpoint retry (one retry, same sequence, paused fallback, process death, final asset)', 'scripts/durable-checkpoint-retry.test.mjs'),
   nodeStep('bounded checkpoint retry contract (structure, eligibility, no loop)', 'scripts/durable-checkpoint-retry-contract.test.mjs'),
   nodeStep('R6 verify gate isolation', 'scripts/r6-verify-gate.test.mjs'),

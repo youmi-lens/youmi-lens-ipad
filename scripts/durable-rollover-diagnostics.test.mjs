@@ -95,7 +95,7 @@ check('checkpoint interval, recording engine and durability settings are unchang
   const gate = read('lib/recording/featureGate.ts');
   assert.match(gate, /CONFIGURED_RECORDING_ENGINE: RecordingEngine = 'legacy'/);
   const eas = JSON.parse(read('eas.json'));
-  assert.deepEqual(eas.build.production.env, { EXPO_PUBLIC_USE_REAL_IAP: 'true' }, 'the production EAS profile is untouched');
+  assert.deepEqual(eas.build.production.env, { EXPO_PUBLIC_USE_REAL_IAP: 'true', EXPO_PUBLIC_RECORDING_DEFAULT_ENGINE: 'nativeDurable' }, 'the production EAS profile is exactly IAP + the approved recording build default (no dogfood/diagnostic/injector flags)');
 });
 check('rollover buffers evidence in memory: no file I/O between the old recorder stopping and the new one recording', () => {
   assert.equal((rollover.match(/diagnostics\.flush\(\)/g) ?? []).length, 1, 'one flush, in a defer that runs after rollover work');

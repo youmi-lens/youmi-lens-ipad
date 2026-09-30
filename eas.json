@@ -68,7 +68,8 @@
     },
     "production": {
       "env": {
-        "EXPO_PUBLIC_USE_REAL_IAP": "true"
+        "EXPO_PUBLIC_USE_REAL_IAP": "true",
+        "EXPO_PUBLIC_RECORDING_DEFAULT_ENGINE": "nativeDurable"
       }
     },
     "production-dev-container": {

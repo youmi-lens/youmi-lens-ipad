@@ -1,5 +1,6 @@
 import {
   RECORDING_FALLBACK_REASONS,
+  parseBuildDefaultEngine,
   resolveRecordingEngineDecision,
   resolveRecordingEngineOwnershipDecision,
 } from './policy.mjs';
@@ -13,7 +14,8 @@ export type RecordingEngineSource =
   | 'internal_dogfood'
   | 'durable_ownership'
   | 'frozen_session'
-  | 'remote_rollout';
+  | 'remote_rollout'
+  | 'build_default';
 
 export type RecordingFallbackReason = (typeof RECORDING_FALLBACK_REASONS)[number];
 
@@ -38,6 +40,16 @@ export type NativeCapability = {
 // Phase 2C rollout boundary. Keep this committed value on legacy. Controlled
 // device verification may change this line locally, then must restore it.
 export const CONFIGURED_RECORDING_ENGINE: RecordingEngine = 'legacy';
+
+/**
+ * The release build's default engine, set at build time by the production EAS profile
+ * (`EXPO_PUBLIC_RECORDING_DEFAULT_ENGINE=nativeDurable`). Parsed strictly: anything but the exact string
+ * `nativeDurable` means "no build default", which keeps the existing legacy behavior. It does not read or depend on
+ * remote rollout, and guests, in-flight sessions and existing durable audio keep their precedence in the policy.
+ */
+export const BUILD_DEFAULT_RECORDING_ENGINE: RecordingEngine | null = parseBuildDefaultEngine(
+  process.env.EXPO_PUBLIC_RECORDING_DEFAULT_ENGINE,
+) as RecordingEngine | null;
 
 /**
  * Internal dogfood cohort. Set at build time in an internal build's env; it is
@@ -107,6 +119,7 @@ export function resolveRecordingEngineDecisionForRuntime(options: {
     isTestContext: false,
     developerOverride: getDeveloperRecordingEngineOverride(),
     dogfoodEnabled: INTERNAL_DOGFOOD_ENABLED && CONFIGURED_RECORDING_ENGINE === 'legacy',
+    buildDefaultEngine: BUILD_DEFAULT_RECORDING_ENGINE,
     eligibilityResolved: options.eligibilityResolved !== false,
     capability: options.capability ?? {},
     hasDurableEvidence: options.hasDurableEvidence === true,
@@ -142,6 +155,7 @@ export function resolveRecordingEngineOwnershipDecisionForRuntime(options: {
     isTestContext: false,
     developerOverride: getDeveloperRecordingEngineOverride(),
     dogfoodEnabled: INTERNAL_DOGFOOD_ENABLED && CONFIGURED_RECORDING_ENGINE === 'legacy',
+    buildDefaultEngine: BUILD_DEFAULT_RECORDING_ENGINE,
     eligibilityResolved: options.eligibilityResolved !== false,
     capability: options.capability ?? {},
     hasDurableEvidence: options.hasDurableEvidence === true,
