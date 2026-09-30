@@ -27,13 +27,13 @@ const stageEnum = slice(recorder, 'enum DurableBeginStage', 'struct DurableBegin
 const policyStruct = slice(recorder, 'struct DurableCheckpointRetryPolicy', 'final class DurableForegroundRecorder');
 const retryFn = stripComments(slice(recorder, 'private func beginCheckpointSegment(', 'private func emitEnteredPaused(')).split('\n').slice(1).join('\n'); // body only, not the declaration
 const decisionFn = stripComments(slice(recorder, 'private func checkpointRetryDecision(', 'private func recordBeginFailure('));
-const rollover = slice(recorder, 'private func performCheckpointRollover(recordingSessionId: String) throws {', 'private func failCheckpointCapture(');
+const rollover = slice(recorder, 'private func performCheckpointRollover(\n    recordingSessionId: String,', 'private func failCheckpointCapture(');
 
 console.log('Exactly one retry, no loop, no recursion, only inside a checkpoint rollover');
 check('the retry policy runs one first attempt and at most one second attempt', () => {
   assert.equal((retryFn.match(/performBeginAttempt\(/g) ?? []).length, 2, 'exactly two attempt call sites');
-  assert.match(retryFn, /attempt: 1\)/);
-  assert.match(retryFn, /attempt: 2\)/);
+  assert.match(retryFn, /attempt: 1,/);
+  assert.match(retryFn, /attempt: 2,/);
   assert.doesNotMatch(retryFn, /\bfor\b|\bwhile\b|repeat\s*\{|asyncAfter|Task\s*\{|DispatchQueue/, 'no loop, no scheduled retry');
   assert.doesNotMatch(retryFn, /beginCheckpointSegment\(|beginSegment\(/, 'no recursion and no re-entry through the entry point');
 });
@@ -107,11 +107,13 @@ check('delay and time budget are named, bounded, injectable mitigation parameter
 
 console.log('\nUnchanged behavior');
 check('paused fallback, JS contract, interval, caption and legacy code are untouched', () => {
-  assert.match(rollover, /lastInterruption = "checkpoint_begin_segment_failed"/);
+  assert.match(rollover, /failureInterruption: String = "checkpoint_begin_segment_failed"/);
+  assert.match(rollover, /lastInterruption = failureInterruption/);
   assert.match(rollover, /_ = try\? store\.transitionSession\(recordingSessionId: recordingSessionId, to: \.paused\)/);
   assert.match(recorder, /static let defaultCheckpointInterval: TimeInterval = 60/);
   const js = read('lib/recording/useNativeDurableLectureRecorder.ts');
   assert.match(js, /status\.interruptionState === 'checkpoint_begin_segment_failed'/);
+  assert.match(js, /status\.interruptionState === 'route_recovery_failed'/);
   assert.doesNotMatch(js, /retry_started|retry_succeeded|checkpoint_retry/, 'JS is not involved in the retry');
   const mic = read('lib/liveMicStream.ts');
   assert.match(mic, /iosCategory: 'playAndRecord'/);

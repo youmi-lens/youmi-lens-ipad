@@ -208,7 +208,7 @@ private func testOwnershipAndStartFailure() async throws {
 private func testInterruptionRouteAndRestart() async throws {
   let root = temporaryRoot("recovery")
   defer { try? FileManager.default.removeItem(at: root) }
-  let (store, firstEngine, _, _, _) = try makeEngine(root: root)
+  let (store, firstEngine, firstAudio, _, _) = try makeEngine(root: root)
   let session = try store.createSession(lectureId: "lecture-recovery")
   try await prepare(firstEngine, sessionId: session.recordingSessionId)
   _ = try firstEngine.startRecording(recordingSessionId: session.recordingSessionId)
@@ -218,6 +218,9 @@ private func testInterruptionRouteAndRestart() async throws {
   try require(interrupted.segments[0].interruptionReason == "interruption_began", "Interruption reason must persist")
   firstEngine.simulateInterruptionEndedForTesting(shouldResume: true)
   _ = try firstEngine.resumeRecording(recordingSessionId: session.recordingSessionId)
+  // iOS provides NO usable input after the route loss: the recorder must pause truthfully. (With a usable fallback
+  // input it now recovers automatically — covered by durable-audio-session-ownership-core.test.swift.)
+  firstAudio.hasSuitableInput = false
   firstEngine.simulateRouteLossForTesting()
   interrupted = try store.getSession(recordingSessionId: session.recordingSessionId)
   try require(interrupted.state == .paused && interrupted.segments.count == 2, "Route loss must preserve segment 2")
@@ -351,7 +354,7 @@ private func testInvalidSegmentMetadataVersions() async throws {
 private func testForcedPausePublishesStatus() async throws {
   let root = temporaryRoot("status-events")
   defer { try? FileManager.default.removeItem(at: root) }
-  let (store, engine, _, _, _) = try makeEngine(root: root)
+  let (store, engine, statusAudio, _, _) = try makeEngine(root: root)
   var payloads: [[String: Any]] = []
   engine.onStatusChange = { payloads.append($0) }
 
@@ -381,7 +384,9 @@ private func testForcedPausePublishesStatus() async throws {
   let resumeSequence = payloads.last?["statusSequence"] as? Int ?? 0
   try require(resumeSequence > interruptedSequence, "Resume must advance statusSequence")
 
+  statusAudio.hasSuitableInput = false // no usable input => truthful forced pause
   engine.simulateRouteLossForTesting()
+  statusAudio.hasSuitableInput = true
   let routed = payloads.last!
   try require((routed["runtimeState"] as? String) == "paused", "Route-loss runtime must be paused")
   try require(

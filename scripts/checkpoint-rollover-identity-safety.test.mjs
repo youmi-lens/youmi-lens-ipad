@@ -147,7 +147,7 @@ check('a successful Resume — including retrying the segment a checkpoint rollo
 check('the checkpoint-specific failure reuses the EXISTING error surface with a clear, distinct recovery message — no new UI', () => {
   assert.match(
     nativeDurableHook,
-    /if \(status\.interruptionState === 'checkpoint_begin_segment_failed'\) \{\s*\n\s*fail\('Recording paused — tap Resume to continue\.', 'checkpoint_begin_segment_failed'\);/,
+    /if \(\s*status\.interruptionState === 'checkpoint_begin_segment_failed'\s*\|\|\s*status\.interruptionState === 'route_recovery_failed'\s*\) \{\s*\n\s*fail\('Recording paused — tap Resume to continue\.', status\.interruptionState\);/,
   );
   // A plain interruption/route-change forced pause is explicitly NOT given
   // this treatment — out of this P0's scope, left exactly as it behaved.

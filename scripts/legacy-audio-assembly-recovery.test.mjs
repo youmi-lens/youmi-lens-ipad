@@ -46,7 +46,7 @@ check('AudioSegmentComposer exists and uses AVMutableComposition + sequential in
 });
 
 check('DurableFinalAssetExporter (existing durable-session export) now delegates to the shared composer instead of its own inline loop', () => {
-  assert.match(durableExporter, /AudioSegmentComposer\.compose\(orderedSources: plan\.sourceURLs, outputURL: plan\.temporaryURL\)/);
+  assert.match(durableExporter, /AudioSegmentComposer\.compose\(\s*orderedSources: plan\.sourceURLs,\s*outputURL: plan\.temporaryURL(,\s*cancellation: cancellation)?\s*\)/);
   assert.doesNotMatch(durableExporter, /AVMutableComposition\(\)/, 'the composition loop must be extracted, not duplicated');
 });
 

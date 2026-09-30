@@ -24,7 +24,7 @@ const store = read('modules/expo-durable-recorder/ios/DurableRecorderStore.swift
 const begin = slice(recorder, 'private func performBeginAttempt(', 'private func abandonFailedBegin(');
 const beginEntry = slice(recorder, 'private func beginSegment(recordingSessionId: String, resuming: Bool) throws', 'private func performBeginAttempt(');
 const abandon = slice(recorder, 'private func abandonFailedBegin(', 'private static func milliseconds');
-const rollover = slice(recorder, 'private func performCheckpointRollover(recordingSessionId: String) throws {', 'private func failCheckpointCapture(');
+const rollover = slice(recorder, 'private func performCheckpointRollover(\n    recordingSessionId: String,', 'private func failCheckpointCapture(');
 const manager = slice(recorder, 'final class SystemDurableAudioSessionManager', '#else');
 const diagClass = slice(recorder, 'final class DurableRecorderDiagnostics {', undefined);
 
@@ -33,7 +33,7 @@ check('stage ids are assigned in the same order the operations run', () => {
   const order = [
     'var stage = "permission_check"',
     'stage = "audio_session"',
-    'try audioSession.activateForRecording()',
+    'try audioSession.activateForRecording(reassertConfiguration: reassertAudioSession)',
     'stage = "input_availability_recheck"',
     'stage = "segment_plan_create"',
     'try store.createSegmentPlan(recordingSessionId: recordingSessionId)',
@@ -56,7 +56,7 @@ check('stage ids are assigned in the same order the operations run', () => {
   assert.equal(new Set(stages).size, stages.length, 'each stage id is used exactly once (no collapsing into one generic error)');
 });
 check('the AVAudioSession activation splits into set_category / set_active / input_availability', () => {
-  const activate = slice(manager, 'func activateForRecording() throws {', 'func diagnosticSnapshot()');
+  const activate = slice(manager, 'func activateForRecording(reassertConfiguration: Bool) throws {', 'func diagnosticSnapshot()');
   const order = ['lastActivationStage = "set_category"', 'try session.setCategory(.record, mode: .default, options: [.allowBluetoothHFP])',
     'lastActivationStage = "set_active"', 'try session.setActive(true)', 'lastActivationStage = "input_availability"', 'guard hasSuitableInput', 'lastActivationStage = "activated"'];
   let cursor = -1;
@@ -68,7 +68,7 @@ console.log('\nNo behavioral change');
 check('the audio-session operations, category and options are exactly what shipped', () => {
   assert.match(manager, /try session\.setCategory\(\.record, mode: \.default, options: \[\.allowBluetoothHFP\]\)/);
   assert.match(manager, /try session\.setActive\(true\)/);
-  assert.match(manager, /try\? session\.setActive\(false, options: \[\.notifyOthersOnDeactivation\]\)/);
+  assert.match(manager, /try session\.setActive\(false, options: \[\.notifyOthersOnDeactivation\]\)/);
 });
 check('the original failure handling of beginSegment is preserved: same cleanup, same order, same rethrow (Start/Resume never retry)', () => {
   const order = ['activeCapture?.stop()', 'clearActiveCapture()', 'audioSession.deactivate()'];
@@ -84,7 +84,8 @@ check('the original failure handling of beginSegment is preserved: same cleanup,
   assert.doesNotMatch(code, /\bfor\b|\bwhile\b|repeat\s*\{|Task\.sleep|asyncAfter|beginSegment\(|performBeginAttempt\(|retry/i, 'one attempt: no loop, delay or recursion inside the attempt (comments excluded)');
   assert.equal((recorder.match(/try beginSegment\(recordingSessionId: recordingSessionId, resuming: (true|false)\)/g) ?? []).length, 2, 'beginSegment is called by Start and Resume only');
   assert.match(recorder, /try beginCheckpointSegment\(recordingSessionId: recordingSessionId, previousCommitted: previousCommitted\)\s*\n\s*scheduleCheckpoint\(\)/);
-  assert.match(recorder, /lastInterruption = "checkpoint_begin_segment_failed"/);
+  assert.match(recorder, /failureInterruption: String = "checkpoint_begin_segment_failed"/);
+  assert.match(recorder, /lastInterruption = failureInterruption/);
 });
 check('prepare/record keep their original short-circuit semantics (record() is not called when prepare fails)', () => {
   assert.match(begin, /let prepared = capture\.prepareToRecord\(\)[\s\S]*?if prepared \{[\s\S]*?started = capture\.record\(\)[\s\S]*?\}[\s\S]*?guard prepared, started else \{\s*capture\.stop\(\)\s*throw DurableRecorderCoreError\.recorderStartFailed/);

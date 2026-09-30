@@ -110,7 +110,7 @@ check('the durable hook exposes the final asset duration and records it only on 
   assert.match(types, /getFinalAudioDurationMillis\?: \(\) => number \| null;/);
   assert.match(hook, /finalAssetDurationMillisRef\.current = result\.durationMs;/);
   assert.match(hook, /getFinalAudioDurationMillis: \(\) => finalAssetDurationMillisRef\.current,/);
-  assert.match(hook, /finalAssetDurationMillisRef\.current = null;\s*\n\s*const result = await finalizeAndExportDurableSession/);
+  assert.match(hook, /finalAssetDurationMillisRef\.current = null;[\s\S]*?const result = await finalizeAndExportDurableSession/);
 });
 
 check('a failed Finish reconciles JS with the native session so the wall-clock timer stops counting', () => {

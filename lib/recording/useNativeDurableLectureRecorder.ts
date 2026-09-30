@@ -143,8 +143,11 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
         // interruption/route-change forced pause is left exactly as it
         // already behaved (out of this fix's scope), since those already
         // have their own established, working recovery flow.
-        if (status.interruptionState === 'checkpoint_begin_segment_failed') {
-          fail('Recording paused — tap Resume to continue.', 'checkpoint_begin_segment_failed');
+        if (
+          status.interruptionState === 'checkpoint_begin_segment_failed'
+          || status.interruptionState === 'route_recovery_failed'
+        ) {
+          fail('Recording paused — tap Resume to continue.', status.interruptionState);
         }
         logRecordingEvent('native_recording_paused', {
           segmentCount: session.segments.length,
@@ -167,6 +170,9 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
         setIsPaused(false);
         setIsRecording(true);
         setDurationMillis(baseDurationRef.current);
+        // Native recovered on its own (automatic recovery after a protective pause): the pause warning is stale.
+        setDegradedReason(null);
+        setError(null); setErrorDetail(null);
       }
       return;
     }
@@ -339,8 +345,11 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
       baseDurationRef.current = finalizedDurationMillis(status.session ?? session);
       activeStartedAtRef.current = Date.now(); activeRef.current = true; setIsPaused(false); setIsRecording(true);
       // A successful resume — including retrying the segment a checkpoint
-      // rollover failed to open — is no longer degraded.
+      // rollover failed to open — is no longer degraded. Clear the visible
+      // pause message ONLY now that native confirmed the recording is active;
+      // a failed resume (catch below) leaves it in place.
       setDegradedReason(null);
+      setError(null); setErrorDetail(null);
       logRecordingEvent('native_recording_resumed', {
         segmentCount: (status.session ?? session).segments.length,
       });

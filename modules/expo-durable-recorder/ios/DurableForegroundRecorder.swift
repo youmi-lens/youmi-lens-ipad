@@ -74,12 +74,25 @@ protocol DurableAudioSessionManaging: AnyObject {
   var lastActivationStage: String { get }
   func requestPermission() async -> DurableRecorderPermissionState
   func activateForRecording() throws
+  /// Activates the session for recording.
+  ///
+  /// `reassertConfiguration == false` is used ONLY across a checkpoint rollover, where this recorder has held the
+  /// session active the whole time: an implementation must then reuse the already-active, recording-compatible session
+  /// and MUST NOT call `setCategory`/`setActive` again. Physical evidence (2026-09-30, three consecutive background
+  /// checkpoints) showed iOS rejects that redundant `setCategory` with `'!int'` (560557684) while the app is in the
+  /// background — even when the requested category is identical to the current one — which stopped the recording.
+  /// `true` always performs the full category + activation sequence.
+  func activateForRecording(reassertConfiguration: Bool) throws
   func deactivate()
+  /// DIAGNOSTIC ONLY (Dev). Receives every shared AVAudioSession mutation this manager performs.
+  func setMutationObserver(_ observer: ((String, [String: Any]) -> Void)?)
   /// DIAGNOSTIC ONLY. Best-effort, side-effect-free description of the shared audio session. Never throws.
   func diagnosticSnapshot() -> [String: Any]
 }
 
 extension DurableAudioSessionManaging {
+  func activateForRecording(reassertConfiguration: Bool) throws { try activateForRecording() }
+  func setMutationObserver(_ observer: ((String, [String: Any]) -> Void)?) {}
   var lastActivationStage: String { "unknown" }
   func diagnosticSnapshot() -> [String: Any] { [:] }
 }
@@ -116,11 +129,63 @@ final class SystemDurableAudioSessionManager: DurableAudioSessionManaging {
 
   private(set) var lastActivationStage = "idle"
 
-  func activateForRecording() throws {
+  /// True while THIS manager holds the session active (set after a successful `setActive(true)`, cleared by
+  /// `deactivate()`). AVAudioSession exposes no "isActive" getter, so ownership is tracked explicitly.
+  private var heldActiveByRecorder = false
+  private var mutationObserver: ((String, [String: Any]) -> Void)?
+
+  func setMutationObserver(_ observer: ((String, [String: Any]) -> Void)?) { mutationObserver = observer }
+
+  private func noteMutation(_ operation: String, _ detail: [String: Any] = [:]) {
+    guard let mutationObserver else { return }
+    var event: [String: Any] = ["caller": "durable_recorder", "op": operation]
+    for (key, value) in detail { event[key] = value }
+    mutationObserver("audio_session_mutation", event)
+  }
+
+  /// The session is usable for durable recording as-is: a recording-capable category in the default mode. Other
+  /// Youmi subsystems (live captions) may legitimately leave it as PlayAndRecord; capture works the same, so the
+  /// recorder must not force a category transition (which iOS refuses in the background).
+  private var currentConfigurationSupportsRecording: Bool {
+    (session.category == .record || session.category == .playAndRecord) && session.mode == .default
+  }
+
+  func activateForRecording() throws { try activateForRecording(reassertConfiguration: true) }
+
+  func activateForRecording(reassertConfiguration: Bool) throws {
+    if !reassertConfiguration, heldActiveByRecorder, currentConfigurationSupportsRecording {
+      lastActivationStage = "reused_active_session"
+      noteMutation("reuse_active_session", [
+        "category": session.category.rawValue, "options": Int(session.categoryOptions.rawValue),
+      ])
+      lastActivationStage = "input_availability"
+      guard hasSuitableInput else {
+        deactivate()
+        throw DurableRecorderCoreError.noAudioInput
+      }
+      lastActivationStage = "activated"
+      return
+    }
     lastActivationStage = "set_category"
-    try session.setCategory(.record, mode: .default, options: [.allowBluetoothHFP])
+    do {
+      try session.setCategory(.record, mode: .default, options: [.allowBluetoothHFP])
+      noteMutation("set_category", ["requestedCategory": "record", "requestedOptions": 4, "result": "ok"])
+    } catch {
+      noteMutation("set_category", [
+        "requestedCategory": "record", "requestedOptions": 4, "result": "error",
+        "error": DurableRecorderDiagnostics.describe(error),
+      ])
+      throw error
+    }
     lastActivationStage = "set_active"
-    try session.setActive(true)
+    do {
+      try session.setActive(true)
+      heldActiveByRecorder = true
+      noteMutation("set_active", ["active": true, "result": "ok"])
+    } catch {
+      noteMutation("set_active", ["active": true, "result": "error", "error": DurableRecorderDiagnostics.describe(error)])
+      throw error
+    }
     lastActivationStage = "input_availability"
     guard hasSuitableInput else {
       deactivate()
@@ -155,7 +220,13 @@ final class SystemDurableAudioSessionManager: DurableAudioSessionManaging {
   }
 
   func deactivate() {
-    try? session.setActive(false, options: [.notifyOthersOnDeactivation])
+    heldActiveByRecorder = false
+    do {
+      try session.setActive(false, options: [.notifyOthersOnDeactivation])
+      noteMutation("set_active", ["active": false, "result": "ok"])
+    } catch {
+      noteMutation("set_active", ["active": false, "result": "error", "error": DurableRecorderDiagnostics.describe(error)])
+    }
   }
 }
 #else
@@ -295,6 +366,9 @@ final class DurableForegroundRecorder {
   private var activeCapture: DurableAudioCapture?
   private var routeAtSegmentStart: String?
   private var lastInterruption: String?
+  /// Set ONLY when the recorder itself paused after a failed, bounded automatic recovery (checkpoint / route loss),
+  /// never for a user pause. Consumed by exactly one foreground auto-recovery attempt.
+  private var pendingAutoRecovery: String?
   private var lastRouteChange: String?
   /// Monotonic revision included in every status payload so JS can ignore stale events.
   private var statusSequence: Int = 0
@@ -368,6 +442,16 @@ final class DurableForegroundRecorder {
       fileURL: { [store] in store.diagnosticsFileURL(recordingSessionId: $0) }
     )
     self.diagnostics.contextProvider = { [weak self] in ["app": self?.currentAppState() ?? "unknown"] }
+    if self.diagnostics.isEnabled {
+      audioSession.setMutationObserver { [weak self] kind, detail in
+        guard let self, let sessionId = self.ownedSessionId else { return }
+        var event = detail
+        event["kind"] = kind
+        event["runtime"] = self.runtimeState.rawValue
+        self.diagnostics.emit(sessionId: sessionId, event)
+        if !self.isCheckpointInProgress { self.diagnostics.flush() }
+      }
+    }
     if observeSystemNotifications {
       registerObservers()
     }
@@ -439,6 +523,7 @@ final class DurableForegroundRecorder {
     try queue.sync {
       try requireOwner(recordingSessionId)
       emitLifecycle("pause_transition", ["caller": "user_pause_request"])
+      pendingAutoRecovery = nil
       if runtimeState == .paused || runtimeState == .interrupted {
         return statusDictionary(session: try store.getSession(recordingSessionId: recordingSessionId))
       }
@@ -465,27 +550,32 @@ final class DurableForegroundRecorder {
   }
 
   func resumeRecording(recordingSessionId: String) throws -> [String: Any] {
-    try queue.sync {
-      if runtimeState == .recording {
-        try requireOwner(recordingSessionId)
-        return statusDictionary(session: try store.getSession(recordingSessionId: recordingSessionId))
-      }
-      let session = try store.getSession(recordingSessionId: recordingSessionId)
-      guard session.state == .paused,
-            runtimeState == .paused || runtimeState == .interrupted || runtimeState == .idle else {
-        throw DurableRecorderCoreError.invalidRecorderState("Resume requires a recoverable paused session.")
-      }
-      try claim(recordingSessionId)
-      runtimeState = .resuming
-      let resumed = try beginSegment(recordingSessionId: recordingSessionId, resuming: true)
-      scheduleCheckpoint()
-      return publishStatus(session: resumed)
+    try queue.sync { try resumeRecordingLocked(recordingSessionId: recordingSessionId) }
+  }
+
+  /// Body of Resume. MUST run on `queue` (the public entry point and the foreground auto-recovery both do).
+  private func resumeRecordingLocked(recordingSessionId: String) throws -> [String: Any] {
+    if runtimeState == .recording {
+      try requireOwner(recordingSessionId)
+      return statusDictionary(session: try store.getSession(recordingSessionId: recordingSessionId))
     }
+    pendingAutoRecovery = nil
+    let session = try store.getSession(recordingSessionId: recordingSessionId)
+    guard session.state == .paused,
+          runtimeState == .paused || runtimeState == .interrupted || runtimeState == .idle else {
+      throw DurableRecorderCoreError.invalidRecorderState("Resume requires a recoverable paused session.")
+    }
+    try claim(recordingSessionId)
+    runtimeState = .resuming
+    let resumed = try beginSegment(recordingSessionId: recordingSessionId, resuming: true)
+    scheduleCheckpoint()
+    return publishStatus(session: resumed)
   }
 
   func stopRecording(recordingSessionId: String) throws -> [String: Any] {
     try queue.sync {
       emitLifecycle("stop_requested")
+      pendingAutoRecovery = nil
       let existing = try store.getSession(recordingSessionId: recordingSessionId)
       if existing.state == .finalized {
         if ownedSessionId == recordingSessionId { releaseOwnership() }
@@ -614,7 +704,20 @@ final class DurableForegroundRecorder {
   func simulateRouteLossForTesting() {
     queue.sync {
       lastRouteChange = "old_device_unavailable"
-      handleForcedPause(reason: "route_old_device_unavailable", runtimeAfter: .paused)
+      recoverOrPauseAfterRouteLoss(reasonName: "old_device_unavailable", isOldDeviceUnavailable: true)
+    }
+  }
+
+  /// Test-only: the app returned to the foreground (runs the one bounded auto-recovery attempt).
+  func simulateForegroundForTesting() {
+    queue.sync { attemptAutomaticRecoveryAfterProtectivePause() }
+  }
+
+  /// Test-only: a route change that leaves no usable input (forces the truthful pause).
+  func simulateNoInputRouteChangeForTesting(reasonName: String) {
+    queue.sync {
+      lastRouteChange = reasonName
+      recoverOrPauseAfterRouteLoss(reasonName: reasonName, isOldDeviceUnavailable: false)
     }
   }
 
@@ -669,7 +772,8 @@ final class DurableForegroundRecorder {
   private func performBeginAttempt(
     recordingSessionId: String,
     resuming: Bool,
-    attempt: Int
+    attempt: Int,
+    reassertAudioSession: Bool = true
   ) throws -> DurableRecordingSession {
     let context = isCheckpointInProgress ? "checkpoint" : (resuming ? "resume" : "start")
     let beginUptime = ProcessInfo.processInfo.systemUptime
@@ -697,7 +801,7 @@ final class DurableForegroundRecorder {
     }
     do {
       stage = "audio_session"
-      try audioSession.activateForRecording()
+      try audioSession.activateForRecording(reassertConfiguration: reassertAudioSession)
       stage = "input_availability_recheck"
       guard audioSession.hasSuitableInput else { throw DurableRecorderCoreError.noAudioInput }
       stage = "segment_plan_create"
@@ -793,7 +897,11 @@ final class DurableForegroundRecorder {
   ) throws {
     let first: DurableBeginAttemptFailure
     do {
-      _ = try performBeginAttempt(recordingSessionId: recordingSessionId, resuming: true, attempt: 1)
+      // Attempt 1 reuses the session this recorder has held active through the rollover: no setCategory/setActive,
+      // which iOS refuses in the background. Only a real recorder failure can fail it now.
+      _ = try performBeginAttempt(
+        recordingSessionId: recordingSessionId, resuming: true, attempt: 1, reassertAudioSession: false
+      )
       return
     } catch let failure as DurableBeginAttemptFailure {
       first = failure
@@ -859,7 +967,14 @@ final class DurableForegroundRecorder {
     }
 
     do {
-      _ = try performBeginAttempt(recordingSessionId: recordingSessionId, resuming: true, attempt: 2)
+      // Attempt 2 re-asserts the recording configuration only when attempt 1 failed IN the audio-session step (legal
+      // in the foreground; in the background iOS may still refuse it, in which case the bounded failure handling
+      // below applies unchanged). A failure in a later, recorder-level step leaves the session as it was: retrying the
+      // recorder alone must not trigger another category transition.
+      _ = try performBeginAttempt(
+        recordingSessionId: recordingSessionId, resuming: true, attempt: 2,
+        reassertAudioSession: first.stageId.hasPrefix("audio_session")
+      )
       if diagnostics.isEnabled {
         var event: [String: Any] = [
           "kind": "retry_succeeded", "cp": diagCheckpointOrdinal, "attempt": 2, "seq": diagNextSequence as Any,
@@ -1004,6 +1119,7 @@ final class DurableForegroundRecorder {
       if reason.hasPrefix("interruption") { lastInterruption = reason }
       return
     }
+    pendingAutoRecovery = nil
     cancelCheckpoint()
     do {
       _ = try finalizeActiveSegment(recordingSessionId: recordingSessionId, reason: reason)
@@ -1024,7 +1140,14 @@ final class DurableForegroundRecorder {
 
   /// Commit the active segment and immediately open the next one without
   /// pausing session state or publishing a paused UI event.
-  private func performCheckpointRollover(recordingSessionId: String) throws {
+  /// Closes the current segment (commit, reason `commitReason`) and opens the next one on the current route, with
+  /// the same bounded recovery. Used for the 60 s checkpoint and for route-loss recovery. On failure it lands in the
+  /// protective pause (`failureInterruption`) — never a silent "recording" state.
+  private func performCheckpointRollover(
+    recordingSessionId: String,
+    commitReason: String = "checkpoint",
+    failureInterruption: String = "checkpoint_begin_segment_failed"
+  ) throws {
     guard !isCheckpointInProgress else {
       throw DurableRecorderCoreError.invalidRecorderState("Checkpoint already in progress.")
     }
@@ -1060,7 +1183,7 @@ final class DurableForegroundRecorder {
     var previousCommitted: DurableRecordingSegmentMetadata?
     lastSegmentStopUptime = nil
     do {
-      let committed = try finalizeActiveSegment(recordingSessionId: recordingSessionId, reason: "checkpoint")
+      let committed = try finalizeActiveSegment(recordingSessionId: recordingSessionId, reason: commitReason)
       if let last = committed.segments.max(by: { $0.sequence < $1.sequence }) {
         previousCommitted = last
         diagNextSequence = last.sequence + 1
@@ -1103,7 +1226,8 @@ final class DurableForegroundRecorder {
       // failed, tap Resume" recovery state instead of an ordinary paused UI.
       // The committed segments up to (and including) this checkpoint are
       // untouched; only the NEXT segment failed to open.
-      lastInterruption = "checkpoint_begin_segment_failed"
+      lastInterruption = failureInterruption
+      pendingAutoRecovery = failureInterruption
       let session = try? store.getSession(recordingSessionId: recordingSessionId)
       _ = publishStatus(session: session)
       throw error
@@ -1348,6 +1472,11 @@ final class DurableForegroundRecorder {
         self?.handleRouteChange(notification)
       }
     })
+    observers.append(center.addObserver(
+      forName: UIApplication.didBecomeActiveNotification, object: nil, queue: nil
+    ) { [weak self] _ in
+      self?.queue.async { self?.attemptAutomaticRecoveryAfterProtectivePause() }
+    })
     if diagnostics.isEnabled {
       DispatchQueue.main.async { [weak self] in
         let state = UIApplication.shared.applicationState
@@ -1367,6 +1496,52 @@ final class DurableForegroundRecorder {
       }
     }
     #endif
+  }
+
+  /// A microphone disappeared. If iOS still provides a usable input (e.g. AirPods removed -> built-in mic), the
+  /// recording continues on it: the current segment is committed and the next one is opened on the new route with the
+  /// same bounded recovery as a checkpoint — no manual Resume, no gap beyond the stop->record window. If iOS provides
+  /// NO usable input, or recovery fails, the recorder pauses truthfully (committed audio preserved).
+  private func recoverOrPauseAfterRouteLoss(reasonName name: String, isOldDeviceUnavailable: Bool) {
+    guard isOldDeviceUnavailable,
+          audioSession.hasSuitableInput,
+          runtimeState == .recording,
+          !isCheckpointInProgress,
+          let recordingSessionId = ownedSessionId,
+          activeCapture != nil, activePlan != nil else {
+      handleForcedPause(reason: "route_\(name)", runtimeAfter: .paused)
+      return
+    }
+    emitLifecycle("route_recovery_started", ["reason": name, "route": audioSession.routeDescription])
+    do {
+      try performCheckpointRollover(
+        recordingSessionId: recordingSessionId,
+        commitReason: "route_\(name)",
+        failureInterruption: "route_recovery_failed"
+      )
+      emitLifecycle("route_recovery_succeeded", ["route": audioSession.routeDescription])
+    } catch {
+      // performCheckpointRollover already committed what it could, paused truthfully and published the status.
+      emitLifecycle("route_recovery_failed", ["error": DurableRecorderDiagnostics.describe(error)])
+    }
+  }
+
+  /// One bounded attempt, when the app returns to the foreground, to resume a recording that the RECORDER ITSELF
+  /// paused after a failed automatic recovery. A user pause, an interruption or a stop never sets
+  /// `pendingAutoRecovery`, so this can never override a deliberate Pause.
+  private func attemptAutomaticRecoveryAfterProtectivePause() {
+    guard let cause = pendingAutoRecovery,
+          runtimeState == .paused,
+          let recordingSessionId = ownedSessionId else { return }
+    pendingAutoRecovery = nil
+    guard (try? store.getSession(recordingSessionId: recordingSessionId))?.state == .paused else { return }
+    emitLifecycle("auto_recovery_attempt", ["cause": cause])
+    do {
+      _ = try resumeRecordingLocked(recordingSessionId: recordingSessionId)
+      emitLifecycle("auto_recovery_succeeded", ["cause": cause])
+    } catch {
+      emitLifecycle("auto_recovery_failed", ["cause": cause, "error": DurableRecorderDiagnostics.describe(error)])
+    }
   }
 
   #if os(iOS)
@@ -1393,9 +1568,14 @@ final class DurableForegroundRecorder {
     let rawReason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 0
     let reason = AVAudioSession.RouteChangeReason(rawValue: rawReason) ?? .unknown
     lastRouteChange = Self.routeReasonName(reason)
-    emitLifecycle("route_change", ["reason": Self.routeReasonName(reason), "route": audioSession.routeDescription])
+    emitLifecycle("route_change", [
+      "reason": Self.routeReasonName(reason), "route": audioSession.routeDescription,
+      "session": diagnostics.isEnabled ? DurableRecorderDiagnostics.compactSession(audioSession.diagnosticSnapshot()) : [:],
+    ])
     if reason == .oldDeviceUnavailable || !audioSession.hasSuitableInput {
-      handleForcedPause(reason: "route_\(Self.routeReasonName(reason))", runtimeAfter: .paused)
+      recoverOrPauseAfterRouteLoss(
+        reasonName: Self.routeReasonName(reason), isOldDeviceUnavailable: reason == .oldDeviceUnavailable
+      )
     }
   }
 
