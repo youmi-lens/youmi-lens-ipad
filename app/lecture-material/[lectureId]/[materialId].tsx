@@ -250,9 +250,9 @@ export default function LectureMaterialWorkspaceScreen() {
   const [nativeSelectionShape, setNativeSelectionShape] = useState<SelectionShape>('lasso');
   const [nativeSelection, setNativeSelection] = useState<MaterialSelection>({ pageNumber: 0, strokeIds: [] });
   // Pen/Highlight colour are user-selectable from the toolbar's colour strip;
-  // width and eraser size keep their default presets (no width picker). The
-  // native view reads these on every render, so changing the colour applies to
-  // the next stroke without touching committed annotations or PDF coordinates.
+  // width and eraser size keep their default presets (no width picker). Colors
+  // are sent through lightweight native commands so a color-only interaction
+  // cannot reconcile the heavy annotation props or reset native Pencil mode.
   const [nativePenColor, setNativePenColor] = useState<string>(PEN_COLORS[0].value);
   const [nativePenWidth, setNativePenWidth] = useState<number>(PEN_WIDTHS[1].value);
   const [nativeHighlighterColor, setNativeHighlighterColor] = useState<string>(HIGHLIGHTER_COLORS[0].value);
@@ -260,6 +260,8 @@ export default function LectureMaterialWorkspaceScreen() {
   const [nativeEraserRadius, setNativeEraserRadius] = useState<number>(ERASER_SIZES[1].value);
   const [nativeTemporaryEraser, setNativeTemporaryEraser] = useState(false);
   const nativeAnnotationModeRef = useRef<NativePdfAnnotationMode>(nativeAnnotationMode);
+  const nativePenColorRef = useRef(nativePenColor);
+  const nativeHighlighterColorRef = useRef(nativeHighlighterColor);
   const nativePreviousDrawingToolRef = useRef<Extract<NativePdfAnnotationMode, 'pen' | 'highlighter'>>('pen');
   const nativeTemporaryEraserRef = useRef(false);
   const applyNativeAnnotationMode = useCallback((next: NativePdfAnnotationMode) => {
@@ -768,6 +770,8 @@ export default function LectureMaterialWorkspaceScreen() {
   }, [t]);
 
   const handleNativeLoadComplete = useCallback((event: NativePdfLoadCompleteEvent) => {
+    pdfRef.current?.setPenColor(nativePenColorRef.current);
+    pdfRef.current?.setHighlighterColor(nativeHighlighterColorRef.current);
     pdfRef.current?.setAnnotationMode(nativeAnnotationModeRef.current);
     handlePdfLoadComplete(event.totalPages, event.sourcePageCount);
   }, [handlePdfLoadComplete]);
@@ -1092,8 +1096,12 @@ export default function LectureMaterialWorkspaceScreen() {
   // the toolbar instance for each path calls its matching handler.
   const handleSelectNativeColor = useCallback((color: string) => {
     if (nativeAnnotationModeRef.current === 'highlighter') {
+      nativeHighlighterColorRef.current = color;
+      pdfRef.current?.setHighlighterColor(color);
       setNativeHighlighterColor(color);
     } else {
+      nativePenColorRef.current = color;
+      pdfRef.current?.setPenColor(color);
       setNativePenColor(color);
     }
   }, []);
@@ -1443,9 +1451,7 @@ export default function LectureMaterialWorkspaceScreen() {
           initialViewport={initialViewport}
           style={styles.pdfFill}
           selectionShape={nativeSelectionShape}
-          penColor={nativePenColor}
           penWidth={nativePenWidth}
-          highlighterColor={nativeHighlighterColor}
           highlighterWidth={nativeHighlighterWidth}
           eraserRadius={nativeEraserRadius}
           annotationsByPage={nativeAnnotationsProp}

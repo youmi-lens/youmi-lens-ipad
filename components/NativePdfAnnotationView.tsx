@@ -36,6 +36,10 @@ export type NativePdfAnnotationViewRef = {
   setPage: (pageNumber: number) => void;
   /** Changes the active tool without reconciling the annotation-data props. */
   setAnnotationMode: (mode: NativePdfAnnotationMode) => void;
+  /** Changes the Pen color without reconciling the annotation-data props. */
+  setPenColor: (color: string) => void;
+  /** Changes the Highlighter color without reconciling the annotation-data props. */
+  setHighlighterColor: (color: string) => void;
   flushViewport: () => void;
   /** Reads PDFKit's current page/zoom/page-space anchor without waiting for its normal debounce. */
   captureViewport: () => Promise<NativePdfViewport | null>;
@@ -147,6 +151,16 @@ export const NativePdfAnnotationView = memo(forwardRef<NativePdfAnnotationViewRe
           if (__DEV__) console.warn('[native-pdf] setAnnotationModeAsync failed', error);
         });
       },
+      setPenColor(color: string) {
+        nativeRef.current?.setPenColorAsync?.(color).catch((error: unknown) => {
+          if (__DEV__) console.warn('[native-pdf] setPenColorAsync failed', error);
+        });
+      },
+      setHighlighterColor(color: string) {
+        nativeRef.current?.setHighlighterColorAsync?.(color).catch((error: unknown) => {
+          if (__DEV__) console.warn('[native-pdf] setHighlighterColorAsync failed', error);
+        });
+      },
       flushViewport() {
         nativeRef.current?.flushViewportAsync?.().catch((error) => {
           if (__DEV__) console.warn('[native-pdf] flushViewportAsync failed', error);
@@ -194,7 +208,7 @@ export const NativePdfAnnotationView = memo(forwardRef<NativePdfAnnotationViewRe
         fileUri={fileUri}
         initialPage={initialPage}
         initialViewport={initialViewport}
-        annotationMode={annotationMode}
+        {...(annotationMode === undefined ? {} : { annotationMode })}
         selectionShape={selectionShape}
         penColor={penColor}
         penWidth={penWidth}

@@ -40,7 +40,12 @@ public final class ExpoPdfAnnotationModule: Module {
       }
 
       Prop("annotationMode") { (view: PdfAnnotationView, mode: String?) in
-        view.annotationMode = mode ?? "scroll"
+        // Expo Fabric invokes every declared prop setter on a view update and
+        // supplies nil for props this screen intentionally controls by command.
+        // Absence therefore means "leave imperative interaction state alone";
+        // callers that want navigation pass the explicit "scroll" mode.
+        guard let mode else { return }
+        view.annotationMode = mode
       }
       Prop("selectionShape") { (view: PdfAnnotationView, shape: String?) in
         view.selectionShape = shape == "rect" ? "rect" : "lasso"
@@ -57,7 +62,8 @@ public final class ExpoPdfAnnotationModule: Module {
       }
 
       Prop("penColor") { (view: PdfAnnotationView, color: String?) in
-        view.penColor = color ?? "#061B34"
+        guard let color else { return }
+        view.penColor = color
       }
 
       Prop("penWidth") { (view: PdfAnnotationView, width: Double?) in
@@ -65,7 +71,8 @@ public final class ExpoPdfAnnotationModule: Module {
       }
 
       Prop("highlighterColor") { (view: PdfAnnotationView, color: String?) in
-        view.highlighterColor = color ?? "#FFE066"
+        guard let color else { return }
+        view.highlighterColor = color
       }
 
       Prop("highlighterWidth") { (view: PdfAnnotationView, width: Double?) in
@@ -93,6 +100,12 @@ public final class ExpoPdfAnnotationModule: Module {
       }
       AsyncFunction("setAnnotationModeAsync") { (view: PdfAnnotationView, mode: String) in
         view.annotationMode = mode
+      }
+      AsyncFunction("setPenColorAsync") { (view: PdfAnnotationView, color: String) in
+        view.penColor = color
+      }
+      AsyncFunction("setHighlighterColorAsync") { (view: PdfAnnotationView, color: String) in
+        view.highlighterColor = color
       }
       AsyncFunction("flushViewportAsync") { (view: PdfAnnotationView) in
         view.flushViewport()
