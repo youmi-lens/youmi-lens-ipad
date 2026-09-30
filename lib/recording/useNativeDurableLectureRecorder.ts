@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
+import { traceRecordingLifecycle } from './lifecycleTrace';
 
 import {
   abandonSession,
@@ -77,6 +78,7 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
   }, []);
 
   const applySession = useCallback((session: DurableRecordingSession) => {
+    traceRecordingLifecycle('SESSION_APPLIED', { state: session.state, segments: session.segments.length });
     sessionRef.current = session;
     const base = finalizedDurationMillis(session);
     baseDurationRef.current = base;
@@ -94,6 +96,10 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
   }, []);
 
   const applyNativeStatus = useCallback((status: DurableRecordingStatus) => {
+    traceRecordingLifecycle('NATIVE_STATUS_RECEIVED', {
+      runtime: status.runtimeState, sessionState: status.session?.state, interruption: status.interruptionState ?? null,
+      route: status.routeChangeState ?? null, seq: status.statusSequence ?? null,
+    });
     const current = sessionRef.current;
     const decision = evaluateNativeStatusUpdate({
       currentSessionId: current?.recordingSessionId,
@@ -225,14 +231,16 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
   useEffect(() => {
     if (!enabled) return;
     const subscription = AppState.addEventListener('change', (next) => {
+      traceRecordingLifecycle('APPSTATE', { state: next, sessionState: sessionRef.current?.state ?? null, uiRecording: activeRef.current });
       if (next !== 'active') return;
       const session = sessionRef.current;
       if (!session) return;
       if (session.state === 'finalized' || session.state === 'abandoned' || session.state === 'failed') return;
       if (!activeRef.current && session.state !== 'paused' && session.state !== 'recording') return;
+      traceRecordingLifecycle('FOREGROUND_REFRESH_START');
       void getRecordingStatus()
-        .then((status) => { applyNativeStatus(status); })
-        .catch(() => {});
+        .then((status) => { traceRecordingLifecycle('FOREGROUND_REFRESH_DONE', { runtime: status.runtimeState, sessionState: status.session?.state }); applyNativeStatus(status); })
+        .catch(() => { traceRecordingLifecycle('FOREGROUND_REFRESH_FAILED'); });
     });
     return () => subscription.remove();
   }, [applyNativeStatus, enabled]);
@@ -295,6 +303,7 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
 
   const pauseRecording = useCallback(async () => {
     const session = sessionRef.current; if (!session || !isRecording) return false;
+    traceRecordingLifecycle('UI_PAUSE_REQUEST');
     try {
       const status = await pauseNative({ recordingSessionId: session.recordingSessionId });
       noteStatusSequence(status);
@@ -308,6 +317,7 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
 
   const resumeRecording = useCallback(async () => {
     const session = sessionRef.current; if (!session) return false;
+    traceRecordingLifecycle('UI_RESUME_REQUEST', { sessionState: session.state });
     try {
       const status = session.state === 'paused'
         ? await resumeNative({ recordingSessionId: session.recordingSessionId })

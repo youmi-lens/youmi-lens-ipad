@@ -1,5 +1,8 @@
 import AVFoundation
 import Foundation
+#if canImport(UIKit)
+import UIKit
+#endif
 
 private let durableRecorderAudioSettings: [String: Any] = [
   AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
@@ -324,6 +327,24 @@ final class DurableForegroundRecorder {
   private var diagLectureId: String?
   private var diagLastStopUptime: TimeInterval?
   private var diagLastRecordingUptime: TimeInterval?
+  /// DIAGNOSTIC ONLY: the app's UIApplication state as last announced by UIKit notifications (thread-safe).
+  private let appStateLock = NSLock()
+  private var appStateName = "unknown"
+  private func currentAppState() -> String {
+    appStateLock.lock(); defer { appStateLock.unlock() }
+    return appStateName
+  }
+  private func setAppState(_ name: String) {
+    appStateLock.lock(); appStateName = name; appStateLock.unlock()
+  }
+  /// DIAGNOSTIC ONLY: one lifecycle event for the owned session, flushed at once (never inside a rollover window).
+  private func emitLifecycle(_ kind: String, _ extra: [String: Any] = [:]) {
+    guard diagnostics.isEnabled, let sessionId = ownedSessionId else { return }
+    var event: [String: Any] = ["kind": kind, "runtime": runtimeState.rawValue]
+    for (key, value) in extra { event[key] = value }
+    diagnostics.emit(sessionId: sessionId, event)
+    if !isCheckpointInProgress { diagnostics.flush() }
+  }
 
   init(
     store: DurableRecorderStore,
@@ -345,6 +366,7 @@ final class DurableForegroundRecorder {
       enabled: DurableRecorderDiagnostics.isDevBundle,
       fileURL: { [store] in store.diagnosticsFileURL(recordingSessionId: $0) }
     )
+    self.diagnostics.contextProvider = { [weak self] in ["app": self?.currentAppState() ?? "unknown"] }
     if observeSystemNotifications {
       registerObservers()
     }
@@ -415,6 +437,7 @@ final class DurableForegroundRecorder {
   func pauseRecording(recordingSessionId: String) throws -> [String: Any] {
     try queue.sync {
       try requireOwner(recordingSessionId)
+      emitLifecycle("pause_transition", ["caller": "user_pause_request"])
       if runtimeState == .paused || runtimeState == .interrupted {
         return statusDictionary(session: try store.getSession(recordingSessionId: recordingSessionId))
       }
@@ -461,6 +484,7 @@ final class DurableForegroundRecorder {
 
   func stopRecording(recordingSessionId: String) throws -> [String: Any] {
     try queue.sync {
+      emitLifecycle("stop_requested")
       let existing = try store.getSession(recordingSessionId: recordingSessionId)
       if existing.state == .finalized {
         if ownedSessionId == recordingSessionId { releaseOwnership() }
@@ -974,6 +998,7 @@ final class DurableForegroundRecorder {
   }
 
   private func handleForcedPause(reason: String, runtimeAfter: DurableRecorderRuntimeState) {
+    emitLifecycle("pause_transition", ["caller": "forced_pause", "reason": reason, "willApply": runtimeState == .recording])
     guard runtimeState == .recording, let recordingSessionId = ownedSessionId else {
       if reason.hasPrefix("interruption") { lastInterruption = reason }
       return
@@ -1066,6 +1091,7 @@ final class DurableForegroundRecorder {
       // Do not publishStatus: a successful checkpoint must stay invisible to JS
       // so the recording timer is not reset or double-counted.
     } catch {
+      diagnostics.emit(sessionId: recordingSessionId, ["kind": "pause_transition", "caller": "checkpoint_begin_failed_protective_pause", "cp": diagCheckpointOrdinal])
       if (try? store.getSession(recordingSessionId: recordingSessionId))?.state == .recording {
         _ = try? store.transitionSession(recordingSessionId: recordingSessionId, to: .paused)
       }
@@ -1088,6 +1114,7 @@ final class DurableForegroundRecorder {
     runtimeAfter: DurableRecorderRuntimeState,
     reason: String
   ) {
+    diagnostics.emit(sessionId: recordingSessionId, ["kind": "pause_transition", "caller": "checkpoint_commit_failed", "reason": reason, "cp": diagCheckpointOrdinal])
     activeCapture?.stop()
     clearActiveCapture()
     cancelCheckpoint()
@@ -1320,6 +1347,24 @@ final class DurableForegroundRecorder {
         self?.handleRouteChange(notification)
       }
     })
+    if diagnostics.isEnabled {
+      DispatchQueue.main.async { [weak self] in
+        let state = UIApplication.shared.applicationState
+        self?.setAppState(state == .active ? "active" : (state == .inactive ? "inactive" : "background"))
+      }
+      let appEvents: [(Notification.Name, String)] = [
+        (UIApplication.didBecomeActiveNotification, "active"),
+        (UIApplication.willResignActiveNotification, "inactive"),
+        (UIApplication.didEnterBackgroundNotification, "background"),
+        (UIApplication.willEnterForegroundNotification, "foreground_pending"),
+      ]
+      for (name, label) in appEvents {
+        observers.append(center.addObserver(forName: name, object: nil, queue: nil) { [weak self] _ in
+          self?.setAppState(label)
+          self?.queue.async { self?.emitLifecycle("app_state", ["state": label]) }
+        })
+      }
+    }
     #endif
   }
 
@@ -1327,6 +1372,8 @@ final class DurableForegroundRecorder {
   private func handleInterruption(_ notification: Notification) {
     guard let rawType = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
           let type = AVAudioSession.InterruptionType(rawValue: rawType) else { return }
+    let rawReason = notification.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt
+    emitLifecycle("interruption", ["type": type == .began ? "began" : "ended", "reasonRaw": rawReason.map { Int($0) } as Any])
     switch type {
     case .began:
       handleForcedPause(reason: "interruption_began", runtimeAfter: .interrupted)
@@ -1345,6 +1392,7 @@ final class DurableForegroundRecorder {
     let rawReason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 0
     let reason = AVAudioSession.RouteChangeReason(rawValue: rawReason) ?? .unknown
     lastRouteChange = Self.routeReasonName(reason)
+    emitLifecycle("route_change", ["reason": Self.routeReasonName(reason), "route": audioSession.routeDescription])
     if reason == .oldDeviceUnavailable || !audioSession.hasSuitableInput {
       handleForcedPause(reason: "route_\(Self.routeReasonName(reason))", runtimeAfter: .paused)
     }
@@ -1394,6 +1442,8 @@ final class DurableRecorderDiagnostics {
   private static let trimCheckInterval = 20
 
   let isEnabled: Bool
+  /// Extra context stamped on every event (e.g. the app's foreground/background state). Diagnostics only.
+  var contextProvider: (() -> [String: Any])?
   private let fileURL: (String) -> URL?
   private var pending: [(sessionId: String, event: [String: Any])] = []
   private var appendsSinceTrim = 0
@@ -1419,6 +1469,7 @@ final class DurableRecorderDiagnostics {
     stamped["t"] = Self.timestampFormatter.string(from: Date())
     stamped["up"] = Self.uptimeMilliseconds()
     stamped["sid"] = sessionId
+    if let extra = contextProvider?() { for (key, value) in extra where stamped[key] == nil { stamped[key] = value } }
     pending.append((sessionId, stamped))
     if pending.count > Self.maxPendingEvents { pending.removeFirst(pending.count - Self.maxPendingEvents) }
   }
