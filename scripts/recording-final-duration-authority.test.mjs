@@ -118,7 +118,7 @@ check('a failed Finish reconciles JS with the native session so the wall-clock t
   assert.match(failure, /await getSession\(session\.recordingSessionId\)/);
   assert.match(failure, /latest\.state !== 'recording'/);
   assert.match(failure, /applySession\(latest\); activeRef\.current = false; setIsRecording\(false\); setIsPaused\(true\);/);
-  assert.match(failure, /fail\('Could not finish the recording\.', result\.error\);/);
+  assert.match(failure, /fail\(finishFailureUserMessage\(result\), result\.error\);/);
 });
 
 console.log(`Final lecture duration authority tests passed (${passed}).`);

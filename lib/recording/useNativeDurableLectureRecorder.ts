@@ -28,6 +28,7 @@ import {
 
 import { durationBucket, logRecordingEvent } from './diagnostics';
 import { finalizeAndExportDurableSession } from './durableSessionRecovery';
+import { finishFailureUserMessage } from './finishFailure.mjs';
 import { finalizedDurationMillis, recoverableSessionsForLecture } from './policy.mjs';
 import { evaluateNativeStatusUpdate } from './statusSync.mjs';
 import type { LectureRecorder, RecorderPermission } from './types';
@@ -403,7 +404,7 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
       } catch {
         // Keep the existing state; the error below is still surfaced.
       }
-      fail('Could not finish the recording.', result.error);
+      fail(finishFailureUserMessage(result), result.error);
       return null;
     }
     finalAssetDurationMillisRef.current = result.durationMs;

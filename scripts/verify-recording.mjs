@@ -18,6 +18,7 @@ const passed = await runSteps('Native recording verification', [
   nodeStep('audio-session ownership (background/lock checkpoint, route recovery, bounded auto-recovery)', 'scripts/durable-audio-session-ownership.test.mjs'),
   nodeStep('pause message lifecycle (cleared only after native-confirmed resume)', 'scripts/recording-pause-message-lifecycle.test.mjs'),
   nodeStep('Finish background execution (assertion, deterministic export cancel, retry)', 'scripts/durable-finish-background.test.mjs'),
+  nodeStep('Finish failure message (safe-retry wording only for the known expiry)', 'scripts/recording-finish-failure-message.test.mjs'),
   nodeStep('final lecture duration authority (durable audio, never wall clock)', 'scripts/recording-final-duration-authority.test.mjs'),
   nodeStep('recovery / resume / discard / relaunch', 'scripts/durable-recorder-recovery.test.mjs'),
   nodeStep('forced-pause status sync', 'scripts/durable-recorder-status-sync.test.mjs'),

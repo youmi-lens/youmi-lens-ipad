@@ -8,6 +8,7 @@
  * the sequence itself so it isn't duplicated.
  */
 import {
+  DurableRecorderError,
   exportFinalizedAsset,
   finalizeSession,
   recoverRecordingSession,
@@ -18,7 +19,7 @@ import {
 
 export type DurableSessionRecoveryResult =
   | { ok: true; fileUri: string; durationMs: number; session: DurableRecordingSession }
-  | { ok: false; error: string };
+  | { ok: false; error: string; errorCode?: string };
 
 /**
  * Brings a durable session to `finalized` (from `paused`, `recording`, or
@@ -62,6 +63,10 @@ export async function finalizeAndExportDurableSession(
     }
     return { ok: true, fileUri: output.fileUri, durationMs, session: output.session };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      errorCode: error instanceof DurableRecorderError ? error.code : undefined,
+    };
   }
 }
