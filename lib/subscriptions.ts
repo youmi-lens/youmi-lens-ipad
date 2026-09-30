@@ -95,6 +95,21 @@ const STOREKIT_SYNC_TIMEOUT_MS = 30_000;
 // queue and replays on next launch (see expo-iap finishTransaction docs) or
 // gets swept up by a later restore — it is never silently dropped.
 const FINISH_TRANSACTION_TIMEOUT_MS = 10_000;
+// A backend ownership rejection (`iap_already_linked` / `iap_deleted_account_binding`) is a permanent verdict for that
+// Apple transaction lineage and THIS Youmi account. If StoreKit hands the same transaction back on a later attempt, the
+// client already knows the outcome, so it must end that attempt with the remembered result instead of waiting for the
+// 120 s purchase timeout. The memory is in-process only (no persistence), keyed per account, and small and short-lived.
+const OWNERSHIP_REJECTION_TTL_MS = 15 * 60 * 1000;
+const OWNERSHIP_REJECTION_MAX_ENTRIES = 32;
+
+/** Carries the remembered rejection result out of the purchase listener into `purchase()`'s normal error mapping. */
+class RememberedOwnershipRejection extends Error {
+  constructor(readonly rejection: SubscriptionResult) {
+    super('Remembered ownership rejection');
+    this.name = 'ownership_rejection_reused';
+  }
+}
+
 const ALL_RESTORABLE_IDS = new Set<string>([
   ...SUBSCRIPTION_PRODUCT_IDS,
   ...LEGACY_STUDENT_ACCESS_PRODUCT_IDS,
@@ -196,6 +211,7 @@ class SubscriptionService {
   private restoreInFlight = false;
   private verificationContext: { accessToken: string; accountId: string } | null = null;
   private seenTransactions = new Set<string>();
+  private ownershipRejections = new Map<string, { result: SubscriptionResult; at: number }>();
   private deferredTransactions = new Map<string, Purchase>();
   private lateVerifications = new Map<string, Promise<void>>();
   private updateSubscription: { remove: () => void } | null = null;
@@ -240,7 +256,13 @@ class SubscriptionService {
       if (!isSubscriptionProductId(purchase.productId)) return;
       logDiag('purchase_update_received', { productId: purchase.productId });
       const id = transactionId(purchase);
-      if (!id || this.seenTransactions.has(id)) return;
+      if (!id) return;
+      if (this.seenTransactions.has(id)) {
+        // Already processed once. Ignore it as a duplicate — unless it is the transaction (or lineage) this account was
+        // definitively rejected for and an attempt is waiting on StoreKit: then end that attempt now with the same result.
+        this.settleFromRememberedOwnershipRejection(purchase);
+        return;
+      }
       const pending = this.pending;
       const accountMatches = 'appAccountToken' in purchase &&
         purchase.appAccountToken?.toLowerCase() === pending?.accountId.toLowerCase();
@@ -250,6 +272,7 @@ class SubscriptionService {
         pending?.resolve(purchase);
       } else {
         if (pending) logDiag('transaction_ignored_wrong_attempt');
+        this.settleFromRememberedOwnershipRejection(purchase);
         this.reconcileLateTransaction(purchase);
       }
     });
@@ -261,6 +284,51 @@ class SubscriptionService {
       const normalized = normalizeStoreKitError(error);
       pending?.reject(normalized);
     });
+  }
+
+  private ownershipRejectionKeys(accountId: string, purchase: Purchase): string[] {
+    const account = accountId.toLowerCase();
+    const keys: string[] = [];
+    const id = transactionId(purchase);
+    const original = originalTransactionId(purchase);
+    if (id) keys.push(`${account}|tx|${id}`);
+    if (original) keys.push(`${account}|otx|${original}`);
+    return keys;
+  }
+
+  private rememberOwnershipRejection(purchase: Purchase, accountId: string, rejection: SubscriptionResult) {
+    const now = Date.now();
+    for (const [key, entry] of this.ownershipRejections) {
+      if (now - entry.at > OWNERSHIP_REJECTION_TTL_MS) this.ownershipRejections.delete(key);
+    }
+    for (const key of this.ownershipRejectionKeys(accountId, purchase)) {
+      this.ownershipRejections.delete(key);
+      this.ownershipRejections.set(key, { result: rejection, at: now });
+    }
+    while (this.ownershipRejections.size > OWNERSHIP_REJECTION_MAX_ENTRIES) {
+      this.ownershipRejections.delete(this.ownershipRejections.keys().next().value!);
+    }
+    logDiag('ownership_rejection_remembered');
+  }
+
+  /**
+   * Ends the waiting purchase attempt with a previously remembered ownership rejection. Applies only when an attempt
+   * for the SAME product is pending and this exact transaction (or its original-transaction lineage) was definitively
+   * rejected for the SAME account inside the TTL. It never grants anything and never touches any other duplicate.
+   */
+  private settleFromRememberedOwnershipRejection(purchase: Purchase): boolean {
+    const pending = this.pending;
+    if (!pending || purchase.productId !== pending.productId) return false;
+    const now = Date.now();
+    for (const key of this.ownershipRejectionKeys(pending.accountId, purchase)) {
+      const entry = this.ownershipRejections.get(key);
+      if (!entry) continue;
+      if (now - entry.at > OWNERSHIP_REJECTION_TTL_MS) { this.ownershipRejections.delete(key); continue; }
+      logDiag('ownership_rejection_reused');
+      pending.reject(new RememberedOwnershipRejection(entry.result));
+      return true;
+    }
+    return false;
   }
 
   private reconcileLateTransaction(purchase: Purchase) {
@@ -474,9 +542,21 @@ class SubscriptionService {
     if (response.status >= 200 && response.status < 300 && payload.ok && payload.granted) {
       return { ...result('success'), entitlement: payload.entitlement ?? null };
     }
-    if (payload.error === 'iap_already_linked') return result('already_linked');
+    // The account this verification belongs to (set when the purchase attempt started, or captured for late reconciliation).
+    const verifyingAccountId = this.verificationContext?.accountId ?? null;
+    if (payload.error === 'iap_already_linked') {
+      const rejection = result('already_linked');
+      if (verifyingAccountId) this.rememberOwnershipRejection(purchase, verifyingAccountId, rejection);
+      return rejection;
+    }
     if (payload.reason === 'expired') return result('expired');
     if (payload.reason === 'revoked' || payload.reason === 'refunded') return result('revoked');
+    if (payload.error === 'iap_deleted_account_binding') {
+      // Same permanent-ownership class. The result the user gets is unchanged; it is only remembered.
+      const rejection = result('backend_verification_failed');
+      if (verifyingAccountId) this.rememberOwnershipRejection(purchase, verifyingAccountId, rejection);
+      return rejection;
+    }
     return result('backend_verification_failed');
   }
 
@@ -565,6 +645,7 @@ class SubscriptionService {
   }
 
   private mapError(error: unknown): SubscriptionResult {
+    if (error instanceof RememberedOwnershipRejection) return error.rejection;
     if (error instanceof PaymentTaskTimeoutError) return result('operation_timeout');
     if (isBoundedFetchTimeout(error)) return result('verify_timeout');
     const name = error instanceof Error ? error.name.toLowerCase() : '';
@@ -601,6 +682,7 @@ class SubscriptionService {
     this.verificationContext = null;
     this.deferredTransactions.clear();
     this.seenTransactions.clear();
+    this.ownershipRejections.clear();
   }
 }
 

@@ -24,6 +24,8 @@ const DIAG_EVENTS = [
   'purchase_timeout_fired',
   'purchase_busy_cleared',
   'transaction_ignored_wrong_attempt',
+  'ownership_rejection_remembered',
+  'ownership_rejection_reused',
   'late_transaction_received',
   'verify_failed',
   'purchase_cancelled',
