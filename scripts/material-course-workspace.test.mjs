@@ -81,7 +81,8 @@ check('leaving the screen flushes the ACTUAL current native viewport (awaited, n
 });
 
 check('the driving event is PDFKit\'s own onPageChanged callback, not a scroll/gesture proxy', () => {
-  assert.match(screen, /onPageChanged=\{\(event\) => handlePdfPageChanged\(event\.pageNumber\)\}/);
+  assert.match(screen, /const handleNativePageChanged = useCallback\(\(event: NativePdfPageChangedEvent\) => \{\s*handlePdfPageChanged\(event\.pageNumber\);/);
+  assert.match(screen, /onPageChanged=\{handleNativePageChanged\}/);
 });
 
 check('composite resume accounts for appended note pages too — a saved page beyond the source PDF (an appended page) is within the clamp range, not truncated back into the source range', () => {

@@ -91,6 +91,9 @@ public final class ExpoPdfAnnotationModule: Module {
       AsyncFunction("setPageAsync") { (view: PdfAnnotationView, pageNumber: Int) in
         view.setPage(pageNumber)
       }
+      AsyncFunction("setAnnotationModeAsync") { (view: PdfAnnotationView, mode: String) in
+        view.annotationMode = mode
+      }
       AsyncFunction("flushViewportAsync") { (view: PdfAnnotationView) in
         view.flushViewport()
       }

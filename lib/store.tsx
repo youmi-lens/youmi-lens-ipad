@@ -37,6 +37,7 @@ import { batchSoftDeleteIsEmpty, buildBatchSoftDelete } from './lectureBatchDele
 import { courseRestorePatchForNewCommit } from './courseRestoreOnCommit.mjs';
 import { buildLectureMove } from './lectureMove.mjs';
 import { resolveMergedLectureTitle } from './lectureTitle.mjs';
+import { createMaterialAnnotationPersistence } from './materialAnnotationPersistence.mjs';
 import {
   COURSE_PRESETS,
   type ContentLanguage,
@@ -71,6 +72,10 @@ const scopedLecturesKey = (userId: string) => `youmi.lectures.v1.${userId}`;
 const scopedMaterialsKey = (userId: string) => `youmi.materials.v1.${userId}`;
 const scopedMaterialLinksKey = (userId: string) => `youmi.materialLinks.v1.${userId}`;
 const scopedMaterialAnnotationsKey = (userId: string) => `youmi.materialAnnotations.v1.${userId}`;
+const materialAnnotationPersistence = createMaterialAnnotationPersistence({
+  write: (key: string, json: string) => AsyncStorage.setItem(key, json),
+});
+const flushMaterialAnnotations = () => materialAnnotationPersistence.flush().catch(() => {});
 const UNFILED_COURSE_NAME = 'Unfiled';
 export type NewCourseInput = {
   name: string;
@@ -249,6 +254,8 @@ export type DataContextValue = {
   ) => void;
   undoLastAnnotationStroke: (lectureId: string, materialId: string, pageNumber: number) => void;
   clearAnnotationsForPage: (lectureId: string, materialId: string, pageNumber: number) => void;
+  /** Durably write the latest coalesced Course Material annotation snapshot. */
+  flushMaterialAnnotations: () => Promise<void>;
 
   clearAll: () => Promise<void>;
 };
@@ -1446,10 +1453,12 @@ export function DataProvider({ children }: { children: ReactNode }) {
   // keeps processing status/transcripts moving without making local cache the
   // source of truth.
   useEffect(() => {
-    if (!currentUserId || !loaded || hydratedUserId !== currentUserId) return;
-
     const subscription = AppState.addEventListener('change', (state) => {
-      if (state !== 'active') return;
+      if (state !== 'active') {
+        void flushMaterialAnnotations();
+        return;
+      }
+      if (!currentUserId || !loaded || hydratedUserId !== currentUserId) return;
       void refreshCloudLibrary()
         .catch(() => {
           // Already logged by fetchRemoteRecordingsForUser; keep current cache.
@@ -1499,7 +1508,10 @@ export function DataProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (loaded && storageScopeId && hydratedUserId === storageScopeId) {
-      AsyncStorage.setItem(scopedMaterialAnnotationsKey(storageScopeId), JSON.stringify(materialAnnotations)).catch(() => {});
+      materialAnnotationPersistence.schedule(
+        scopedMaterialAnnotationsKey(storageScopeId),
+        materialAnnotations,
+      );
     }
   }, [materialAnnotations, storageScopeId, hydratedUserId, loaded]);
 
@@ -2429,6 +2441,8 @@ export function DataProvider({ children }: { children: ReactNode }) {
     setMaterialAnnotations([]);
     setSelectedCourseId(null);
     if (storageScopeId) {
+      materialAnnotationPersistence.discard(scopedMaterialAnnotationsKey(storageScopeId));
+      await materialAnnotationPersistence.flush().catch(() => {});
       await AsyncStorage.multiRemove([
         scopedCoursesKey(storageScopeId),
         scopedLecturesKey(storageScopeId),
@@ -2577,6 +2591,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
       addAnnotationStroke,
       undoLastAnnotationStroke,
       clearAnnotationsForPage,
+      flushMaterialAnnotations,
       clearAll,
     }),
     [visibleStoreReady, currentUserId, activeCourses, activeLectures, refreshCloudLibrary, deletedCourses, deletedLectures, selectedCourseId, createCourse, createLecture, saveInProgressLecture, updateLecture, moveLectureToCourse, deleteLecture, retryLectureDeletion, deleteLectures, deleteCourse, retryCourseDeletion, restoreCourse, restoreLecture, permanentlyDeleteCourse, permanentlyDeleteLecture, renameCourse, renameLecture, activeMaterials, addMaterial, renameMaterial, updateMaterial, deleteMaterial, activeMaterialLinks, reserveLectureId, linkMaterialToLecture, updateLectureMaterialLink, removeLectureMaterialLink, cleanupOrphanMaterialLinks, activeMaterialAnnotations, saveAnnotationStrokes, replaceMaterialPageAnnotationStrokesForMaterial, replaceMaterialPageTextAnnotationsForMaterial, addAnnotationStroke, undoLastAnnotationStroke, clearAnnotationsForPage, clearAll],

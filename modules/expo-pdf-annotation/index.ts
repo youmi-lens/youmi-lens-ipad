@@ -212,6 +212,7 @@ export type ExpoPdfAnnotationViewProps = {
 
 export type ExpoPdfAnnotationNativeRef = {
   setPageAsync?: (pageNumber: number) => Promise<void>;
+  setAnnotationModeAsync?: (mode: NativePdfAnnotationMode) => Promise<void>;
   flushViewportAsync?: () => Promise<void>;
   captureViewportAsync?: () => Promise<NativePdfViewport | null>;
   markStrokeRemovalIntentAsync?: (ids: string[]) => Promise<void>;

@@ -1,4 +1,4 @@
-import { forwardRef, useImperativeHandle, useRef } from 'react';
+import { forwardRef, memo, useImperativeHandle, useRef } from 'react';
 import { Platform, StyleProp, ViewStyle } from 'react-native';
 import type { AnnotationShape } from '@/lib/annotationShape';
 
@@ -34,6 +34,8 @@ const NativePdfViewComponent = ExpoPdfAnnotationView as React.ComponentType<
 
 export type NativePdfAnnotationViewRef = {
   setPage: (pageNumber: number) => void;
+  /** Changes the active tool without reconciling the annotation-data props. */
+  setAnnotationMode: (mode: NativePdfAnnotationMode) => void;
   flushViewport: () => void;
   /** Reads PDFKit's current page/zoom/page-space anchor without waiting for its normal debounce. */
   captureViewport: () => Promise<NativePdfViewport | null>;
@@ -95,7 +97,7 @@ export type NativePdfAnnotationViewProps = {
 
 export const NATIVE_PDF_ANNOTATION_AVAILABLE = Platform.OS === 'ios';
 
-export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, NativePdfAnnotationViewProps>(
+export const NativePdfAnnotationView = memo(forwardRef<NativePdfAnnotationViewRef, NativePdfAnnotationViewProps>(
   function NativePdfAnnotationView(
     {
       fileUri,
@@ -138,6 +140,11 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
       setPage(pageNumber: number) {
         nativeRef.current?.setPageAsync?.(pageNumber).catch((error) => {
           if (__DEV__) console.warn('[native-pdf] setPageAsync failed', error);
+        });
+      },
+      setAnnotationMode(mode: NativePdfAnnotationMode) {
+        nativeRef.current?.setAnnotationModeAsync?.(mode).catch((error: unknown) => {
+          if (__DEV__) console.warn('[native-pdf] setAnnotationModeAsync failed', error);
         });
       },
       flushViewport() {
@@ -217,4 +224,4 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
       />
     );
   },
-);
+));

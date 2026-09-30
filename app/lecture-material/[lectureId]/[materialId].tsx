@@ -91,6 +91,9 @@ import type {
   NativePdfAnnotationsByPage,
   NativePdfAnnotationsChangedEvent,
   NativePdfAnnotationStroke,
+  NativePdfErrorEvent,
+  NativePdfLoadCompleteEvent,
+  NativePdfPageChangedEvent,
   NativePdfTextAnnotationActionEvent,
   NativePdfViewportDiagnosticEvent,
   NativePdfTextAnnotationsByPage,
@@ -194,6 +197,7 @@ export default function LectureMaterialWorkspaceScreen() {
     addAnnotationStroke,
     replaceMaterialPageAnnotationStrokesForMaterial,
     replaceMaterialPageTextAnnotationsForMaterial,
+    flushMaterialAnnotations,
   } = useData();
 
   const lectureId = params.lectureId ?? '';
@@ -258,6 +262,11 @@ export default function LectureMaterialWorkspaceScreen() {
   const nativeAnnotationModeRef = useRef<NativePdfAnnotationMode>(nativeAnnotationMode);
   const nativePreviousDrawingToolRef = useRef<Extract<NativePdfAnnotationMode, 'pen' | 'highlighter'>>('pen');
   const nativeTemporaryEraserRef = useRef(false);
+  const applyNativeAnnotationMode = useCallback((next: NativePdfAnnotationMode) => {
+    nativeAnnotationModeRef.current = next;
+    pdfRef.current?.setAnnotationMode(next);
+    setNativeAnnotationMode(next);
+  }, []);
   // Refs so the native onAnnotationsChanged handler always sees the latest
   // lecture/material/page without re-creating the callback (which would
   // churn the native prop and risk update-depth loops).
@@ -381,7 +390,7 @@ export default function LectureMaterialWorkspaceScreen() {
           nativeAnnotationModeRef.current = 'eraser';
           nativeTemporaryEraserRef.current = true;
           setNativeTemporaryEraser(true);
-          setNativeAnnotationMode('eraser');
+          applyNativeAnnotationMode('eraser');
           return;
         }
 
@@ -390,7 +399,7 @@ export default function LectureMaterialWorkspaceScreen() {
           nativeAnnotationModeRef.current = restored;
           nativeTemporaryEraserRef.current = false;
           setNativeTemporaryEraser(false);
-          setNativeAnnotationMode(restored);
+          applyNativeAnnotationMode(restored);
         }
         return;
       }
@@ -399,7 +408,7 @@ export default function LectureMaterialWorkspaceScreen() {
         current === 'eraser' ? previousDrawModeRef.current : 'eraser',
       );
     });
-  }, [doubleTapAvailable, useNativePdfViewer]);
+  }, [applyNativeAnnotationMode, doubleTapAvailable, useNativePdfViewer]);
 
   // Track persistence state via refs so no effect depends on `material`'s
   // React identity. material's identity changes after every updateMaterial,
@@ -482,8 +491,9 @@ export default function LectureMaterialWorkspaceScreen() {
       });
   }, [flushViewportToStore, useNativePdfViewer]);
 
-  // Imperative jump via the native reader / fallback viewer. Keeping the
-  // ref separate from the initial page prop prevents prop-driven page loops.
+  // Imperative jump and tool commands share the native reader ref. Keeping it
+  // separate from live props prevents page and mode changes from reconciling
+  // the full annotation payload.
   const pdfRef = useRef<NativePdfAnnotationViewRef | null>(null);
 
   // True once the beforeRemove-driven authoritative capture has completed
@@ -588,6 +598,7 @@ export default function LectureMaterialWorkspaceScreen() {
         savedViewport: savedViewportRef.current,
       });
       persistAuthoritativeViewport(nativePdf);
+      void flushMaterialAnnotations();
       if (navigatorHideTimerRef.current) {
         clearTimeout(navigatorHideTimerRef.current);
         navigatorHideTimerRef.current = null;
@@ -600,7 +611,7 @@ export default function LectureMaterialWorkspaceScreen() {
         updateMaterial(id, { lastOpenedPage: pending });
       }
     };
-  }, [persistAuthoritativeViewport, updateMaterial, useNativePdfViewer]);
+  }, [flushMaterialAnnotations, persistAuthoritativeViewport, updateMaterial, useNativePdfViewer]);
 
   // A background transition can happen before route cleanup. Ask native for
   // its current PDF-space anchor and immediately persist the latest snapshot.
@@ -612,9 +623,10 @@ export default function LectureMaterialWorkspaceScreen() {
         latestJsViewport: pendingViewportRef.current,
       });
       persistAuthoritativeViewport(pdfRef.current);
+      void flushMaterialAnnotations();
     });
     return () => subscription.remove();
-  }, [persistAuthoritativeViewport, useNativePdfViewer]);
+  }, [flushMaterialAnnotations, persistAuthoritativeViewport, useNativePdfViewer]);
 
   // PRIMARY authoritative-leave boundary for Back/navigation. Proven from a
   // physical repro that the unmount-cleanup effect above runs too late for
@@ -669,12 +681,13 @@ export default function LectureMaterialWorkspaceScreen() {
         // falls back to whatever JS already knew (flushViewportToStore's
         // existing behavior), same as every other leave path.
         flushViewportToStore();
+        await flushMaterialAnnotations();
         leavePersistenceCompletedRef.current = true;
         navigation.dispatch(e.data.action);
       })();
     });
     return unsubscribe;
-  }, [flushViewportToStore, navigation, useNativePdfViewer]);
+  }, [flushMaterialAnnotations, flushViewportToStore, navigation, useNativePdfViewer]);
 
   const fileUri = material ? resolveMaterialUri(material.localPath) : '';
   // Memoize the source prop so react-native-pdf doesn't treat each render
@@ -753,6 +766,19 @@ export default function LectureMaterialWorkspaceScreen() {
     console.warn('[material] PDF load error', err);
     setPdfError(t('material.loadFailed'));
   }, [t]);
+
+  const handleNativeLoadComplete = useCallback((event: NativePdfLoadCompleteEvent) => {
+    pdfRef.current?.setAnnotationMode(nativeAnnotationModeRef.current);
+    handlePdfLoadComplete(event.totalPages, event.sourcePageCount);
+  }, [handlePdfLoadComplete]);
+
+  const handleNativePageChanged = useCallback((event: NativePdfPageChangedEvent) => {
+    handlePdfPageChanged(event.pageNumber);
+  }, [handlePdfPageChanged]);
+
+  const handleNativeError = useCallback((event: NativePdfErrorEvent) => {
+    handlePdfError(new Error(event.message));
+  }, [handlePdfError]);
 
   /** Adds one stable synthetic page only when the current final page receives real work. */
   const ensureTrailingBlankPageAfterContent = useCallback((pageNumber: number) => {
@@ -965,7 +991,6 @@ export default function LectureMaterialWorkspaceScreen() {
   }, [createTextAnnotationFromEvent, ensureTrailingBlankPageAfterContent, saveTextAnnotations, textAnnotationsForMaterialPage]);
 
   const handleNativeModeChange = useCallback((next: NativePdfAnnotationMode) => {
-    nativeAnnotationModeRef.current = next;
     nativeTemporaryEraserRef.current = false;
     setNativeTemporaryEraser(false);
     if (next !== 'select') setNativeSelection({ pageNumber: 0, strokeIds: [] });
@@ -974,8 +999,8 @@ export default function LectureMaterialWorkspaceScreen() {
       nativePreviousDrawingToolRef.current = next;
     }
 
-    setNativeAnnotationMode(next);
-  }, []);
+    applyNativeAnnotationMode(next);
+  }, [applyNativeAnnotationMode]);
 
   const handleNativeSelectionChanged = useCallback((event: NativePdfSelectionChangedEvent) => {
     setNativeSelection({ pageNumber: event.pageNumber, strokeIds: event.strokeIds });
@@ -1110,11 +1135,10 @@ export default function LectureMaterialWorkspaceScreen() {
   const restoreNativeTemporaryEraserIfNeeded = useCallback(() => {
     if (!nativeTemporaryEraserRef.current) return;
     const restored = nativePreviousDrawingToolRef.current ?? 'pen';
-    nativeAnnotationModeRef.current = restored;
     nativeTemporaryEraserRef.current = false;
     setNativeTemporaryEraser(false);
-    setNativeAnnotationMode(restored);
-  }, []);
+    applyNativeAnnotationMode(restored);
+  }, [applyNativeAnnotationMode]);
 
   const handleNativeAnnotationCommitted = useCallback(
     (event: NativePdfAnnotationsChangedEvent) => {
@@ -1418,7 +1442,6 @@ export default function LectureMaterialWorkspaceScreen() {
           initialPage={initialPage}
           initialViewport={initialViewport}
           style={styles.pdfFill}
-          annotationMode={nativeAnnotationMode}
           selectionShape={nativeSelectionShape}
           penColor={nativePenColor}
           penWidth={nativePenWidth}
@@ -1428,11 +1451,11 @@ export default function LectureMaterialWorkspaceScreen() {
           annotationsByPage={nativeAnnotationsProp}
           appendedBlankPageCount={appendedPageCount}
           textAnnotationsByPage={nativeTextProp}
-          onLoadComplete={(event) => handlePdfLoadComplete(event.totalPages, event.sourcePageCount)}
-          onPageChanged={(event) => handlePdfPageChanged(event.pageNumber)}
+          onLoadComplete={handleNativeLoadComplete}
+          onPageChanged={handleNativePageChanged}
           onViewportChanged={handleNativeViewportChanged}
           onViewportDiagnostic={handleNativeViewportDiagnostic}
-          onError={(event) => handlePdfError(new Error(event.message))}
+          onError={handleNativeError}
           onAnnotationsChanged={handleNativeAnnotationCommitted}
           onEraserGestureEnded={handleNativeEraserGestureEnded}
           onTextAnnotationAction={handleNativeTextAnnotationAction}
