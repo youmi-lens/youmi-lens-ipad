@@ -66,9 +66,19 @@ protocol DurableAudioSessionManaging: AnyObject {
   var permissionState: DurableRecorderPermissionState { get }
   var hasSuitableInput: Bool { get }
   var routeDescription: String { get }
+  /// DIAGNOSTIC ONLY. Which step of `activateForRecording()` ran last: "set_category", "set_active",
+  /// "input_availability" or "activated". Read only after a failure, to say WHICH step threw.
+  var lastActivationStage: String { get }
   func requestPermission() async -> DurableRecorderPermissionState
   func activateForRecording() throws
   func deactivate()
+  /// DIAGNOSTIC ONLY. Best-effort, side-effect-free description of the shared audio session. Never throws.
+  func diagnosticSnapshot() -> [String: Any]
+}
+
+extension DurableAudioSessionManaging {
+  var lastActivationStage: String { "unknown" }
+  func diagnosticSnapshot() -> [String: Any] { [:] }
 }
 
 #if os(iOS)
@@ -101,13 +111,44 @@ final class SystemDurableAudioSessionManager: DurableAudioSessionManaging {
     }
   }
 
+  private(set) var lastActivationStage = "idle"
+
   func activateForRecording() throws {
+    lastActivationStage = "set_category"
     try session.setCategory(.record, mode: .default, options: [.allowBluetoothHFP])
+    lastActivationStage = "set_active"
     try session.setActive(true)
+    lastActivationStage = "input_availability"
     guard hasSuitableInput else {
       deactivate()
       throw DurableRecorderCoreError.noAudioInput
     }
+    lastActivationStage = "activated"
+  }
+
+  func diagnosticSnapshot() -> [String: Any] {
+    func ports(_ list: [AVAudioSessionPortDescription]) -> [String] {
+      list.map { "\($0.portType.rawValue):\($0.portName)" }
+    }
+    var out: [String: Any] = [
+      "category": session.category.rawValue,
+      "mode": session.mode.rawValue,
+      "options": Int(session.categoryOptions.rawValue),
+      "otherAudioPlaying": session.isOtherAudioPlaying,
+      "secondaryAudioSilenceHint": session.secondaryAudioShouldBeSilencedHint,
+      "sampleRate": session.sampleRate,
+      "ioBufferMs": (session.ioBufferDuration * 1_000 * 10).rounded() / 10,
+      "inputAvailable": session.isInputAvailable,
+      "inputs": ports(session.currentRoute.inputs),
+      "outputs": ports(session.currentRoute.outputs),
+      "availableInputs": (session.availableInputs ?? []).count,
+      "recordPermission": permissionState.rawValue,
+      "inputChannels": session.inputNumberOfChannels,
+    ]
+    if let preferred = session.preferredInput {
+      out["preferredInput"] = "\(preferred.portType.rawValue):\(preferred.portName)"
+    }
+    return out
   }
 
   func deactivate() {
@@ -161,19 +202,34 @@ final class DurableForegroundRecorder {
   /// Prevents overlapping rollover work on the engine queue.
   private var isCheckpointInProgress = false
 
+  // ---- Rollover evidence (DIAGNOSTIC ONLY; never read by recording logic) ----
+  private let diagnostics: DurableRecorderDiagnostics
+  private var diagCheckpointOrdinal = 0
+  private var diagOrdinalSessionId: String?
+  private var diagRolloverPre: [String: Any]?
+  private var diagRolloverStartUptime: TimeInterval?
+  private var diagNextSequence: Int?
+  private var diagLectureId: String?
+  private var diagLastStopUptime: TimeInterval?
+
   init(
     store: DurableRecorderStore,
     audioSession: DurableAudioSessionManaging = SystemDurableAudioSessionManager(),
     captureFactory: DurableAudioCaptureFactory = SystemDurableAudioCaptureFactory(),
     fileInspector: DurableAudioFileInspecting = SystemDurableAudioFileInspector(),
     checkpointInterval: TimeInterval = DurableForegroundRecorder.defaultCheckpointInterval,
-    observeSystemNotifications: Bool = true
+    observeSystemNotifications: Bool = true,
+    diagnostics: DurableRecorderDiagnostics? = nil
   ) {
     self.store = store
     self.audioSession = audioSession
     self.captureFactory = captureFactory
     self.fileInspector = fileInspector
     self.checkpointInterval = checkpointInterval
+    self.diagnostics = diagnostics ?? DurableRecorderDiagnostics(
+      enabled: DurableRecorderDiagnostics.isDevBundle,
+      fileURL: { [store] in store.diagnosticsFileURL(recordingSessionId: $0) }
+    )
     if observeSystemNotifications {
       registerObservers()
     }
@@ -454,32 +510,127 @@ final class DurableForegroundRecorder {
   }
 
   private func beginSegment(recordingSessionId: String, resuming: Bool) throws -> DurableRecordingSession {
+    // Evidence only (see DurableRecorderDiagnostics): none of this changes what is attempted, in what order,
+    // or how a failure is handled — every diagnostic call is non-throwing and buffers in memory.
+    let context = isCheckpointInProgress ? "checkpoint" : (resuming ? "resume" : "start")
+    let beginUptime = ProcessInfo.processInfo.systemUptime
+    if diagOrdinalSessionId != recordingSessionId {
+      diagOrdinalSessionId = recordingSessionId
+      diagCheckpointOrdinal = 0
+    }
+    if context != "checkpoint" { diagNextSequence = nil }
+    var stage = "permission_check"
+    var probe = DurableRecorderProbe()
+    defer { if context != "checkpoint" { diagnostics.flush() } }
+    diagnostics.emit(sessionId: recordingSessionId, [
+      "kind": "begin_started", "ctx": context, "cp": diagCheckpointOrdinal, "seq": diagNextSequence as Any,
+    ])
     guard audioSession.permissionState == .granted else {
+      recordBeginFailure(
+        recordingSessionId: recordingSessionId, context: context, stage: stage, error: DurableRecorderCoreError.microphonePermissionDenied,
+        probe: probe, beginUptime: beginUptime
+      )
       runtimeState = resuming ? .paused : .ready
       throw DurableRecorderCoreError.microphonePermissionDenied
     }
     do {
+      stage = "audio_session"
       try audioSession.activateForRecording()
+      stage = "input_availability_recheck"
       guard audioSession.hasSuitableInput else { throw DurableRecorderCoreError.noAudioInput }
+      stage = "segment_plan_create"
       let plan = try store.createSegmentPlan(recordingSessionId: recordingSessionId)
+      diagNextSequence = plan.sequence
+      stage = "recorder_init"
       let capture = try captureFactory.makeCapture(url: plan.activeURL)
-      guard capture.prepareToRecord(), capture.record() else {
+      probe.recorderExists = true
+      probe.url = plan.activeRelativePath
+      stage = "prepare_to_record"
+      let prepared = capture.prepareToRecord()
+      probe.prepared = prepared
+      var started = false
+      if prepared {
+        stage = "record"
+        started = capture.record()
+        probe.recorded = started
+      }
+      probe.isRecording = capture.isRecording
+      guard prepared, started else {
         capture.stop()
         throw DurableRecorderCoreError.recorderStartFailed("AVAudioRecorder rejected the recording request.")
       }
+      let recordingUptime = ProcessInfo.processInfo.systemUptime
       activePlan = plan
       activeCapture = capture
       routeAtSegmentStart = audioSession.routeDescription
+      stage = "session_transition"
       let session = try store.transitionSession(recordingSessionId: recordingSessionId, to: .recording)
       runtimeState = .recording
+      var success: [String: Any] = [
+        "kind": "begin_succeeded", "ctx": context, "cp": diagCheckpointOrdinal, "seq": plan.sequence,
+        "beginToRecordMs": Self.milliseconds(recordingUptime - beginUptime),
+        "route": audioSession.routeDescription,
+      ]
+      if context == "checkpoint", let stop = diagLastStopUptime {
+        success["stopToRecordMs"] = Self.milliseconds(recordingUptime - stop)
+      }
+      let snapshot = audioSession.diagnosticSnapshot()
+      if !snapshot.isEmpty { success["post"] = DurableRecorderDiagnostics.compactSession(snapshot) }
+      diagnostics.emit(sessionId: recordingSessionId, success)
       return session
     } catch {
+      // Evidence FIRST, while the session and recorder are exactly as they were at the failure; the original
+      // cleanup below then runs unchanged.
+      recordBeginFailure(
+        recordingSessionId: recordingSessionId, context: context, stage: stage, error: error,
+        probe: probe, beginUptime: beginUptime
+      )
       activeCapture?.stop()
       clearActiveCapture()
       audioSession.deactivate()
       runtimeState = resuming ? .paused : .ready
       throw error
     }
+  }
+
+  private static func milliseconds(_ interval: TimeInterval) -> Double {
+    (max(0, interval) * 1_000 * 10).rounded() / 10
+  }
+
+  /// DIAGNOSTIC ONLY: one compact, self-describing failure record. Never throws.
+  private func recordBeginFailure(
+    recordingSessionId: String,
+    context: String,
+    stage: String,
+    error: Error,
+    probe: DurableRecorderProbe,
+    beginUptime: TimeInterval
+  ) {
+    guard diagnostics.isEnabled else { return }
+    let now = ProcessInfo.processInfo.systemUptime
+    var resolvedStage = stage
+    if stage == "audio_session" { resolvedStage = "audio_session." + audioSession.lastActivationStage }
+    var event: [String: Any] = [
+      "kind": "begin_failed", "ctx": context, "cp": diagCheckpointOrdinal, "stage": resolvedStage,
+      "error": DurableRecorderDiagnostics.describe(error),
+      "recorder": [
+        "exists": probe.recorderExists, "prepared": probe.prepared as Any, "recordReturned": probe.recorded as Any,
+        "isRecording": probe.isRecording as Any, "url": probe.url as Any,
+        "activeCaptureAtFailure": activeCapture != nil,
+      ],
+      "atFailure": audioSession.diagnosticSnapshot(),
+      "route": audioSession.routeDescription,
+      "beginToFailMs": Self.milliseconds(now - beginUptime),
+    ]
+    if let pre = diagRolloverPre { event["pre"] = pre }
+    if context == "checkpoint", let stop = diagLastStopUptime { event["stopToFailMs"] = Self.milliseconds(now - stop) }
+    if let seq = diagNextSequence { event["seq"] = seq }
+    if let session = try? store.getSession(recordingSessionId: recordingSessionId) {
+      event["lecture"] = session.lectureId
+      if event["seq"] == nil { event["seq"] = (session.segments.map(\.sequence).max() ?? 0) + 1 }
+      event["committedSegments"] = session.segments.count
+    }
+    diagnostics.emit(sessionId: recordingSessionId, event)
   }
 
   private func finalizeActiveSegment(
@@ -490,6 +641,7 @@ final class DurableForegroundRecorder {
       throw DurableRecorderCoreError.invalidRecorderState("No active segment exists.")
     }
     capture.stop()
+    diagLastStopUptime = ProcessInfo.processInfo.systemUptime
     do {
       let inspection = try fileInspector.inspect(url: plan.activeURL)
       let session = try store.commitSegment(
@@ -549,12 +701,40 @@ final class DurableForegroundRecorder {
     isCheckpointInProgress = true
     defer { isCheckpointInProgress = false }
 
+    // Evidence only: capture the audio-session state BEFORE the recorder is touched, and buffer everything in
+    // memory so no file I/O happens between the old recorder stopping and the new one recording.
+    diagCheckpointOrdinal += 1
+    diagLastStopUptime = nil
+    diagNextSequence = nil
+    diagRolloverStartUptime = ProcessInfo.processInfo.systemUptime
+    diagRolloverPre = diagnostics.isEnabled ? audioSession.diagnosticSnapshot() : nil
+    defer {
+      diagnostics.flush()
+      diagRolloverPre = nil
+    }
+    diagnostics.emit(sessionId: recordingSessionId, [
+      "kind": "rollover_start", "cp": diagCheckpointOrdinal, "oldSeq": activePlan?.sequence as Any,
+      "pre": diagRolloverPre as Any,
+    ])
+
     // Drop any pending timer for this segment before mutating capture.
     cancelCheckpoint()
 
     do {
-      _ = try finalizeActiveSegment(recordingSessionId: recordingSessionId, reason: "checkpoint")
+      let committed = try finalizeActiveSegment(recordingSessionId: recordingSessionId, reason: "checkpoint")
+      if let last = committed.segments.max(by: { $0.sequence < $1.sequence }) {
+        diagNextSequence = last.sequence + 1
+        var event: [String: Any] = [
+          "kind": "old_segment_committed", "cp": diagCheckpointOrdinal, "oldSeq": last.sequence,
+          "durationMs": last.durationMs, "bytes": last.byteLength, "lecture": committed.lectureId,
+        ]
+        if let stop = diagLastStopUptime { event["stopToCommitMs"] = Self.milliseconds(ProcessInfo.processInfo.systemUptime - stop) }
+        diagnostics.emit(sessionId: recordingSessionId, event)
+      }
     } catch {
+      diagnostics.emit(sessionId: recordingSessionId, [
+        "kind": "commit_failed", "cp": diagCheckpointOrdinal, "error": DurableRecorderDiagnostics.describe(error),
+      ])
       failCheckpointCapture(
         recordingSessionId: recordingSessionId,
         runtimeAfter: .paused,
@@ -843,4 +1023,185 @@ final class DurableForegroundRecorder {
     }
   }
   #endif
+}
+
+/// DIAGNOSTIC ONLY. What the recorder looked like when `beginSegment` failed.
+struct DurableRecorderProbe {
+  var recorderExists = false
+  var prepared: Bool?
+  var recorded: Bool?
+  var isRecording: Bool?
+  var url: String?
+}
+
+/// Bounded, best-effort evidence log for the checkpoint-rollover path.
+///
+/// Purpose: when `beginSegment(next)` throws during a rollover, say exactly which operation failed, with the
+/// NSError, the AVAudioSession state before/at the failure, and (for successful rollovers) the measured capture gap.
+///
+/// Guarantees:
+///  - OFF unless explicitly enabled (Dev bundle by default), so production recording is byte-for-byte unchanged.
+///  - Never throws and never touches session metadata: a failure to log is swallowed.
+///  - Events are buffered in memory and written by `flush()` AFTER the new recorder is already recording (or after
+///    the failure has been handled), so it adds no file I/O inside the stop→record gap.
+///  - One JSON object per line in `sessions/<id>/diagnostics.jsonl`, trimmed to `maxLines`; failure records are
+///    kept preferentially (`maxFailureLines`). No audio, transcript or other user content is recorded.
+final class DurableRecorderDiagnostics {
+  static let maxLines = 240
+  static let maxFailureLines = 40
+  static let maxPendingEvents = 64
+  private static let trimCheckInterval = 20
+
+  let isEnabled: Bool
+  private let fileURL: (String) -> URL?
+  private var pending: [(sessionId: String, event: [String: Any])] = []
+  private var appendsSinceTrim = 0
+  private static let timestampFormatter: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter
+  }()
+
+  init(enabled: Bool, fileURL: @escaping (String) -> URL?) {
+    isEnabled = enabled
+    self.fileURL = fileURL
+  }
+
+  /// Dev builds only (bundle id `com.aydenz.youmilensipad.dev`); the Production bundle never matches.
+  static var isDevBundle: Bool {
+    Bundle.main.bundleIdentifier?.hasSuffix(".dev") == true
+  }
+
+  func emit(sessionId: String, _ event: [String: Any]) {
+    guard isEnabled else { return }
+    var stamped = Self.sanitize(event) as? [String: Any] ?? [:]
+    stamped["t"] = Self.timestampFormatter.string(from: Date())
+    stamped["up"] = Self.uptimeMilliseconds()
+    stamped["sid"] = sessionId
+    pending.append((sessionId, stamped))
+    if pending.count > Self.maxPendingEvents { pending.removeFirst(pending.count - Self.maxPendingEvents) }
+  }
+
+  /// Writes and clears buffered events. Never throws.
+  func flush() {
+    guard isEnabled, !pending.isEmpty else { pending.removeAll(); return }
+    let batch = pending
+    pending.removeAll()
+    var bySession: [String: [String]] = [:]
+    var order: [String] = []
+    for item in batch {
+      guard JSONSerialization.isValidJSONObject(item.event),
+            let data = try? JSONSerialization.data(withJSONObject: item.event, options: [.sortedKeys]),
+            let line = String(data: data, encoding: .utf8) else { continue }
+      if bySession[item.sessionId] == nil { order.append(item.sessionId) }
+      bySession[item.sessionId, default: []].append(line)
+    }
+    for sessionId in order {
+      guard let url = fileURL(sessionId), let lines = bySession[sessionId] else { continue }
+      append(lines: lines, to: url)
+    }
+  }
+
+  private func append(lines: [String], to url: URL) {
+    let payload = Data((lines.joined(separator: "\n") + "\n").utf8)
+    do {
+      if !FileManager.default.fileExists(atPath: url.path) {
+        guard FileManager.default.createFile(atPath: url.path, contents: payload) else { return }
+      } else {
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: payload)
+      }
+    } catch {
+      return
+    }
+    appendsSinceTrim += lines.count
+    if appendsSinceTrim >= Self.trimCheckInterval {
+      appendsSinceTrim = 0
+      trimIfNeeded(url)
+    }
+  }
+
+  private func trimIfNeeded(_ url: URL) {
+    guard let text = try? String(contentsOf: url, encoding: .utf8) else { return }
+    let lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+    guard lines.count > Self.maxLines else { return }
+    var keep = Set<Int>()
+    let failures = lines.indices.filter { Self.isFailureLine(lines[$0]) }.suffix(Self.maxFailureLines)
+    keep.formUnion(failures)
+    var budget = Self.maxLines - keep.count
+    for index in lines.indices.reversed() where budget > 0 && !keep.contains(index) {
+      keep.insert(index)
+      budget -= 1
+    }
+    let trimmed = lines.indices.filter(keep.contains).map { lines[$0] }.joined(separator: "\n") + "\n"
+    try? Data(trimmed.utf8).write(to: url, options: .atomic)
+  }
+
+  static func isFailureLine(_ line: String) -> Bool {
+    line.contains("\"kind\":\"begin_failed\"") || line.contains("\"kind\":\"commit_failed\"")
+  }
+
+  static func uptimeMilliseconds() -> Double {
+    (ProcessInfo.processInfo.systemUptime * 1_000).rounded()
+  }
+
+  /// Compact form of a full session snapshot for SUCCESS events (category / mode / options / route only).
+  static func compactSession(_ snapshot: [String: Any]) -> [String: Any] {
+    var out: [String: Any] = [:]
+    for key in ["category", "mode", "options", "inputs", "otherAudioPlaying"] {
+      if let value = snapshot[key] { out[key] = value }
+    }
+    return out
+  }
+
+  /// NSError details (domain / code / FourCC / description / underlying chain) plus the Swift error text.
+  static func describe(_ error: Error, depth: Int = 0) -> [String: Any] {
+    let ns = error as NSError
+    var out: [String: Any] = [
+      "domain": ns.domain,
+      "code": ns.code,
+      "desc": truncated(ns.localizedDescription, 240),
+      "swift": truncated(String(describing: error), 240),
+    ]
+    if let code = fourCC(ns.code) { out["fourCC"] = code }
+    if let reason = ns.localizedFailureReason { out["reason"] = truncated(reason, 160) }
+    if depth < 2, let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError {
+      out["underlying"] = describe(underlying, depth: depth + 1)
+    }
+    return out
+  }
+
+  static func fourCC(_ code: Int) -> String? {
+    guard code > 0, code <= Int(UInt32.max) else { return nil }
+    let value = UInt32(code)
+    let bytes = [UInt8((value >> 24) & 0xff), UInt8((value >> 16) & 0xff), UInt8((value >> 8) & 0xff), UInt8(value & 0xff)]
+    guard bytes.allSatisfy({ $0 >= 0x20 && $0 <= 0x7e }) else { return nil }
+    return String(bytes: bytes, encoding: .ascii)
+  }
+
+  private static func truncated(_ text: String, _ limit: Int) -> String {
+    text.count <= limit ? text : String(text.prefix(limit)) + "…"
+  }
+
+  /// JSON-safe copy: drops nil optionals, keeps numbers/strings/bools/arrays/dictionaries, stringifies the rest.
+  static func sanitize(_ value: Any) -> Any? {
+    let mirror = Mirror(reflecting: value)
+    if mirror.displayStyle == .optional {
+      guard let child = mirror.children.first else { return nil }
+      return sanitize(child.value)
+    }
+    switch value {
+    case let string as String: return string
+    case let bool as Bool: return bool
+    case let int as Int: return int
+    case let int64 as Int64: return int64
+    case let double as Double: return double.isFinite ? double : nil
+    case let float as Float: return float.isFinite ? Double(float) : nil
+    case let array as [Any]: return array.compactMap(sanitize)
+    case let dict as [String: Any]: return dict.compactMapValues(sanitize)
+    default: return String(describing: value)
+    }
+  }
 }

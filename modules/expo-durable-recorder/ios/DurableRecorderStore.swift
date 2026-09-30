@@ -840,6 +840,13 @@ final class DurableRecorderStore {
     sessionsRootURL.appendingPathComponent(identifier, isDirectory: true)
   }
 
+  /// DIAGNOSTIC ONLY. Where the bounded rollover evidence log for a session lives. Pure path arithmetic:
+  /// it creates nothing, validates nothing and cannot fail the recorder.
+  func diagnosticsFileURL(recordingSessionId: String) -> URL? {
+    guard let canonical = try? requireCanonicalIdentifier(recordingSessionId) else { return nil }
+    return sessionURL(forCanonicalIdentifier: canonical).appendingPathComponent("diagnostics.jsonl", isDirectory: false)
+  }
+
   private func uniqueQuarantineURL(in directory: URL, preferredFileName: String) throws -> URL {
     let preferred = directory.appendingPathComponent(preferredFileName, isDirectory: false)
     if !fileManager.fileExists(atPath: preferred.path) {

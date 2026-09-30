@@ -1035,6 +1035,253 @@ private func testScheduledCheckpointTimerFires() async throws {
   _ = try engine.pauseRecording(recordingSessionId: session.recordingSessionId)
 }
 
+// ===== Rollover diagnostics (evidence only; no behavioral change) =====
+
+private final class DiagAudioSession: DurableAudioSessionManaging {
+  var permissionState: DurableRecorderPermissionState = .granted
+  var routeDescription = "MicrophoneBuiltIn:iPad Microphone"
+  var failStage: String?
+  /// After a successful activation the input disappears (proves the RE-check boundary).
+  var inputVanishesAfterActivation = false
+  private var activated = false
+  private(set) var lastActivationStage = "idle"
+  var category = "record"
+  var deactivations = 0
+
+  var hasSuitableInput: Bool { !(inputVanishesAfterActivation && activated) }
+  func requestPermission() async -> DurableRecorderPermissionState { permissionState }
+  func activateForRecording() throws {
+    lastActivationStage = "set_category"
+    if failStage == "set_category" { throw diagError(560_030_580) }
+    lastActivationStage = "set_active"
+    if failStage == "set_active" { category = "playAndRecord"; throw diagError(561_017_449) }
+    lastActivationStage = "input_availability"
+    if failStage == "input_availability" { throw DurableRecorderCoreError.noAudioInput }
+    activated = true
+    lastActivationStage = "activated"
+  }
+  func deactivate() { deactivations += 1; activated = false }
+  func diagnosticSnapshot() -> [String: Any] {
+    ["category": category, "mode": "default", "options": 4, "inputs": ["MicrophoneBuiltIn:iPad Microphone"], "otherAudioPlaying": false]
+  }
+  private func diagError(_ code: Int) -> NSError {
+    NSError(
+      domain: NSOSStatusErrorDomain,
+      code: code,
+      userInfo: [
+        NSLocalizedDescriptionKey: "The operation couldn\u{2019}t be completed (diag \(code)).",
+        NSUnderlyingErrorKey: NSError(domain: "com.apple.coreaudio.avfaudio", code: 1_701_737_535, userInfo: [NSLocalizedDescriptionKey: "underlying detail"]),
+      ]
+    )
+  }
+}
+
+private final class DiagCapture: DurableAudioCapture {
+  private let url: URL
+  private let prepareResult: Bool
+  private let recordResult: Bool
+  private(set) var isRecording = false
+  init(url: URL, prepare: Bool, record: Bool) { self.url = url; prepareResult = prepare; recordResult = record }
+  func prepareToRecord() -> Bool { prepareResult }
+  func record() -> Bool {
+    guard recordResult else { return false }
+    isRecording = true
+    FileManager.default.createFile(atPath: url.path, contents: Data(repeating: 9, count: 2_048))
+    return true
+  }
+  func stop() { isRecording = false }
+}
+
+private final class DiagCaptureFactory: DurableAudioCaptureFactory {
+  var mode = "ok"   // ok | throw | prepare_false | record_false
+  func makeCapture(url: URL) throws -> DurableAudioCapture {
+    if mode == "throw" { throw NSError(domain: AVFoundationErrorDomainForTest, code: -11_800, userInfo: [NSLocalizedDescriptionKey: "recorder init failed"]) }
+    return DiagCapture(url: url, prepare: mode != "prepare_false", record: mode != "record_false")
+  }
+}
+private let AVFoundationErrorDomainForTest = "AVFoundationErrorDomain"
+
+private func makeDiagEngine(
+  root: URL,
+  enabled: Bool = true,
+  fileURL: ((DurableRecorderStore, String) -> URL?)? = nil
+) throws -> (DurableRecorderStore, DurableForegroundRecorder, DiagAudioSession, DiagCaptureFactory) {
+  let store = try DurableRecorderStore(rootURL: root)
+  let session = DiagAudioSession()
+  let factory = DiagCaptureFactory()
+  let diagnostics = DurableRecorderDiagnostics(enabled: enabled, fileURL: { id in
+    fileURL?(store, id) ?? store.diagnosticsFileURL(recordingSessionId: id)
+  })
+  let engine = DurableForegroundRecorder(
+    store: store, audioSession: session, captureFactory: factory, fileInspector: FakeFileInspector(),
+    checkpointInterval: 0, observeSystemNotifications: false, diagnostics: diagnostics
+  )
+  return (store, engine, session, factory)
+}
+
+private func readDiagnosticEvents(_ store: DurableRecorderStore, _ sessionId: String) -> [[String: Any]] {
+  guard let url = store.diagnosticsFileURL(recordingSessionId: sessionId),
+        let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+  return text.split(separator: "\n").compactMap {
+    (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any]
+  }
+}
+
+private func startDiagRecording(
+  _ engine: DurableForegroundRecorder, _ store: DurableRecorderStore, lecture: String
+) async throws -> String {
+  let session = try store.createSession(lectureId: lecture)
+  _ = try await engine.prepareRecording(recordingSessionId: session.recordingSessionId, requestPermission: false)
+  _ = try engine.startRecording(recordingSessionId: session.recordingSessionId)
+  return session.recordingSessionId
+}
+
+private func testRolloverDiagnosticStagesAreDistinctAndFaithful() async throws {
+  // (label, arm failure, expected stage, extra checks)
+  let cases: [(String, (DiagAudioSession, DiagCaptureFactory) -> Void, String)] = [
+    ("set_category", { s, _ in s.failStage = "set_category" }, "audio_session.set_category"),
+    ("set_active", { s, _ in s.failStage = "set_active" }, "audio_session.set_active"),
+    ("input_availability", { s, _ in s.failStage = "input_availability" }, "audio_session.input_availability"),
+    ("input_recheck", { s, _ in s.inputVanishesAfterActivation = true }, "input_availability_recheck"),
+    ("recorder_init", { _, f in f.mode = "throw" }, "recorder_init"),
+    ("prepare_to_record", { _, f in f.mode = "prepare_false" }, "prepare_to_record"),
+    ("record", { _, f in f.mode = "record_false" }, "record"),
+  ]
+  var seenStages = Set<String>()
+  for (label, arm, expectedStage) in cases {
+    let root = temporaryRoot("diag-stage-\(label)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let (store, engine, audioSession, factory) = try makeDiagEngine(root: root)
+    let id = try await startDiagRecording(engine, store, lecture: "lecture-diag-\(label)")
+    arm(audioSession, factory)
+    var threw = false
+    do { try engine.performCheckpointForTesting() } catch { threw = true }
+    try require(threw, "\(label): the injected boundary failure must still surface exactly as before")
+
+    // BEHAVIOR IS UNCHANGED: committed segment kept, session paused, next segment never opened.
+    let after = try store.getSession(recordingSessionId: id)
+    try require(after.state == .paused, "\(label): a failed rollover must still pause the session")
+    try require(after.segments.count == 1 && after.segments[0].interruptionReason == "checkpoint", "\(label): committed checkpoint kept")
+
+    let events = readDiagnosticEvents(store, id)
+    guard let failure = events.first(where: { ($0["kind"] as? String) == "begin_failed" && ($0["ctx"] as? String) == "checkpoint" }) else {
+      throw AudioTestFailure(description: "\(label): a checkpoint begin failure must persist a begin_failed event; got \(events.map { $0["kind"] ?? "?" })")
+    }
+    try require((failure["stage"] as? String) == expectedStage, "\(label): stage must be \(expectedStage), got \(String(describing: failure["stage"]))")
+    seenStages.insert(expectedStage)
+    try require((failure["cp"] as? Int) == 1, "\(label): checkpoint ordinal recorded")
+    try require((failure["seq"] as? Int) == 2, "\(label): the segment being opened is sequence 2")
+    try require((failure["lecture"] as? String) == "lecture-diag-\(label)", "\(label): lecture id recorded")
+    try require((failure["sid"] as? String) == id, "\(label): session id recorded")
+    try require(failure["pre"] != nil && failure["atFailure"] != nil, "\(label): pre-rollover and at-failure audio-session snapshots persisted")
+    try require(failure["stopToFailMs"] != nil, "\(label): time from the previous stop to the failure recorded")
+    let recorder = failure["recorder"] as? [String: Any] ?? [:]
+    switch label {
+    case "recorder_init":
+      try require((recorder["exists"] as? Bool) == false, "recorder_init: no recorder exists")
+      let error = failure["error"] as? [String: Any] ?? [:]
+      try require((error["domain"] as? String) == AVFoundationErrorDomainForTest && (error["code"] as? Int) == -11_800, "recorder_init: NSError domain/code survive persistence")
+      try require((error["desc"] as? String) == "recorder init failed", "recorder_init: localized description survives")
+    case "prepare_to_record":
+      try require((recorder["exists"] as? Bool) == true && (recorder["prepared"] as? Bool) == false && recorder["recordReturned"] == nil, "prepare_to_record: prepare false, record never attempted")
+    case "record":
+      try require((recorder["prepared"] as? Bool) == true && (recorder["recordReturned"] as? Bool) == false, "record: prepare true, record() false")
+    case "set_category", "set_active":
+      let error = failure["error"] as? [String: Any] ?? [:]
+      try require((error["domain"] as? String) == NSOSStatusErrorDomain, "\(label): NSError domain survives")
+      let expectedCode = label == "set_category" ? 560_030_580 : 561_017_449
+      try require((error["code"] as? Int) == expectedCode, "\(label): NSError code survives")
+      try require((error["fourCC"] as? String) != nil, "\(label): FourCC decoded")
+      try require((error["desc"] as? String)?.contains("diag \(expectedCode)") == true, "\(label): localized description survives")
+      let underlying = error["underlying"] as? [String: Any]
+      try require((underlying?["domain"] as? String) == "com.apple.coreaudio.avfaudio" && (underlying?["code"] as? Int) == 1_701_737_535, "\(label): underlying error chain survives")
+    default: break
+    }
+    if label == "set_active" {
+      // The audio session changed under the recorder between the pre-rollover snapshot and the failure.
+      let pre = failure["pre"] as? [String: Any] ?? [:]
+      let atFailure = failure["atFailure"] as? [String: Any] ?? [:]
+      try require((pre["category"] as? String) == "record" && (atFailure["category"] as? String) == "playAndRecord", "pre and at-failure snapshots must be captured at different moments")
+    }
+  }
+  try require(seenStages.count == cases.count, "every reachable begin boundary maps to its own distinct stage id")
+}
+
+private func testRolloverSuccessEventsAndBoundedLog() async throws {
+  let root = temporaryRoot("diag-success")
+  defer { try? FileManager.default.removeItem(at: root) }
+  let (store, engine, audioSession, factory) = try makeDiagEngine(root: root)
+  let id = try await startDiagRecording(engine, store, lecture: "lecture-diag-success")
+  for _ in 0..<3 { try engine.performCheckpointForTesting() }
+  var events = readDiagnosticEvents(store, id)
+  let kinds = events.compactMap { $0["kind"] as? String }
+  for expected in ["rollover_start", "old_segment_committed", "begin_started", "begin_succeeded"] {
+    try require(kinds.filter { $0 == expected }.count >= 3, "each of the 3 rollovers must persist \(expected)")
+  }
+  let succeeded = events.filter { ($0["kind"] as? String) == "begin_succeeded" && ($0["ctx"] as? String) == "checkpoint" }
+  try require(succeeded.map { $0["seq"] as? Int } == [2, 3, 4], "new sequence numbers recorded")
+  try require(succeeded.allSatisfy { ($0["stopToRecordMs"] as? Double) != nil }, "the old-stop → new-recording gap is measured for every successful rollover")
+  let committedEvents = events.filter { ($0["kind"] as? String) == "old_segment_committed" }
+  try require(committedEvents.map { $0["oldSeq"] as? Int } == [1, 2, 3], "old sequence numbers recorded")
+
+  // One early failure, then a long run: the log stays bounded and the failure record survives trimming.
+  audioSession.failStage = "set_active"
+  do { try engine.performCheckpointForTesting() } catch {}
+  audioSession.failStage = nil
+  _ = try engine.resumeRecording(recordingSessionId: id)
+  for _ in 0..<400 { try engine.performCheckpointForTesting() }
+  events = readDiagnosticEvents(store, id)
+  let url = store.diagnosticsFileURL(recordingSessionId: id)!
+  let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+  try require(events.count <= DurableRecorderDiagnostics.maxLines + 8, "bounded line count after 400 rollovers: \(events.count)")
+  try require(size < 200_000, "bounded file size after 400 rollovers: \(size) bytes")
+  try require(events.contains { ($0["kind"] as? String) == "begin_failed" }, "failure evidence survives trimming")
+  _ = factory
+}
+
+private func testDiagnosticPersistenceCannotBreakRecording() async throws {
+  // A diagnostics location that can never be written (a path under a regular file) and one that resolves to nil.
+  for label in ["unwritable", "nil_url"] {
+    let root = temporaryRoot("diag-broken-\(label)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let blocker = root.appendingPathComponent("blocker")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    FileManager.default.createFile(atPath: blocker.path, contents: Data([1]))
+    let (store, engine, audioSession, _) = try makeDiagEngine(root: root) { _, _ in
+      label == "nil_url" ? nil : blocker.appendingPathComponent("nested/diagnostics.jsonl")
+    }
+    let id = try await startDiagRecording(engine, store, lecture: "lecture-diag-broken-\(label)")
+    for _ in 0..<3 { try engine.performCheckpointForTesting() }
+    audioSession.failStage = "set_category"
+    var threw = false
+    do { try engine.performCheckpointForTesting() } catch { threw = true }
+    try require(threw, "\(label): failure semantics unchanged")
+    let after = try store.getSession(recordingSessionId: id)
+    try require(after.state == .paused && after.segments.count == 4, "\(label): session metadata and segments unaffected by a diagnostics failure")
+    audioSession.failStage = nil
+    _ = try engine.resumeRecording(recordingSessionId: id)
+    _ = try engine.stopRecording(recordingSessionId: id)
+    let finished = try store.getSession(recordingSessionId: id)
+    try require(finished.state == .finalized, "\(label): Resume + Finish still work")
+  }
+}
+
+private func testDiagnosticsAreOffByDefaultAndAddNoFiles() async throws {
+  let root = temporaryRoot("diag-off")
+  defer { try? FileManager.default.removeItem(at: root) }
+  // Default construction (no injected diagnostics) is what Production runs: bundle id is not a Dev bundle here.
+  let (store, engine, audioSession, _, _) = try makeEngine(root: root)
+  let session = try store.createSession(lectureId: "lecture-diag-off")
+  try await prepare(engine, sessionId: session.recordingSessionId)
+  _ = try engine.startRecording(recordingSessionId: session.recordingSessionId)
+  try engine.performCheckpointForTesting()
+  _ = audioSession
+  try require(store.diagnosticsFileURL(recordingSessionId: session.recordingSessionId).map { !FileManager.default.fileExists(atPath: $0.path) } ?? false, "no diagnostics file is created unless explicitly enabled")
+  try require(!DurableRecorderDiagnostics.isDevBundle, "the test host is not a Dev bundle, so the default is OFF")
+  try require(DurableRecorderDiagnostics.fourCC(560_030_580) == "!act", "FourCC decoding")
+  try require(DurableRecorderDiagnostics.fourCC(-11_800) == nil && DurableRecorderDiagnostics.fourCC(12) == nil, "non-FourCC codes are left numeric")
+}
+
 @main
 private enum DurableRecorderAudioTestRunner {
   static func main() async throws {
@@ -1065,6 +1312,10 @@ private enum DurableRecorderAudioTestRunner {
     try await testCheckpointStatusListenerRegression()
     try await testLongSessionSegmentCounts()
     try await testScheduledCheckpointTimerFires()
+    try await testRolloverDiagnosticStagesAreDistinctAndFaithful()
+    try await testRolloverSuccessEventsAndBoundedLog()
+    try await testDiagnosticPersistenceCannotBreakRecording()
+    try await testDiagnosticsAreOffByDefaultAndAddNoFiles()
     print("Durable recorder native audio engine tests passed.")
   }
 }
