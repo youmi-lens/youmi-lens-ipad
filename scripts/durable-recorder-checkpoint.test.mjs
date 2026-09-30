@@ -30,7 +30,7 @@ assert.doesNotMatch(
 
 assert.match(
   sources,
-  /_ = try beginSegment\(recordingSessionId: recordingSessionId, resuming: true\)\s*\n\s*scheduleCheckpoint\(\)/,
+  /try beginCheckpointSegment\(recordingSessionId: recordingSessionId, previousCommitted: previousCommitted\)\s*\n\s*scheduleCheckpoint\(\)/,
   'successful checkpoint must begin the next segment and reschedule',
 );
 assert.match(

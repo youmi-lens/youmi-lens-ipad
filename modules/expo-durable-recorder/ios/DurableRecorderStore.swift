@@ -480,6 +480,48 @@ final class DurableRecorderStore {
     }
   }
 
+  /// Quarantines ONE uncommitted `.partial.m4a`: the exact file of a failed, never-committed begin attempt.
+  ///
+  /// Reuses the quarantine directory and unique-name rules of `quarantineInactivePartialFiles`, but is bounded to the
+  /// single path derived from `plan` (never a directory sweep), refuses anything the manifest references, and never
+  /// deletes. Non-throwing: the return value says what happened so a failure to tidy can only ever be recorded, not
+  /// escalated. Callers must ensure no live capture owns `plan.activeURL`.
+  func quarantineFailedPartial(recordingSessionId: String, plan: DurableSegmentPlan) -> String {
+    do {
+      return try synchronized {
+        let canonical = try requireCanonicalIdentifier(recordingSessionId)
+        let session = try readSession(canonicalIdentifier: canonical)
+        let sessionDirectory = sessionURL(forCanonicalIdentifier: canonical)
+        guard plan.activeRelativePath == Self.activeRelativePath(sequence: plan.sequence, segmentId: plan.segmentId),
+              plan.activeURL.standardizedFileURL ==
+                sessionDirectory.appendingPathComponent(plan.activeRelativePath, isDirectory: false).standardizedFileURL else {
+          return "refused_path_mismatch"
+        }
+        guard !session.segments.contains(where: {
+          $0.segmentId == plan.segmentId || $0.relativePath == plan.activeRelativePath
+            || $0.relativePath == plan.finalizedRelativePath
+        }) else { return "refused_referenced" }
+        guard fileManager.fileExists(atPath: plan.activeURL.path) else { return "absent" }
+        let quarantineDirectory = sessionDirectory.appendingPathComponent("quarantine", isDirectory: true)
+        try fileManager.createDirectory(at: quarantineDirectory, withIntermediateDirectories: true)
+        let destination = try uniqueQuarantineURL(
+          in: quarantineDirectory,
+          preferredFileName: plan.activeURL.lastPathComponent
+        )
+        try fileManager.moveItem(at: plan.activeURL, to: destination)
+        return "quarantined:" + destination.lastPathComponent
+      }
+    } catch {
+      return "left_in_place"
+    }
+  }
+
+  /// Pure path arithmetic for a manifest-relative segment path (creates and validates nothing beyond the id).
+  func segmentFileURL(recordingSessionId: String, relativePath: String) -> URL? {
+    guard let canonical = try? requireCanonicalIdentifier(recordingSessionId) else { return nil }
+    return sessionURL(forCanonicalIdentifier: canonical).appendingPathComponent(relativePath, isDirectory: false)
+  }
+
   /// Re-attach contiguous `segments/NNNNNN-<id>.m4a` files that were moved but
   /// never written into session.json (commitSegment crash window).
   ///

@@ -44,13 +44,19 @@ private final class FakeCapture: DurableAudioCapture {
 }
 
 private final class FakeCaptureFactory: DurableAudioCaptureFactory {
-  var failNext = false
+  /// How many upcoming captures fail to start. `failNext = true` is one (a transient failure); a checkpoint
+  /// rollover now retries ONCE, so tests that model a persistent begin failure arm two.
+  var failNextCount = 0
+  var failNext: Bool {
+    get { failNextCount > 0 }
+    set { failNextCount = newValue ? 1 : 0 }
+  }
   private(set) var createdURLs: [URL] = []
 
   func makeCapture(url: URL) throws -> DurableAudioCapture {
     createdURLs.append(url)
-    let shouldStart = !failNext
-    failNext = false
+    let shouldStart = failNextCount == 0
+    if failNextCount > 0 { failNextCount -= 1 }
     return FakeCapture(url: url, shouldStart: shouldStart)
   }
 }
@@ -102,7 +108,8 @@ private func makeEngine(
     captureFactory: factory,
     fileInspector: inspector,
     checkpointInterval: checkpointInterval,
-    observeSystemNotifications: false
+    observeSystemNotifications: false,
+    checkpointRetryPolicy: DurableCheckpointRetryPolicy(sleep: { _ in })
   )
   return (store, engine, audioSession, factory, inspector)
 }
@@ -672,7 +679,8 @@ private func testCheckpointBeginSegmentFailurePreservesAudio() async throws {
   // The commit half of the rollover (finalizeActiveSegment) must succeed;
   // only the SECOND half (beginSegment for the next segment) fails — this is
   // the exact P0 incident: segment N committed, segment N+1 never opened.
-  factory.failNext = true
+  // The rollover retries once, so a PERSISTENT failure (both attempts) is what reaches the paused path.
+  factory.failNextCount = 2
   do {
     try engine.performCheckpointForTesting()
     throw AudioTestFailure(description: "A forced beginSegment failure during checkpoint succeeded")
@@ -710,7 +718,8 @@ private func testResumeAfterFailedCheckpointRollover() async throws {
   try await prepare(engine, sessionId: session.recordingSessionId)
   _ = try engine.startRecording(recordingSessionId: session.recordingSessionId)
 
-  factory.failNext = true
+  // The rollover retries once, so a PERSISTENT failure (both attempts) is what reaches the paused path.
+  factory.failNextCount = 2
   do {
     try engine.performCheckpointForTesting()
     throw AudioTestFailure(description: "A forced beginSegment failure during checkpoint succeeded")
@@ -749,7 +758,8 @@ private func testFinishAfterFailedCheckpointRollover() async throws {
   try await prepare(engine, sessionId: session.recordingSessionId)
   _ = try engine.startRecording(recordingSessionId: session.recordingSessionId)
 
-  factory.failNext = true
+  // The rollover retries once, so a PERSISTENT failure (both attempts) is what reaches the paused path.
+  factory.failNextCount = 2
   do {
     try engine.performCheckpointForTesting()
     throw AudioTestFailure(description: "A forced beginSegment failure during checkpoint succeeded")

@@ -21,7 +21,9 @@ const slice = (text, from, to) => {
 
 const recorder = read('modules/expo-durable-recorder/ios/DurableForegroundRecorder.swift');
 const store = read('modules/expo-durable-recorder/ios/DurableRecorderStore.swift');
-const begin = slice(recorder, 'private func beginSegment(recordingSessionId: String, resuming: Bool) throws', 'private static func milliseconds');
+const begin = slice(recorder, 'private func performBeginAttempt(', 'private func abandonFailedBegin(');
+const beginEntry = slice(recorder, 'private func beginSegment(recordingSessionId: String, resuming: Bool) throws', 'private func performBeginAttempt(');
+const abandon = slice(recorder, 'private func abandonFailedBegin(', 'private static func milliseconds');
 const rollover = slice(recorder, 'private func performCheckpointRollover(recordingSessionId: String) throws {', 'private func failCheckpointCapture(');
 const manager = slice(recorder, 'final class SystemDurableAudioSessionManager', '#else');
 const diagClass = slice(recorder, 'final class DurableRecorderDiagnostics {', undefined);
@@ -36,7 +38,7 @@ check('stage ids are assigned in the same order the operations run', () => {
     'stage = "segment_plan_create"',
     'try store.createSegmentPlan(recordingSessionId: recordingSessionId)',
     'stage = "recorder_init"',
-    'try captureFactory.makeCapture(url: plan.activeURL)',
+    'try captureFactory.makeCapture(url: newPlan.activeURL)',
     'stage = "prepare_to_record"',
     'let prepared = capture.prepareToRecord()',
     'stage = "record"',
@@ -68,15 +70,20 @@ check('the audio-session operations, category and options are exactly what shipp
   assert.match(manager, /try session\.setActive\(true\)/);
   assert.match(manager, /try\? session\.setActive\(false, options: \[\.notifyOthersOnDeactivation\]\)/);
 });
-check('beginSegment keeps its original error handling: same cleanup, same order, same rethrow; no retry, no fallback', () => {
-  const catchBlock = begin.slice(begin.indexOf('    } catch {\n      // Evidence FIRST'));
-  const order = ['recordBeginFailure(', 'activeCapture?.stop()', 'clearActiveCapture()', 'audioSession.deactivate()', 'runtimeState = resuming ? .paused : .ready', 'throw error'];
+check('the original failure handling of beginSegment is preserved: same cleanup, same order, same rethrow (Start/Resume never retry)', () => {
+  const order = ['activeCapture?.stop()', 'clearActiveCapture()', 'audioSession.deactivate()'];
   let cursor = -1;
-  for (const marker of order) { const i = catchBlock.indexOf(marker, cursor + 1); assert.ok(i > cursor, marker); cursor = i; }
-  const code = begin.replace(/\/\/.*$/gm, '').split('\n').slice(1).join('\n'); // body only (not the declaration)
-  assert.doesNotMatch(code, /\bfor\b|\bwhile\b|repeat\s*\{|Task\.sleep|asyncAfter|beginSegment\(|retry/i, 'no loop, delay or recursive/retry begin (comments excluded)');
-  assert.equal((recorder.match(/try beginSegment\(recordingSessionId: recordingSessionId, resuming: (true|false)\)/g) ?? []).length, 3, 'exactly the three original call sites (start, resume, rollover)');
-  assert.match(recorder, /_ = try beginSegment\(recordingSessionId: recordingSessionId, resuming: true\)\s*\n\s*scheduleCheckpoint\(\)/);
+  for (const marker of order) { const i = abandon.indexOf(marker, cursor + 1); assert.ok(i > cursor, marker); cursor = i; }
+  assert.match(abandon, /runtimeState = resuming \? \.paused : \.ready/);
+  assert.match(abandon, /if !failure\.isPermissionGuard \{/, 'the permission guard still never deactivates the session');
+  assert.match(begin, /recordBeginFailure\([\s\S]*?\)\n\s*var stageId = stage/, 'evidence is still recorded FIRST, before any cleanup');
+  assert.match(beginEntry, /abandonFailedBegin\(failure, resuming: resuming\)\s*\n\s*throw failure\.error/);
+  const entryCode = beginEntry.replace(/\/\/.*$/gm, '');
+  assert.doesNotMatch(entryCode, /\bfor\b|\bwhile\b|repeat\s*\{|asyncAfter|sleep|retry/i, 'Start/Resume entry point never retries');
+  const code = begin.replace(/\/\/.*$/gm, '').split('\n').slice(1).join('\n');
+  assert.doesNotMatch(code, /\bfor\b|\bwhile\b|repeat\s*\{|Task\.sleep|asyncAfter|beginSegment\(|performBeginAttempt\(|retry/i, 'one attempt: no loop, delay or recursion inside the attempt (comments excluded)');
+  assert.equal((recorder.match(/try beginSegment\(recordingSessionId: recordingSessionId, resuming: (true|false)\)/g) ?? []).length, 2, 'beginSegment is called by Start and Resume only');
+  assert.match(recorder, /try beginCheckpointSegment\(recordingSessionId: recordingSessionId, previousCommitted: previousCommitted\)\s*\n\s*scheduleCheckpoint\(\)/);
   assert.match(recorder, /lastInterruption = "checkpoint_begin_segment_failed"/);
 });
 check('prepare/record keep their original short-circuit semantics (record() is not called when prepare fails)', () => {
@@ -95,7 +102,10 @@ check('rollover buffers evidence in memory: no file I/O between the old recorder
   assert.match(rollover, /defer \{\s*diagnostics\.flush\(\)/);
   const emit = slice(diagClass, 'func emit(sessionId: String', '/// Writes and clears buffered events');
   assert.doesNotMatch(emit, /FileHandle|FileManager|\.write\(|createFile/, 'emit() only buffers');
-  assert.match(begin, /defer \{ if context != "checkpoint" \{ diagnostics\.flush\(\) \} \}/);
+  assert.doesNotMatch(begin, /flush\(\)/, 'a begin attempt never writes evidence itself');
+  assert.match(beginEntry, /defer \{ diagnostics\.flush\(\) \}/);
+  const policy = slice(recorder, 'private func beginCheckpointSegment(', 'private func emitEnteredPaused(');
+  assert.equal((policy.match(/diagnostics\.flush\(\)/g) ?? []).length, 1, 'the retry path flushes once, only after a FAILED first attempt and before the pause');
 });
 check('the diagnostics log is OFF unless the Dev bundle enables it, and cannot throw', () => {
   assert.match(recorder, /enabled: DurableRecorderDiagnostics\.isDevBundle/);

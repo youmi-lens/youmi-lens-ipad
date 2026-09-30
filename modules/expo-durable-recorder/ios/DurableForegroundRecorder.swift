@@ -166,6 +166,109 @@ final class SystemDurableAudioSessionManager: DurableAudioSessionManaging {
 }
 #endif
 
+/// The operation inside one `beginSegment` attempt that failed, parsed from the stable stage id that the rollover
+/// diagnostics persist. Retry eligibility is decided from THIS structured value, never from error text.
+enum DurableBeginStage: Equatable {
+  case permissionCheck
+  case audioSessionSetCategory
+  case audioSessionSetActive
+  case audioSessionInputAvailability
+  /// `audio_session` failed but the session manager could not say which of its operations did.
+  case audioSessionUnclassified(String)
+  case inputAvailabilityRecheck
+  case segmentPlanCreate
+  case recorderInit
+  case prepareToRecord
+  case record
+  case sessionTransition
+
+  init(stageId: String) {
+    switch stageId {
+    case "permission_check": self = .permissionCheck
+    case "audio_session.set_category": self = .audioSessionSetCategory
+    case "audio_session.set_active": self = .audioSessionSetActive
+    case "audio_session.input_availability": self = .audioSessionInputAvailability
+    case "input_availability_recheck": self = .inputAvailabilityRecheck
+    case "segment_plan_create": self = .segmentPlanCreate
+    case "recorder_init": self = .recorderInit
+    case "prepare_to_record": self = .prepareToRecord
+    case "record": self = .record
+    case "session_transition": self = .sessionTransition
+    default: self = .audioSessionUnclassified(stageId)
+    }
+  }
+
+  /// Only failures that can plausibly be transient at the AVAudioSession / AVAudioRecorder boundary are eligible for
+  /// the single checkpoint retry. Everything else (permission, store/metadata, an already-live recorder) is not, and
+  /// neither is an audio-session failure that cannot be attributed to a specific operation.
+  var isCheckpointRetryEligible: Bool {
+    switch self {
+    case .audioSessionSetCategory, .audioSessionSetActive, .audioSessionInputAvailability,
+         .inputAvailabilityRecheck, .recorderInit, .prepareToRecord, .record:
+      return true
+    case .permissionCheck, .audioSessionUnclassified, .segmentPlanCreate, .sessionTransition:
+      return false
+    }
+  }
+
+  /// Stages at which a segment file for the failed plan may already exist on disk
+  /// (`prepareToRecord()` creates the file; `recorder_init` is included defensively).
+  var mayHaveCreatedPartialFile: Bool {
+    switch self {
+    case .recorderInit, .prepareToRecord, .record: return true
+    default: return false
+    }
+  }
+}
+
+/// Everything one failed `beginSegment` attempt knows. Thrown by `performBeginAttempt`, which does NOT clean up:
+/// cleanup is decided by the caller (`abandonFailedBegin` for Start/Resume, the checkpoint policy for a rollover).
+struct DurableBeginAttemptFailure: Error {
+  let stageId: String
+  let stage: DurableBeginStage
+  let error: Error
+  /// The segment plan of the failed attempt, if one had been allocated (never committed to the manifest).
+  let plan: DurableSegmentPlan?
+  /// The permission guard fails before any audio-session work, so it never deactivates the session.
+  let isPermissionGuard: Bool
+  let beginToFailMs: Double
+}
+
+/// MITIGATION PARAMETERS for the single checkpoint-rollover retry. None of these values is experimentally tuned.
+struct DurableCheckpointRetryPolicy {
+  /// Hard ceiling for the pause before the retry. Do not raise without new evidence.
+  static let maxDelay: TimeInterval = 0.15
+
+  /// Pause before the one retry. 50 ms is roughly two AVAudioSession I/O buffer periods (23 ms observed on the
+  /// target iPad): long enough for an in-flight route/hardware reconfiguration to finish its current cycle, short
+  /// enough to stay near a normal rollover gap (20–65 ms measured, 163 ms worst). It is a defensible mitigation
+  /// parameter, NOT a measured recovery time — no AVAudioSession API reports "ready".
+  static let productionDelay: TimeInterval = 0.05
+
+  /// If the first failed attempt has already pushed the time since the old recorder stopped past this, do not
+  /// retry: a pathological first attempt means the audio stack is blocked, and the normal paused path is safer.
+  /// Chosen as roughly 6x the slowest normal rollover gap observed (163 ms); not empirically tuned.
+  static let productionElapsedBudget: TimeInterval = 1.0
+
+  let delay: TimeInterval
+  let elapsedBudget: TimeInterval
+  /// Blocks the serial recorder-engine queue only (never the main thread). Injected so tests do not really wait.
+  let sleep: (TimeInterval) -> Void
+  let uptime: () -> TimeInterval
+
+  init(
+    delay: TimeInterval = Self.productionDelay,
+    elapsedBudget: TimeInterval = Self.productionElapsedBudget,
+    sleep: @escaping (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
+    uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+  ) {
+    self.delay = min(max(delay, 0), Self.maxDelay)
+    self.elapsedBudget = max(elapsedBudget, 0)
+    self.sleep = sleep
+    self.uptime = uptime
+  }
+}
+
 final class DurableForegroundRecorder {
   /// Production checkpoint cadence for mid-capture durability.
   ///
@@ -202,6 +305,15 @@ final class DurableForegroundRecorder {
   /// Prevents overlapping rollover work on the engine queue.
   private var isCheckpointInProgress = false
 
+  /// Mitigation for a transient failure to open the next segment after a successful checkpoint commit.
+  private let checkpointRetryPolicy: DurableCheckpointRetryPolicy
+  /// When the previous recorder stopped (recording logic: bounds the retry). Not the diagnostic copy below.
+  private var lastSegmentStopUptime: TimeInterval?
+  /// System notifications (interruption / route change) that arrived but have not run on the engine queue yet.
+  /// Written from notification threads, so guarded by its own lock; a retry never proceeds while one is pending.
+  private let pendingSystemEventsLock = NSLock()
+  private var pendingSystemEvents = 0
+
   // ---- Rollover evidence (DIAGNOSTIC ONLY; never read by recording logic) ----
   private let diagnostics: DurableRecorderDiagnostics
   private var diagCheckpointOrdinal = 0
@@ -211,6 +323,7 @@ final class DurableForegroundRecorder {
   private var diagNextSequence: Int?
   private var diagLectureId: String?
   private var diagLastStopUptime: TimeInterval?
+  private var diagLastRecordingUptime: TimeInterval?
 
   init(
     store: DurableRecorderStore,
@@ -219,8 +332,10 @@ final class DurableForegroundRecorder {
     fileInspector: DurableAudioFileInspecting = SystemDurableAudioFileInspector(),
     checkpointInterval: TimeInterval = DurableForegroundRecorder.defaultCheckpointInterval,
     observeSystemNotifications: Bool = true,
+    checkpointRetryPolicy: DurableCheckpointRetryPolicy = DurableCheckpointRetryPolicy(),
     diagnostics: DurableRecorderDiagnostics? = nil
   ) {
+    self.checkpointRetryPolicy = checkpointRetryPolicy
     self.store = store
     self.audioSession = audioSession
     self.captureFactory = captureFactory
@@ -509,9 +624,28 @@ final class DurableForegroundRecorder {
     }
   }
 
+  /// Start / Resume entry point: exactly ONE attempt, then the original failure handling. Never retries — the retry
+  /// exists only inside a checkpoint rollover (`beginCheckpointSegment`).
   private func beginSegment(recordingSessionId: String, resuming: Bool) throws -> DurableRecordingSession {
-    // Evidence only (see DurableRecorderDiagnostics): none of this changes what is attempted, in what order,
-    // or how a failure is handled — every diagnostic call is non-throwing and buffers in memory.
+    defer { diagnostics.flush() }
+    do {
+      return try performBeginAttempt(recordingSessionId: recordingSessionId, resuming: resuming, attempt: 1)
+    } catch let failure as DurableBeginAttemptFailure {
+      abandonFailedBegin(failure, resuming: resuming)
+      throw failure.error
+    }
+  }
+
+  /// ONE attempt to open the next segment. It records evidence and throws `DurableBeginAttemptFailure`, but it does
+  /// NOT clean up after a failure and never retries: what happens next is the caller's policy.
+  ///
+  /// Evidence (`DurableRecorderDiagnostics`) never changes what is attempted, in what order, or how a failure is
+  /// handled — every diagnostic call is non-throwing and buffers in memory.
+  private func performBeginAttempt(
+    recordingSessionId: String,
+    resuming: Bool,
+    attempt: Int
+  ) throws -> DurableRecordingSession {
     let context = isCheckpointInProgress ? "checkpoint" : (resuming ? "resume" : "start")
     let beginUptime = ProcessInfo.processInfo.systemUptime
     if diagOrdinalSessionId != recordingSessionId {
@@ -521,17 +655,20 @@ final class DurableForegroundRecorder {
     if context != "checkpoint" { diagNextSequence = nil }
     var stage = "permission_check"
     var probe = DurableRecorderProbe()
-    defer { if context != "checkpoint" { diagnostics.flush() } }
+    var plan: DurableSegmentPlan?
     diagnostics.emit(sessionId: recordingSessionId, [
-      "kind": "begin_started", "ctx": context, "cp": diagCheckpointOrdinal, "seq": diagNextSequence as Any,
+      "kind": "begin_started", "ctx": context, "cp": diagCheckpointOrdinal, "attempt": attempt,
+      "seq": diagNextSequence as Any,
     ])
     guard audioSession.permissionState == .granted else {
       recordBeginFailure(
-        recordingSessionId: recordingSessionId, context: context, stage: stage, error: DurableRecorderCoreError.microphonePermissionDenied,
-        probe: probe, beginUptime: beginUptime
+        recordingSessionId: recordingSessionId, context: context, attempt: attempt, stage: stage,
+        error: DurableRecorderCoreError.microphonePermissionDenied, plan: nil, probe: probe, beginUptime: beginUptime
       )
-      runtimeState = resuming ? .paused : .ready
-      throw DurableRecorderCoreError.microphonePermissionDenied
+      throw DurableBeginAttemptFailure(
+        stageId: stage, stage: .permissionCheck, error: DurableRecorderCoreError.microphonePermissionDenied,
+        plan: nil, isPermissionGuard: true, beginToFailMs: Self.milliseconds(ProcessInfo.processInfo.systemUptime - beginUptime)
+      )
     }
     do {
       stage = "audio_session"
@@ -539,12 +676,13 @@ final class DurableForegroundRecorder {
       stage = "input_availability_recheck"
       guard audioSession.hasSuitableInput else { throw DurableRecorderCoreError.noAudioInput }
       stage = "segment_plan_create"
-      let plan = try store.createSegmentPlan(recordingSessionId: recordingSessionId)
-      diagNextSequence = plan.sequence
+      let newPlan = try store.createSegmentPlan(recordingSessionId: recordingSessionId)
+      plan = newPlan
+      diagNextSequence = newPlan.sequence
       stage = "recorder_init"
-      let capture = try captureFactory.makeCapture(url: plan.activeURL)
+      let capture = try captureFactory.makeCapture(url: newPlan.activeURL)
       probe.recorderExists = true
-      probe.url = plan.activeRelativePath
+      probe.url = newPlan.activeRelativePath
       stage = "prepare_to_record"
       let prepared = capture.prepareToRecord()
       probe.prepared = prepared
@@ -560,14 +698,16 @@ final class DurableForegroundRecorder {
         throw DurableRecorderCoreError.recorderStartFailed("AVAudioRecorder rejected the recording request.")
       }
       let recordingUptime = ProcessInfo.processInfo.systemUptime
-      activePlan = plan
+      diagLastRecordingUptime = recordingUptime
+      activePlan = newPlan
       activeCapture = capture
       routeAtSegmentStart = audioSession.routeDescription
       stage = "session_transition"
       let session = try store.transitionSession(recordingSessionId: recordingSessionId, to: .recording)
       runtimeState = .recording
       var success: [String: Any] = [
-        "kind": "begin_succeeded", "ctx": context, "cp": diagCheckpointOrdinal, "seq": plan.sequence,
+        "kind": "begin_succeeded", "ctx": context, "cp": diagCheckpointOrdinal, "attempt": attempt,
+        "seq": newPlan.sequence,
         "beginToRecordMs": Self.milliseconds(recordingUptime - beginUptime),
         "route": audioSession.routeDescription,
       ]
@@ -579,30 +719,199 @@ final class DurableForegroundRecorder {
       diagnostics.emit(sessionId: recordingSessionId, success)
       return session
     } catch {
-      // Evidence FIRST, while the session and recorder are exactly as they were at the failure; the original
-      // cleanup below then runs unchanged.
+      // Evidence FIRST, while the session and recorder are exactly as they were at the failure. Cleanup is the
+      // caller's decision (see `abandonFailedBegin` and `beginCheckpointSegment`).
       recordBeginFailure(
-        recordingSessionId: recordingSessionId, context: context, stage: stage, error: error,
-        probe: probe, beginUptime: beginUptime
+        recordingSessionId: recordingSessionId, context: context, attempt: attempt, stage: stage, error: error,
+        plan: plan, probe: probe, beginUptime: beginUptime
       )
+      var stageId = stage
+      if stage == "audio_session" { stageId = "audio_session." + audioSession.lastActivationStage }
+      throw DurableBeginAttemptFailure(
+        stageId: stageId, stage: DurableBeginStage(stageId: stageId), error: error, plan: plan,
+        isPermissionGuard: false,
+        beginToFailMs: Self.milliseconds(ProcessInfo.processInfo.systemUptime - beginUptime)
+      )
+    }
+  }
+
+  /// The original failure handling of `beginSegment`, unchanged and in the original order.
+  private func abandonFailedBegin(_ failure: DurableBeginAttemptFailure, resuming: Bool) {
+    if !failure.isPermissionGuard {
       activeCapture?.stop()
       clearActiveCapture()
       audioSession.deactivate()
-      runtimeState = resuming ? .paused : .ready
-      throw error
     }
+    runtimeState = resuming ? .paused : .ready
   }
 
   private static func milliseconds(_ interval: TimeInterval) -> Double {
     (max(0, interval) * 1_000 * 10).rounded() / 10
   }
 
+  // MARK: Checkpoint rollover: bounded recovery
+
+  private enum CheckpointRetryDecision {
+    case eligible
+    case skipped(String)
+  }
+
+  /// Opens the next segment after a SUCCESSFUL checkpoint commit. One attempt; if it fails for a plausibly transient
+  /// reason and every precondition still holds, exactly ONE more attempt after a short bounded pause. There is no
+  /// loop and no recursion: attempt 1, at most attempt 2, then the original failure handling.
+  ///
+  /// The retry uses the SAME logical sequence (always derived from the committed manifest) with a NEW segment id and
+  /// file plan. Nothing is committed for a failed attempt, so committed audio is never touched.
+  private func beginCheckpointSegment(
+    recordingSessionId: String,
+    previousCommitted: DurableRecordingSegmentMetadata?
+  ) throws {
+    let first: DurableBeginAttemptFailure
+    do {
+      _ = try performBeginAttempt(recordingSessionId: recordingSessionId, resuming: true, attempt: 1)
+      return
+    } catch let failure as DurableBeginAttemptFailure {
+      first = failure
+    }
+
+    let decision = checkpointRetryDecision(
+      recordingSessionId: recordingSessionId, previousCommitted: previousCommitted, first: first
+    )
+    if diagnostics.isEnabled {
+      var event: [String: Any] = [
+        "kind": "retry_decision", "cp": diagCheckpointOrdinal, "stage": first.stageId,
+        "seq": diagNextSequence as Any,
+      ]
+      switch decision {
+      case .eligible: event["eligible"] = true
+      case .skipped(let reason): event["eligible"] = false; event["reason"] = reason
+      }
+      if let stop = lastSegmentStopUptime {
+        event["sinceStopMs"] = Self.milliseconds(checkpointRetryPolicy.uptime() - stop)
+      }
+      diagnostics.emit(sessionId: recordingSessionId, event)
+    }
+    guard case .eligible = decision else {
+      if case .skipped(let reason) = decision {
+        emitEnteredPaused(recordingSessionId: recordingSessionId, cause: "not_retryable", detail: reason, stage: first.stageId)
+      }
+      abandonFailedBegin(first, resuming: true)
+      throw first.error
+    }
+
+    // Attempt-1 leftovers only. The audio session is deliberately NOT deactivated between attempts: attempt 2
+    // re-asserts the same category/activation itself, and deactivating would tear the session down under any other
+    // running I/O for no benefit. If attempt 2 fails, the original failure handling below deactivates as before.
+    activeCapture?.stop()
+    clearActiveCapture()
+    var partialDisposition: String?
+    if first.stage.mayHaveCreatedPartialFile, let plan = first.plan {
+      partialDisposition = store.quarantineFailedPartial(recordingSessionId: recordingSessionId, plan: plan)
+    }
+    let retryDelay = checkpointRetryPolicy.delay
+    if diagnostics.isEnabled {
+      var event: [String: Any] = [
+        "kind": "retry_started", "cp": diagCheckpointOrdinal, "attempt": 2, "seq": diagNextSequence as Any,
+        "stage": first.stageId, "delayMs": Self.milliseconds(retryDelay), "firstAttemptMs": first.beginToFailMs,
+        "error": DurableRecorderDiagnostics.describe(first.error),
+      ]
+      if let plan = first.plan { event["failedPartialPath"] = plan.activeRelativePath }
+      if let partialDisposition { event["failedPartial"] = partialDisposition }
+      diagnostics.emit(sessionId: recordingSessionId, event)
+      // The one place evidence is written mid-rollover: this is the failure path, and the write survives a kill
+      // during the pause below.
+      diagnostics.flush()
+    }
+    if retryDelay > 0 { checkpointRetryPolicy.sleep(retryDelay) }
+
+    // Re-verify after the pause: an interruption or route change may have queued while we waited.
+    if case .skipped(let reason) = checkpointRetryDecision(
+      recordingSessionId: recordingSessionId, previousCommitted: previousCommitted, first: first
+    ) {
+      emitEnteredPaused(recordingSessionId: recordingSessionId, cause: "not_retryable", detail: "after_delay:" + reason, stage: first.stageId)
+      abandonFailedBegin(first, resuming: true)
+      throw first.error
+    }
+
+    do {
+      _ = try performBeginAttempt(recordingSessionId: recordingSessionId, resuming: true, attempt: 2)
+      if diagnostics.isEnabled {
+        var event: [String: Any] = [
+          "kind": "retry_succeeded", "cp": diagCheckpointOrdinal, "attempt": 2, "seq": diagNextSequence as Any,
+          "stage": first.stageId, "delayMs": Self.milliseconds(retryDelay), "firstAttemptMs": first.beginToFailMs,
+          "error": DurableRecorderDiagnostics.describe(first.error),
+        ]
+        if let stop = diagLastStopUptime, let recording = diagLastRecordingUptime {
+          event["stopToRecordMs"] = Self.milliseconds(recording - stop)
+        }
+        if let plan = first.plan { event["failedPartialPath"] = plan.activeRelativePath }
+        diagnostics.emit(sessionId: recordingSessionId, event)
+      }
+    } catch let second as DurableBeginAttemptFailure {
+      if diagnostics.isEnabled {
+        var event: [String: Any] = [
+          "kind": "retry_failed", "cp": diagCheckpointOrdinal, "attempt": 2, "firstStage": first.stageId,
+          "secondStage": second.stageId, "error": DurableRecorderDiagnostics.describe(second.error),
+          "firstError": DurableRecorderDiagnostics.describe(first.error), "delayMs": Self.milliseconds(retryDelay),
+          "firstAttemptMs": first.beginToFailMs,
+        ]
+        if let stop = diagLastStopUptime {
+          event["stopToFailMs"] = Self.milliseconds(ProcessInfo.processInfo.systemUptime - stop)
+        }
+        diagnostics.emit(sessionId: recordingSessionId, event)
+      }
+      emitEnteredPaused(recordingSessionId: recordingSessionId, cause: "retry_failed", detail: nil, stage: second.stageId)
+      abandonFailedBegin(second, resuming: true)
+      throw second.error
+    }
+  }
+
+  private func emitEnteredPaused(recordingSessionId: String, cause: String, detail: String?, stage: String) {
+    guard diagnostics.isEnabled else { return }
+    var event: [String: Any] = [
+      "kind": "entered_paused_state", "cp": diagCheckpointOrdinal, "cause": cause, "stage": stage,
+    ]
+    if let detail { event["detail"] = detail }
+    if let stop = diagLastStopUptime {
+      event["stopToPauseMs"] = Self.milliseconds(ProcessInfo.processInfo.systemUptime - stop)
+    }
+    diagnostics.emit(sessionId: recordingSessionId, event)
+  }
+
+  /// Decides — from structured facts only — whether the one checkpoint retry may run right now.
+  private func checkpointRetryDecision(
+    recordingSessionId: String,
+    previousCommitted: DurableRecordingSegmentMetadata?,
+    first: DurableBeginAttemptFailure
+  ) -> CheckpointRetryDecision {
+    guard first.stage.isCheckpointRetryEligible else { return .skipped("stage_not_retryable") }
+    guard let stopped = lastSegmentStopUptime,
+          checkpointRetryPolicy.uptime() - stopped <= checkpointRetryPolicy.elapsedBudget else {
+      return .skipped("elapsed_budget_exceeded")
+    }
+    guard runtimeState == .recording else { return .skipped("runtime_not_recording") }
+    guard ownedSessionId == recordingSessionId else { return .skipped("ownership_changed") }
+    guard activeCapture == nil, activePlan == nil else { return .skipped("recorder_present") }
+    guard !hasPendingSystemEvents else { return .skipped("system_event_pending") }
+    guard let session = try? store.getSession(recordingSessionId: recordingSessionId),
+          session.state == .recording else { return .skipped("session_not_recording") }
+    guard let previous = previousCommitted,
+          session.segments.contains(where: { $0.segmentId == previous.segmentId && $0.sequence == previous.sequence }),
+          let previousURL = store.segmentFileURL(recordingSessionId: recordingSessionId, relativePath: previous.relativePath),
+          FileManager.default.fileExists(atPath: previousURL.path) else {
+      return .skipped("previous_segment_missing")
+    }
+    return .eligible
+  }
+
   /// DIAGNOSTIC ONLY: one compact, self-describing failure record. Never throws.
   private func recordBeginFailure(
     recordingSessionId: String,
     context: String,
+    attempt: Int,
     stage: String,
     error: Error,
+    plan: DurableSegmentPlan?,
     probe: DurableRecorderProbe,
     beginUptime: TimeInterval
   ) {
@@ -611,7 +920,7 @@ final class DurableForegroundRecorder {
     var resolvedStage = stage
     if stage == "audio_session" { resolvedStage = "audio_session." + audioSession.lastActivationStage }
     var event: [String: Any] = [
-      "kind": "begin_failed", "ctx": context, "cp": diagCheckpointOrdinal, "stage": resolvedStage,
+      "kind": "begin_failed", "ctx": context, "cp": diagCheckpointOrdinal, "attempt": attempt, "stage": resolvedStage,
       "error": DurableRecorderDiagnostics.describe(error),
       "recorder": [
         "exists": probe.recorderExists, "prepared": probe.prepared as Any, "recordReturned": probe.recorded as Any,
@@ -622,6 +931,7 @@ final class DurableForegroundRecorder {
       "route": audioSession.routeDescription,
       "beginToFailMs": Self.milliseconds(now - beginUptime),
     ]
+    if let plan { event["planPath"] = plan.activeRelativePath }
     if let pre = diagRolloverPre { event["pre"] = pre }
     if context == "checkpoint", let stop = diagLastStopUptime { event["stopToFailMs"] = Self.milliseconds(now - stop) }
     if let seq = diagNextSequence { event["seq"] = seq }
@@ -641,6 +951,7 @@ final class DurableForegroundRecorder {
       throw DurableRecorderCoreError.invalidRecorderState("No active segment exists.")
     }
     capture.stop()
+    lastSegmentStopUptime = checkpointRetryPolicy.uptime()
     diagLastStopUptime = ProcessInfo.processInfo.systemUptime
     do {
       let inspection = try fileInspector.inspect(url: plan.activeURL)
@@ -720,9 +1031,12 @@ final class DurableForegroundRecorder {
     // Drop any pending timer for this segment before mutating capture.
     cancelCheckpoint()
 
+    var previousCommitted: DurableRecordingSegmentMetadata?
+    lastSegmentStopUptime = nil
     do {
       let committed = try finalizeActiveSegment(recordingSessionId: recordingSessionId, reason: "checkpoint")
       if let last = committed.segments.max(by: { $0.sequence < $1.sequence }) {
+        previousCommitted = last
         diagNextSequence = last.sequence + 1
         var event: [String: Any] = [
           "kind": "old_segment_committed", "cp": diagCheckpointOrdinal, "oldSeq": last.sequence,
@@ -744,9 +1058,10 @@ final class DurableForegroundRecorder {
     }
 
     do {
-      // Keep the audio session active across the rollover. beginSegment
-      // re-activates if needed and leaves session.state as recording.
-      _ = try beginSegment(recordingSessionId: recordingSessionId, resuming: true)
+      // Keep the audio session active across the rollover. The attempt re-activates if needed and leaves
+      // session.state as recording. A transient failure gets exactly one bounded retry (see
+      // `beginCheckpointSegment`); anything else, or a second failure, lands in the catch below unchanged.
+      try beginCheckpointSegment(recordingSessionId: recordingSessionId, previousCommitted: previousCommitted)
       scheduleCheckpoint()
       // Do not publishStatus: a successful checkpoint must stay invisible to JS
       // so the recording timer is not reset or double-counted.
@@ -939,6 +1254,24 @@ final class DurableForegroundRecorder {
     runtimeState = .idle
   }
 
+  private func noteSystemEventQueued() {
+    pendingSystemEventsLock.lock(); defer { pendingSystemEventsLock.unlock() }
+    pendingSystemEvents += 1
+  }
+
+  private func noteSystemEventHandled() {
+    pendingSystemEventsLock.lock(); defer { pendingSystemEventsLock.unlock() }
+    pendingSystemEvents = max(0, pendingSystemEvents - 1)
+  }
+
+  private var hasPendingSystemEvents: Bool {
+    pendingSystemEventsLock.lock(); defer { pendingSystemEventsLock.unlock() }
+    return pendingSystemEvents > 0
+  }
+
+  /// Test-only: pretend an interruption/route notification is queued behind the current engine work.
+  func simulatePendingSystemEventForTesting() { noteSystemEventQueued() }
+
   private func publishStatus(session: DurableRecordingSession?) -> [String: Any] {
     statusSequence += 1
     let payload = statusDictionary(session: session)
@@ -970,14 +1303,22 @@ final class DurableForegroundRecorder {
       object: nil,
       queue: nil
     ) { [weak self] notification in
-      self?.queue.async { self?.handleInterruption(notification) }
+      self?.noteSystemEventQueued()
+      self?.queue.async {
+        defer { self?.noteSystemEventHandled() }
+        self?.handleInterruption(notification)
+      }
     })
     observers.append(center.addObserver(
       forName: AVAudioSession.routeChangeNotification,
       object: nil,
       queue: nil
     ) { [weak self] notification in
-      self?.queue.async { self?.handleRouteChange(notification) }
+      self?.noteSystemEventQueued()
+      self?.queue.async {
+        defer { self?.noteSystemEventHandled() }
+        self?.handleRouteChange(notification)
+      }
     })
     #endif
   }
@@ -1140,7 +1481,8 @@ final class DurableRecorderDiagnostics {
   }
 
   static func isFailureLine(_ line: String) -> Bool {
-    line.contains("\"kind\":\"begin_failed\"") || line.contains("\"kind\":\"commit_failed\"")
+    ["begin_failed", "commit_failed", "retry_started", "retry_succeeded", "retry_failed", "entered_paused_state"]
+      .contains { line.contains("\"kind\":\"\($0)\"") }
   }
 
   static func uptimeMilliseconds() -> Double {
