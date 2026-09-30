@@ -19,6 +19,9 @@ enum AudioSegmentComposerError: Error {
   case compositionTrackUnavailable
   case exportSessionUnavailable
   case exportFailed(String)
+  /// The export was cancelled on purpose through an `AudioExportCancellation` (for example because the app's
+  /// background-execution time expired). Never produces a partial output that could be mistaken for success.
+  case cancelled
 
   var message: String {
     switch self {
@@ -34,7 +37,35 @@ enum AudioSegmentComposerError: Error {
       return "AVAssetExportSession could not be created."
     case let .exportFailed(reason):
       return reason
+    case .cancelled:
+      return "The export was cancelled."
     }
+  }
+}
+
+/// Lets another thread (e.g. the background-task expiration handler) cancel an in-flight export deterministically.
+/// Safe to call before, during or after the export; cancelling after completion is a no-op.
+final class AudioExportCancellation {
+  private let lock = NSLock()
+  private var exporter: AVAssetExportSession?
+  private var cancelled = false
+
+  var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+
+  func attach(_ exporter: AVAssetExportSession) {
+    lock.lock()
+    self.exporter = exporter
+    let shouldCancel = cancelled
+    lock.unlock()
+    if shouldCancel { exporter.cancelExport() }
+  }
+
+  func cancel() {
+    lock.lock()
+    cancelled = true
+    let exporter = self.exporter
+    lock.unlock()
+    exporter?.cancelExport()
   }
 }
 
@@ -44,7 +75,11 @@ enum AudioSegmentComposer {
   /// `outputURL` as M4A. Throws before any export begins if a source is
   /// missing, has no audio track, or reports a zero/invalid duration, so a
   /// partial composition is never exported.
-  static func compose(orderedSources: [URL], outputURL: URL) async throws {
+  static func compose(
+    orderedSources: [URL],
+    outputURL: URL,
+    cancellation: AudioExportCancellation? = nil
+  ) async throws {
     let composition = AVMutableComposition()
     guard let compositionTrack = composition.addMutableTrack(
       withMediaType: .audio,
@@ -55,6 +90,7 @@ enum AudioSegmentComposer {
 
     var cursor = CMTime.zero
     for sourceURL in orderedSources {
+      if cancellation?.isCancelled == true { throw AudioSegmentComposerError.cancelled }
       guard FileManager.default.fileExists(atPath: sourceURL.path) else {
         throw AudioSegmentComposerError.sourceMissing(sourceURL)
       }
@@ -81,11 +117,15 @@ enum AudioSegmentComposer {
     exporter.outputURL = outputURL
     exporter.outputFileType = .m4a
     exporter.shouldOptimizeForNetworkUse = true
+    if cancellation?.isCancelled == true { throw AudioSegmentComposerError.cancelled }
+    cancellation?.attach(exporter)
     try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
       exporter.exportAsynchronously {
         switch exporter.status {
         case .completed:
           continuation.resume()
+        case .cancelled where cancellation?.isCancelled == true:
+          continuation.resume(throwing: AudioSegmentComposerError.cancelled)
         case .failed, .cancelled:
           continuation.resume(throwing: AudioSegmentComposerError.exportFailed(
             exporter.error?.localizedDescription ?? "The export did not complete."

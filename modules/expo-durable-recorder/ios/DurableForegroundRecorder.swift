@@ -336,6 +336,7 @@ final class DurableForegroundRecorder {
   }
   private func setAppState(_ name: String) {
     appStateLock.lock(); appStateName = name; appStateLock.unlock()
+    DurableRecorderDiagnostics.setSharedAppState(name)
   }
   /// DIAGNOSTIC ONLY: one lifecycle event for the owned session, flushed at once (never inside a rollover window).
   private func emitLifecycle(_ kind: String, _ extra: [String: Any] = [:]) {
@@ -1456,6 +1457,18 @@ final class DurableRecorderDiagnostics {
   init(enabled: Bool, fileURL: @escaping (String) -> URL?) {
     isEnabled = enabled
     self.fileURL = fileURL
+  }
+
+  /// DIAGNOSTIC ONLY: the app's UIApplication state as last announced by UIKit notifications, shared so evidence
+  /// emitted outside the recorder (Finish/export) can carry the same context.
+  private static let sharedAppStateLock = NSLock()
+  private static var sharedAppStateName = "unknown"
+  static func setSharedAppState(_ name: String) {
+    sharedAppStateLock.lock(); sharedAppStateName = name; sharedAppStateLock.unlock()
+  }
+  static var sharedAppState: String {
+    sharedAppStateLock.lock(); defer { sharedAppStateLock.unlock() }
+    return sharedAppStateName
   }
 
   /// Dev builds only (bundle id `com.aydenz.youmilensipad.dev`); the Production bundle never matches.

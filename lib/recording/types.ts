@@ -38,6 +38,11 @@ export type LectureRecorder = {
   pauseRecording: () => Promise<boolean>;
   resumeRecording: () => Promise<boolean>;
   stopRecording: () => Promise<string | null>;
+  /**
+   * Duration of the durable final audio produced by the last successful `stopRecording`, in ms. Native durable engine
+   * only (null otherwise): this — never the JS wall-clock timer — is the lecture's authoritative final duration.
+   */
+  getFinalAudioDurationMillis?: () => number | null;
   leaveRecording: () => Promise<string | null>;
   recoverRecording: () => Promise<boolean>;
   finishRecoverableRecording: () => Promise<string | null>;

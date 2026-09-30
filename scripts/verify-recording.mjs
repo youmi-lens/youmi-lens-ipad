@@ -15,6 +15,8 @@ const passed = await runSteps('Native recording verification', [
   nodeStep('R6 verify gate isolation', 'scripts/r6-verify-gate.test.mjs'),
   nodeStep('native contract (JS <-> Swift)', 'scripts/durable-recorder-contract.test.mjs'),
   nodeStep('exporter (final asset assembly)', 'scripts/durable-recorder-finalization.test.mjs'),
+  nodeStep('Finish background execution (assertion, deterministic export cancel, retry)', 'scripts/durable-finish-background.test.mjs'),
+  nodeStep('final lecture duration authority (durable audio, never wall clock)', 'scripts/recording-final-duration-authority.test.mjs'),
   nodeStep('recovery / resume / discard / relaunch', 'scripts/durable-recorder-recovery.test.mjs'),
   nodeStep('forced-pause status sync', 'scripts/durable-recorder-status-sync.test.mjs'),
   nodeStep('native navigation session lifetime', 'scripts/durable-navigation-lifetime.test.mjs'),

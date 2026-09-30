@@ -26,8 +26,30 @@ public final class ExpoDurableRecorderModule: Module {
     DurableForegroundRecorder(store: try storeResult.get())
   }
   private lazy var exporterResult = Result {
-    DurableFinalAssetExporter(store: try storeResult.get())
+    let exporter = DurableFinalAssetExporter(store: try storeResult.get())
+    exporter.onTrace = { [weak self] sessionId, kind, extra in self?.traceFinish(sessionId, kind, extra) }
+    return exporter
   }
+  /// Keeps the process alive across Finish (stop -> JS hop -> export) so iOS cannot suspend it mid-Finish. See
+  /// `DurableFinishBackgroundAssertion`.
+  private lazy var finishAssertion: DurableFinishBackgroundAssertion = {
+    let assertion = DurableFinishBackgroundAssertion.system()
+    assertion.onTrace = { [weak self] sessionId, kind, extra in self?.traceFinish(sessionId, kind, extra) }
+    assertion.onExpire = { [weak self] sessionId in
+      _ = try? self?.exporterResult.get().cancelExport(recordingSessionId: sessionId, backgroundTimeExpired: true)
+    }
+    return assertion
+  }()
+  private let finishTraceLock = NSLock()
+  private lazy var finishDiagnostics: DurableRecorderDiagnostics? = {
+    guard let store = try? storeResult.get() else { return nil }
+    let diagnostics = DurableRecorderDiagnostics(
+      enabled: DurableRecorderDiagnostics.isDevBundle,
+      fileURL: { store.diagnosticsFileURL(recordingSessionId: $0) }
+    )
+    diagnostics.contextProvider = { ["app": DurableRecorderDiagnostics.sharedAppState] }
+    return diagnostics
+  }()
   private lazy var legacyAudioAssemblyResult = Result { try LegacyAudioAssemblyStore() }
   private var statusBridgeInstalled = false
 
@@ -134,8 +156,22 @@ public final class ExpoDurableRecorderModule: Module {
     }
 
     AsyncFunction("stopRecording") { (input: DurableSessionIdentifierRecord) throws -> [String: Any] in
-      try self.withEngine { engine in
-        try engine.stopRecording(recordingSessionId: input.recordingSessionId)
+      // Hold a background task from BEFORE capture stops until the export finishes (or fails / expires): once the
+      // recorder releases its audio session nothing else keeps a backgrounded app running.
+      self.acquireFinishAssertion(input.recordingSessionId)
+      self.traceFinish(input.recordingSessionId, "finish_stop_begin", [:])
+      do {
+        let status = try self.withEngine { engine in
+          try engine.stopRecording(recordingSessionId: input.recordingSessionId)
+        }
+        self.traceFinish(input.recordingSessionId, "finish_stop_end", ["outcome": "completed"])
+        return status
+      } catch {
+        self.traceFinish(input.recordingSessionId, "finish_stop_end", [
+          "outcome": "failed", "error": DurableRecorderDiagnostics.describe(error),
+        ])
+        self.finishAssertion.release(sessionId: input.recordingSessionId, reason: "stop_failed")
+        throw error
       }
     }
 
@@ -153,6 +189,8 @@ public final class ExpoDurableRecorderModule: Module {
 
     AsyncFunction("exportFinalizedAsset") {
       (input: DurableSessionIdentifierRecord) async throws -> [String: Any] in
+      self.acquireFinishAssertion(input.recordingSessionId)
+      defer { self.finishAssertion.release(sessionId: input.recordingSessionId, reason: "export_finished") }
       do {
         return try await self.exporterResult.get().export(recordingSessionId: input.recordingSessionId)
       } catch let error as DurableRecorderCoreError {
@@ -235,6 +273,33 @@ public final class ExpoDurableRecorderModule: Module {
       }
     }
     #endif
+  }
+
+  /// Acquires the Finish background task unless a Dev-only experiment disabled it (used to reproduce and prove the
+  /// suspension mechanism on a Dev build; the experiment switch is inert in every other bundle).
+  private func acquireFinishAssertion(_ recordingSessionId: String) {
+    if DurableRecorderDiagnostics.isDevBundle, Self.finishBackgroundTaskDisabledByExperiment() {
+      traceFinish(recordingSessionId, "finish_bgtask_disabled_by_experiment", [:])
+      return
+    }
+    finishAssertion.acquire(sessionId: recordingSessionId)
+  }
+
+  private static func finishBackgroundTaskDisabledByExperiment() -> Bool {
+    guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
+          let data = try? Data(contentsOf: documents.appendingPathComponent("recording-finish-experiment.json")),
+          let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+    return object["finishBackgroundTask"] as? Bool == false
+  }
+
+  /// Dev-only Finish-stage evidence (one JSON line per stage in the session's diagnostics.jsonl). Never throws.
+  private func traceFinish(_ sessionId: String, _ kind: String, _ extra: [String: Any]) {
+    guard DurableRecorderDiagnostics.isDevBundle, let diagnostics = finishDiagnostics else { return }
+    finishTraceLock.lock(); defer { finishTraceLock.unlock() }
+    var event = extra
+    event["kind"] = kind
+    diagnostics.emit(sessionId: sessionId, event)
+    diagnostics.flush()
   }
 
   private func withStore<T>(_ operation: (DurableRecorderStore) throws -> T) throws -> T {

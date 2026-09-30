@@ -12,6 +12,7 @@ import {
   finalizeSession,
   getMicrophonePermissionStatus,
   getRecordingStatus,
+  getSession,
   listRecoverableSessions,
   pauseRecording as pauseNative,
   prepareRecording,
@@ -64,6 +65,9 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
   const activeRef = useRef(false);
   const lastStatusSequenceRef = useRef(0);
   const finishingRef = useRef(false);
+  // Duration of the durable final asset (AVFoundation-inspected) from the last successful Finish. The only
+  // authoritative lecture duration for this engine — see resolveFinalLectureDurationMillis.
+  const finalAssetDurationMillisRef = useRef<number | null>(null);
 
   const noteStatusSequence = useCallback((status: DurableRecordingStatus | null | undefined) => {
     if (typeof status?.statusSequence === 'number' && status.statusSequence > lastStatusSequenceRef.current) {
@@ -369,12 +373,31 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
       fail('Nothing has been recorded yet.', 'zero_segment_session');
       return null;
     }
+    finalAssetDurationMillisRef.current = null;
+    const finishStartedAt = Date.now();
+    traceRecordingLifecycle('FINISH_JS_BEGIN', { state: session.state, segments: session.segments.length, appState: AppState.currentState });
     const result = await finalizeAndExportDurableSession(session, noteStatusSequence);
+    traceRecordingLifecycle('FINISH_JS_RESULT', {
+      ok: result.ok, ms: Date.now() - finishStartedAt, appState: AppState.currentState,
+      durationMs: result.ok ? result.durationMs : null,
+    });
     if (!result.ok) {
       finishingRef.current = false;
+      // A failed Finish may already have stopped native capture. Re-read the durable session so the JS timer stops
+      // counting wall-clock time against a recorder that is no longer recording (P0 d184e93f: the stale timer kept
+      // running and was autosaved as the lecture duration).
+      try {
+        const latest = await getSession(session.recordingSessionId);
+        if (latest.state !== 'recording') {
+          applySession(latest); activeRef.current = false; setIsRecording(false); setIsPaused(true);
+        }
+      } catch {
+        // Keep the existing state; the error below is still surfaced.
+      }
       fail('Could not finish the recording.', result.error);
       return null;
     }
+    finalAssetDurationMillisRef.current = result.durationMs;
     applySession(result.session); activeRef.current = false; setIsRecording(false); setIsPaused(false);
     setRecordingUri(result.fileUri);
     logRecordingEvent('native_recording_finalized', {
@@ -464,6 +487,7 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
     engine: 'nativeDurable', permissionChecked, permissionStatus, recoveryChecked, recoverableSession,
     isRecording, isPaused, degradedReason, durationMillis, recordingUri, liveFileUri: null, error, errorDetail,
     requestPermission, startRecording, pauseRecording, resumeRecording, stopRecording, leaveRecording,
+    getFinalAudioDurationMillis: () => finalAssetDurationMillisRef.current,
     recoverRecording, finishRecoverableRecording, discardRecoverableRecording,
     acknowledgeFinalizedOutput,
     // Visibility is screen-local. Keeping this session selected ensures a

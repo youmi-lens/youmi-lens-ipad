@@ -37,6 +37,7 @@ import { useLiveCaptions } from '@/lib/liveCaptions';
 import { getLiveMicStreamStatus, startMicStream, stopMicStream } from '@/lib/liveMicStream';
 import { useRecordingNotes } from '@/lib/recordingNotes';
 import { useData } from '@/lib/store';
+import { resolveFinalLectureDurationMillis } from '@/lib/recording/policy.mjs';
 import { useRolloutEligibility } from '@/lib/recording/useRolloutEligibility';
 import { useLectureRecorder } from '@/lib/useLectureRecorder';
 import { useUnresolvedRecordingGuard } from '@/lib/recording/useUnresolvedRecordingGuard';
@@ -213,6 +214,7 @@ export default function RecordingScreen() {
     pauseRecording,
     resumeRecording,
     stopRecording,
+    getFinalAudioDurationMillis,
     leaveRecording,
     recoverRecording,
     finishRecoverableRecording,
@@ -1108,7 +1110,13 @@ export default function RecordingScreen() {
       );
       return;
     }
-    const savedDuration = Math.max(existing?.durationMillis ?? 0, finalDuration);
+    const savedDuration = resolveFinalLectureDurationMillis({
+      engine: recordingEngine,
+      finalAssetDurationMs: getFinalAudioDurationMillis?.() ?? null,
+      committedDurationMs: null,
+      existingDurationMs: existing?.durationMillis ?? 0,
+      sessionDurationMs: finalDuration,
+    });
     const currentLinks = materialLinksForLecture(pendingLectureId);
     const currentAnnotations = materialAnnotations.filter(
       (annotation) => annotation.lectureId === pendingLectureId && !annotation.deletedAt,
