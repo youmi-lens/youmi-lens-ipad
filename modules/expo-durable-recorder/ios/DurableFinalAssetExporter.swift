@@ -16,6 +16,20 @@ final class DurableFinalAssetExporter {
   /// Evidence hook (Dev diagnostics only): `(sessionId, kind, extra)`. Never affects behaviour.
   var onTrace: ((String, String, [String: Any]) -> Void)?
 
+  /// How the final M4A is built. `packetPreserving` (default) copies the durable AAC packets without re-encoding and
+  /// silently falls back to `reencode` (the original composer) on ANY incompatibility or failure except cancellation.
+  enum Strategy: String {
+    case packetPreserving
+    case reencode
+  }
+  /// Decides the strategy per export. Production always answers `packetPreserving`; a Dev-only switch can force
+  /// `reencode` to A/B the two on the same session.
+  var strategyProvider: () -> Strategy = { .packetPreserving }
+  /// Injectable for tests; the real implementation is `PacketPreservingConcatenator.concatenate`.
+  var packetConcatenator: ([URL], URL, AudioExportCancellation?) async throws -> PacketConcatenationReport = {
+    try await PacketPreservingConcatenator.concatenate(orderedSources: $0, outputURL: $1, cancellation: $2)
+  }
+
   static let backgroundTimeExpiredMessage =
     "The final export was interrupted because the app ran out of background time. "
     + "The recording is safe on this device — open the app and tap Finish again."
@@ -70,13 +84,21 @@ final class DurableFinalAssetExporter {
 
     try store.removeStaleFinalAssetTemporaryFile(plan)
     do {
-      try await AudioSegmentComposer.compose(
-        orderedSources: plan.sourceURLs,
-        outputURL: plan.temporaryURL,
-        cancellation: cancellation
+      let builtWithoutReencode = try await buildPacketPreservingIfEnabled(
+        plan: plan, recordingSessionId: recordingSessionId, cancellation: cancellation
       )
+      if !builtWithoutReencode {
+        try await AudioSegmentComposer.compose(
+          orderedSources: plan.sourceURLs,
+          outputURL: plan.temporaryURL,
+          cancellation: cancellation
+        )
+      }
     } catch AudioSegmentComposerError.sourceMissing {
       throw DurableRecorderCoreError.finalAssetMissing
+    } catch PacketConcatenationError.cancelled {
+      onTrace?(recordingSessionId, "finish_export_cancelled", ["expired": wasExpired(recordingSessionId)])
+      throw DurableRecorderCoreError.finalAssetExportFailed(Self.backgroundTimeExpiredMessage)
     } catch AudioSegmentComposerError.cancelled {
       // Deterministic, honest failure: committed segments are untouched and the partial temporary file is removed on
       // the next attempt (removeStaleFinalAssetTemporaryFile). Finish can simply be retried.
@@ -95,6 +117,65 @@ final class DurableFinalAssetExporter {
       sourceSegmentIds: sourceIds
     )
     return result(session: session, url: plan.finalURL)
+  }
+
+  /// Returns true when the packet-preserving build produced `plan.temporaryURL`. Returns false (temp file removed) when
+  /// the strategy is `reencode` or the fast path is not applicable/failed, so the caller runs the original composer.
+  /// Only cancellation propagates; the fallback never hides a real data problem because the composer validates sources
+  /// exactly as before.
+  private func buildPacketPreservingIfEnabled(
+    plan: DurableFinalAssetPlan,
+    recordingSessionId: String,
+    cancellation: AudioExportCancellation
+  ) async throws -> Bool {
+    guard strategyProvider() == .packetPreserving else { return false }
+    let startedAt = Date()
+    do {
+      let report = try await packetConcatenator(plan.sourceURLs, plan.temporaryURL, cancellation)
+      onTrace?(recordingSessionId, "finish_export_fast_path", [
+        "outcome": "completed", "ms": Int(Date().timeIntervalSince(startedAt) * 1_000),
+        "segments": report.segmentCount, "packets": report.packetCount, "seamFrames": report.seamFramesInserted,
+      ])
+      return true
+    } catch PacketConcatenationError.cancelled {
+      try? FileManager.default.removeItem(at: plan.temporaryURL)
+      throw PacketConcatenationError.cancelled
+    } catch {
+      try? FileManager.default.removeItem(at: plan.temporaryURL)
+      onTrace?(recordingSessionId, "finish_export_fast_path", [
+        "outcome": "fallback_to_reencode", "ms": Int(Date().timeIntervalSince(startedAt) * 1_000),
+        "reason": (error as? PacketConcatenationError)?.message ?? String(describing: error),
+      ])
+      return false
+    }
+  }
+
+  /// DEV BENCHMARK ONLY: builds the same session's final audio with `strategy` into `scratchURL`, never touching
+  /// `final/` or session metadata, and reports wall time, size and the decoded frame count.
+  func benchmark(recordingSessionId: String, strategy: Strategy, scratchURL: URL) async throws -> [String: Any] {
+    let plan = try store.finalAssetPlan(recordingSessionId: recordingSessionId)
+    try? FileManager.default.removeItem(at: scratchURL)
+    defer { try? FileManager.default.removeItem(at: scratchURL) }
+    let started = ProcessInfo.processInfo.systemUptime
+    var extra: [String: Any] = [:]
+    switch strategy {
+    case .packetPreserving:
+      let report = try await PacketPreservingConcatenator.concatenate(
+        orderedSources: plan.sourceURLs, outputURL: scratchURL, cancellation: nil
+      )
+      extra["packets"] = report.packetCount
+      extra["seamFrames"] = report.seamFramesInserted
+    case .reencode:
+      try await AudioSegmentComposer.compose(orderedSources: plan.sourceURLs, outputURL: scratchURL, cancellation: nil)
+    }
+    let seconds = ProcessInfo.processInfo.systemUptime - started
+    let inspection = try inspector.inspect(url: scratchURL)
+    var result: [String: Any] = [
+      "strategy": strategy.rawValue, "seconds": (seconds * 1_000).rounded() / 1_000,
+      "bytes": inspection.byteLength, "durationMs": inspection.durationMs, "segments": plan.sourceURLs.count,
+    ]
+    for (key, value) in extra { result[key] = value }
+    return result
   }
 
   private func result(session: DurableRecordingSession, url: URL) -> [String: Any] {

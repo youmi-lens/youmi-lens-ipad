@@ -1,4 +1,7 @@
 import ExpoModulesCore
+#if os(iOS)
+import UIKit
+#endif
 
 private struct CreateDurableSessionRecord: Record {
   @Field var lectureId: String
@@ -28,6 +31,9 @@ public final class ExpoDurableRecorderModule: Module {
   private lazy var exporterResult = Result {
     let exporter = DurableFinalAssetExporter(store: try storeResult.get())
     exporter.onTrace = { [weak self] sessionId, kind, extra in self?.traceFinish(sessionId, kind, extra) }
+    // Production always uses the default (packet-preserving with automatic re-encode fallback). Only a Dev bundle
+    // can force `reencode` (to A/B the two strategies on the same session).
+    exporter.strategyProvider = { Self.devFinalExportStrategy() ?? .packetPreserving }
     return exporter
   }
   /// Keeps the process alive across Finish (stop -> JS hop -> export) so iOS cannot suspend it mid-Finish. See
@@ -55,6 +61,12 @@ public final class ExpoDurableRecorderModule: Module {
 
   public func definition() -> ModuleDefinition {
     Name("ExpoDurableRecorder")
+
+    // DEV-ONLY export benchmark (inert in every other bundle): runs when `Documents/recording-export-bench.json`
+    // carries a request id that has no result yet. Never touches `final/` or session metadata.
+    OnCreate {
+      self.runDevExportBenchmarkIfRequested()
+    }
 
     Events("onRecordingStatusChange")
 
@@ -290,6 +302,63 @@ public final class ExpoDurableRecorderModule: Module {
           let data = try? Data(contentsOf: documents.appendingPathComponent("recording-finish-experiment.json")),
           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
     return object["finishBackgroundTask"] as? Bool == false
+  }
+
+  /// Dev-only: `{"finalExportStrategy": "reencode"}` in Documents/recording-finish-experiment.json forces the original
+  /// re-encoding export. nil (always, outside a Dev bundle) means the default strategy.
+  private static func devFinalExportStrategy() -> DurableFinalAssetExporter.Strategy? {
+    guard DurableRecorderDiagnostics.isDevBundle,
+          let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
+          let data = try? Data(contentsOf: documents.appendingPathComponent("recording-finish-experiment.json")),
+          let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let raw = object["finalExportStrategy"] as? String else { return nil }
+    return DurableFinalAssetExporter.Strategy(rawValue: raw)
+  }
+
+  /// DEV BENCHMARK ONLY. Request: {"id": 1, "sessionId": "<uuid>", "runs": ["reencode","packetPreserving", ...]}.
+  /// Result: Documents/recording-export-bench-result.json ({"id", "runs": [{strategy, seconds, bytes, durationMs, ...}]}).
+  private func runDevExportBenchmarkIfRequested() {
+    guard DurableRecorderDiagnostics.isDevBundle,
+          let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
+          let data = try? Data(contentsOf: documents.appendingPathComponent("recording-export-bench.json")),
+          let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let id = request["id"] as? Int,
+          let sessionId = request["sessionId"] as? String,
+          let runs = request["runs"] as? [String] else { return }
+    let resultURL = documents.appendingPathComponent("recording-export-bench-result.json")
+    if let existing = try? Data(contentsOf: resultURL),
+       let object = try? JSONSerialization.jsonObject(with: existing) as? [String: Any],
+       object["id"] as? Int == id { return }
+    Task.detached(priority: .userInitiated) { [weak self] in
+      guard let self, let exporter = try? self.exporterResult.get() else { return }
+      var results: [[String: Any]] = []
+      for raw in runs {
+        guard let strategy = DurableFinalAssetExporter.Strategy(rawValue: raw) else { continue }
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("export-bench-\(UUID().uuidString).m4a")
+        let appState = await MainActor.run { () -> String in
+          #if os(iOS)
+          switch UIApplication.shared.applicationState {
+          case .active: return "active"
+          case .inactive: return "inactive"
+          default: return "background"
+          }
+          #else
+          return "n/a"
+          #endif
+        }
+        do {
+          var run = try await exporter.benchmark(recordingSessionId: sessionId, strategy: strategy, scratchURL: scratch)
+          run["appStateAtStart"] = appState
+          results.append(run)
+        } catch {
+          results.append(["strategy": raw, "error": String(describing: error), "appStateAtStart": appState])
+        }
+        let payload: [String: Any] = ["id": id, "sessionId": sessionId, "runs": results, "complete": results.count == runs.count]
+        if let out = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted]) {
+          try? out.write(to: resultURL, options: .atomic)
+        }
+      }
+    }
   }
 
   /// Dev-only Finish-stage evidence (one JSON line per stage in the session's diagnostics.jsonl). Never throws.
