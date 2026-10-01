@@ -201,6 +201,15 @@ async function fetchJson<T>(url: string, accessToken: string, init?: RequestInit
   }, SUBSCRIPTION_FETCH_TIMEOUT_MS, 'backend_response', () => new BoundedFetchTimeoutError('iap_backend'));
 }
 
+/** The one waiting purchase attempt (`SubscriptionService.pending`); also used as that attempt's identity. */
+type PendingPurchase = {
+  productId: string;
+  accountId: string;
+  startedAt: number;
+  resolve: (purchase: Purchase) => void;
+  reject: (error: Error) => void;
+};
+
 class SubscriptionService {
   private connected = false;
   private connectionPromise: Promise<void> | null = null;
@@ -216,13 +225,7 @@ class SubscriptionService {
   private lateVerifications = new Map<string, Promise<void>>();
   private updateSubscription: { remove: () => void } | null = null;
   private errorSubscription: { remove: () => void } | null = null;
-  private pending: {
-    productId: string;
-    accountId: string;
-    startedAt: number;
-    resolve: (purchase: Purchase) => void;
-    reject: (error: Error) => void;
-  } | null = null;
+  private pending: PendingPurchase | null = null;
 
   private async connect() {
     if (Platform.OS !== 'ios') throw new Error('Subscriptions are available on iPad.');
@@ -273,7 +276,9 @@ class SubscriptionService {
       } else {
         if (pending) logDiag('transaction_ignored_wrong_attempt');
         this.settleFromRememberedOwnershipRejection(purchase);
-        this.reconcileLateTransaction(purchase);
+        // `pending` is the attempt that was waiting when StoreKit delivered this transaction. If its late verification
+        // ends in a definitive ownership rejection, that same attempt is ended with it (see reconcileLateTransaction).
+        this.reconcileLateTransaction(purchase, pending);
       }
     });
     this.errorSubscription = purchaseErrorListener((error) => {
@@ -315,10 +320,12 @@ class SubscriptionService {
    * Ends the waiting purchase attempt with a previously remembered ownership rejection. Applies only when an attempt
    * for the SAME product is pending and this exact transaction (or its original-transaction lineage) was definitively
    * rejected for the SAME account inside the TTL. It never grants anything and never touches any other duplicate.
+   * When `onlyAttempt` is given, only that exact attempt may be settled (a newer attempt, or none, is left alone).
    */
-  private settleFromRememberedOwnershipRejection(purchase: Purchase): boolean {
+  private settleFromRememberedOwnershipRejection(purchase: Purchase, onlyAttempt?: PendingPurchase | null): boolean {
     const pending = this.pending;
     if (!pending || purchase.productId !== pending.productId) return false;
+    if (onlyAttempt !== undefined && pending !== onlyAttempt) return false;
     const now = Date.now();
     for (const key of this.ownershipRejectionKeys(pending.accountId, purchase)) {
       const entry = this.ownershipRejections.get(key);
@@ -331,7 +338,14 @@ class SubscriptionService {
     return false;
   }
 
-  private reconcileLateTransaction(purchase: Purchase) {
+  /**
+   * `attempt` is the purchase attempt that was waiting when StoreKit delivered `purchase` (null when it was delivered
+   * with no attempt waiting, or replayed from the deferred set). It is used for exactly one thing: if the backend answers
+   * this transaction with a definitive ownership rejection, that same attempt — same product, same account, still
+   * waiting — is ended with the existing remembered result instead of waiting for StoreKit to say something else.
+   * Reconciliation otherwise stays independent of the UI attempt.
+   */
+  private reconcileLateTransaction(purchase: Purchase, attempt: PendingPurchase | null = null) {
     logDiag('late_transaction_received');
     const id = transactionId(purchase);
     const context = this.verificationContext;
@@ -356,6 +370,7 @@ class SubscriptionService {
       // Reconcile account state independently. This never resolves, rejects,
       // or shows success for an unrelated active UI purchase attempt.
       if (verified.ok) await this.getEntitlement(context.accessToken);
+      else if (attempt) this.settleFromRememberedOwnershipRejection(purchase, attempt);
     })().catch(() => {
       logDiag('verify_failed', { reason: 'late_reconciliation' });
     }).finally(() => {
