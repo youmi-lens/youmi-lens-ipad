@@ -23,6 +23,7 @@ export function useLegacyLectureRecorder(enabled: boolean): LectureRecorder {
   const [permissionStatus, setPermissionStatus] = useState<RecorderPermission>('undetermined');
   const [isPaused, setIsPaused] = useState(false);
   const [recordingUri, setRecordingUri] = useState<string | null>(null);
+  const [liveFileUri, setLiveFileUri] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
   const activeRef = useRef(false);
@@ -75,6 +76,9 @@ export function useLegacyLectureRecorder(enabled: boolean): LectureRecorder {
       await recorder.prepareToRecordAsync();
       recorder.record();
       activeRef.current = true; setIsPaused(false); setRecordingUri(null);
+      // expo-audio assigns its output URI at preparation time. Pause durability
+      // must copy these current bytes before a stop/leave lifecycle boundary.
+      setLiveFileUri(recorder.uri || null);
       return true;
     } catch (startError) {
       const detail = startError instanceof Error ? startError.message : String(startError);
@@ -95,17 +99,43 @@ export function useLegacyLectureRecorder(enabled: boolean): LectureRecorder {
   }, [enabled, recorder]);
 
   const pauseRecording = useCallback(async () => {
-    try { recorder.pause(); setIsPaused(true); }
-    catch { setError('Could not pause the recording.'); }
+    try {
+      // expo-audio's pause() intentionally leaves AVAudioRecorder's M4A
+      // container open.  An open M4A has no final moov atom, so copying it
+      // cannot create a recoverable checkpoint.  A legacy "Pause" is thus a
+      // segment boundary: stop finalizes this segment before the caller
+      // promotes it into lecture-owned storage.  Resume prepares a new file;
+      // the recording screen preserves both files instead of overwriting the
+      // first one.
+      await recorder.stop();
+      activeRef.current = false;
+      const uri = recorder.uri ?? null;
+      setRecordingUri(uri);
+      setLiveFileUri(uri);
+      setIsPaused(true);
+      return Boolean(uri);
+    }
+    catch { setError('Could not pause the recording.'); return false; }
   }, [recorder]);
   const resumeRecording = useCallback(async () => {
-    try { recorder.record(); setIsPaused(false); }
-    catch { setError('Could not resume the recording.'); }
+    try {
+      // A stopped AVAudioRecorder cannot append safely to its finalized M4A.
+      // Start a distinct segment; app/recording.tsx owns its ordered assembly.
+      await recorder.prepareToRecordAsync();
+      recorder.record();
+      activeRef.current = true;
+      setRecordingUri(null);
+      setLiveFileUri(recorder.uri || null);
+      setIsPaused(false);
+      return true;
+    }
+    catch { setError('Could not resume the recording.'); return false; }
   }, [recorder]);
   const stopRecording = useCallback(async () => {
     try {
       await recorder.stop(); activeRef.current = false; setIsPaused(false);
       const uri = recorder.uri ?? null; setRecordingUri(uri);
+      setLiveFileUri(null);
       await setAudioModeAsync({
         playsInSilentMode: true,
         allowsRecording: false,
@@ -122,7 +152,8 @@ export function useLegacyLectureRecorder(enabled: boolean): LectureRecorder {
   return {
     engine: 'legacy', permissionChecked, permissionStatus, recoveryChecked: true,
     recoverableSession: null, isRecording: recorderState.isRecording, isPaused,
-    durationMillis: recorderState.durationMillis, recordingUri, error, errorDetail,
+    degradedReason: null,
+    durationMillis: recorderState.durationMillis, recordingUri, liveFileUri, error, errorDetail,
     requestPermission, startRecording, pauseRecording, resumeRecording, stopRecording,
     leaveRecording: stopRecording,
     recoverRecording: async () => false,

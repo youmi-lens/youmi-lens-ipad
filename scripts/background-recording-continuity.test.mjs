@@ -25,7 +25,16 @@ assert.deepEqual(appConfig.expo.ios.infoPlist.UIBackgroundModes, ['audio']);
 
 assert.match(recorder, /setCategory\(\.record, mode: \.default, options: \[\.allowBluetoothHFP\]\)/);
 assert.match(recorder, /try session\.setActive\(true\)/);
-assert.doesNotMatch(recorder, /UIApplication\.didEnterBackgroundNotification/);
+// Backgrounding must never pause/stop/finalize the recorder. The ONLY UIApplication observers allowed are:
+//  - Dev-diagnostics-gated app-state labels (setAppState / emitLifecycle only), and
+//  - didBecomeActive, which only runs the one bounded auto-recovery of a recorder-initiated protective pause.
+const observerBlock = recorder.slice(recorder.indexOf('private func registerObservers()'), recorder.indexOf('private func handleInterruption'));
+const appObservers = [...observerBlock.matchAll(/UIApplication\.(\w+)Notification/g)].map((m) => m[1]);
+assert.deepEqual([...new Set(appObservers)].sort(), ['didBecomeActive', 'didEnterBackground', 'willEnterForeground', 'willResignActive']);
+const backgroundEntry = observerBlock.slice(observerBlock.indexOf('let appEvents'), observerBlock.indexOf('#endif', observerBlock.indexOf('let appEvents')));
+assert.doesNotMatch(backgroundEntry, /handleForcedPause|pauseRecording|stopRecording|finalizeActiveSegment|cancelCheckpoint/, 'app-state observers never touch the recorder');
+assert.match(observerBlock, /if diagnostics\.isEnabled \{[\s\S]*?let appEvents/, 'background/resign labels are Dev-diagnostics only');
+assert.match(observerBlock, /UIApplication\.didBecomeActiveNotification, object: nil, queue: nil\s*\n\s*\) \{ \[weak self\] _ in\s*\n\s*self\?\.queue\.async \{ self\?\.attemptAutomaticRecoveryAfterProtectivePause\(\) \}/);
 assert.doesNotMatch(recorder, /application_backgrounded/);
 assert.match(recorder, /AVAudioSession\.interruptionNotification/);
 assert.match(recorder, /AVAudioSession\.routeChangeNotification/);

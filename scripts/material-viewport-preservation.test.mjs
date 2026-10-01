@@ -101,10 +101,11 @@ check('both .ended and .cancelled/.failed restore normal finger pan/pinch immedi
   const endedIdx = handlePencilGesture.indexOf('case .ended:');
   const cancelledIdx = handlePencilGesture.indexOf('case .cancelled, .failed:');
   const endedBody = handlePencilGesture.slice(endedIdx, cancelledIdx);
-  assert.match(endedBody, /^\s*case \.ended:\s*\n\s*setNonPencilGesturesEnabled\(true\)/, '.ended restores unconditionally, before branching on tool mode');
+  // A shape-handle drag begun with a drawing tool restores in its OWN branch and returns; every other path restores first.
+  assert.match(endedBody, /^\s*case \.ended:\s*\n(?:\s*if isDraggingShapeHandle \{[\s\S]*?isDraggingShapeHandle = false\s*\n\s*setNonPencilGesturesEnabled\(true\)\s*\n\s*return\s*\n\s*\}\s*\n)?\s*setNonPencilGesturesEnabled\(true\)/, '.ended restores unconditionally, before branching on tool mode');
   const defaultIdx = handlePencilGesture.indexOf('default:');
   const cancelledBody = handlePencilGesture.slice(cancelledIdx, defaultIdx);
-  assert.match(cancelledBody, /^\s*case \.cancelled, \.failed:\s*\n\s*setNonPencilGesturesEnabled\(true\)/, '.cancelled/.failed also restores unconditionally');
+  assert.match(cancelledBody, /^\s*case \.cancelled, \.failed:\s*\n(?:\s*if isDraggingShapeHandle \{[\s\S]*?isDraggingShapeHandle = false\s*\n\s*setNonPencilGesturesEnabled\(true\)\s*\n\s*return\s*\n\s*\}\s*\n)?\s*setNonPencilGesturesEnabled\(true\)/, '.cancelled/.failed also restores unconditionally');
 });
 
 check('this does not touch the existing persistent mode-level allowedTouchTypes restriction (finger pan while a tool is selected)', () => {

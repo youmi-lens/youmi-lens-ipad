@@ -72,11 +72,15 @@ check('the routing decision is unconditional on id format — not inside a .catc
   assert.match(beforeFirstSupabaseCall, /CANONICAL_COURSE_ID_RE\.test/);
 });
 
-console.log('2 — canonical (UUID) Course delete is byte-for-byte the pre-existing UPDATE path');
-check('canonical branch still only UPDATEs courses, with the original retry-minimal fallback', () => {
-  assert.match(writeCourseDeletion, /\.update\(\{ deleted_at: deletedAt, deletion_updated_at: now, updated_at: now \}\)/);
-  assert.match(writeCourseDeletion, /\.update\(\{ deleted_at: deletedAt \}\)/); // minimal retry, unchanged
+console.log('2 — canonical (UUID) Course delete still only UPDATEs courses, now with a real freshness clock');
+check('canonical branch attempts the full freshness-clock payload first (deleted_at + deletion_updated_at + updated_at)', () => {
+  assert.match(writeCourseDeletion, /attempt\(\{ deleted_at: deletedAt, deletion_updated_at: now, updated_at: now \}, 2\)/);
+  assert.match(writeCourseDeletion, /\.update\(payload\)/);
   assert.match(writeCourseDeletion, /\.eq\('id', courseId\)\s*\.eq\('user_id', userId\)/);
+});
+check('a project genuinely missing one of those columns strips only that column and retries — never both unconditionally', () => {
+  assert.match(writeCourseDeletion, /stripUnknownColumnFromPatch\(payload, error\.message\)/);
+  assert.match(writeCourseDeletion, /attempt\(reduced, tries - 1\)/);
 });
 check('canonical branch never inserts — a UUID course delete cannot create a second row', () => {
   const canonicalOnly = writeCourseDeletion.slice(writeCourseDeletion.indexOf('void supabase'));
@@ -120,18 +124,35 @@ check('cloud courses (step 1) are reserved by id AND name regardless of deletion
   assert.match(mergeStep1, /cloudCourseIds\.add\(cr\.id\)/);
   assert.match(mergeStep1, /addCourse\(/);
 });
-check('legacy name-derivation (step 2) skips any name already reserved in step 1, unconditionally', () => {
-  assert.match(mergeStep2, /if \(coursesByName\.has\(nameKey\)\) continue;/);
+check('legacy name-derivation (step 2) skips any name already reserved by an ACTIVE step-1 course', () => {
+  // Was unconditional (coursesByName.has, populated regardless of deletion
+  // state) — that let a DELETED cloud course's name-reservation silently
+  // block (and, worse, on the read side, absorb) an active legacy recording
+  // sharing its name. See course-name-collision-ownership.test.mjs: a
+  // soft-deleted course must never claim a name slot, so this guard is now
+  // scoped to active reservations only — a deleted cloud course no longer
+  // prevents step 2 from deriving a legitimate active course for that name.
+  assert.match(mergeStep2, /if \(hasActiveCourseByName\(nameKey\)\) continue;/);
 });
 
-console.log('5 — call sites pass the Course name through, and canonical Course lifecycle is untouched');
-check('deleteCourse resolves the name from local state and passes it to writeCourseDeletion', () => {
-  assert.match(deleteCourseFn, /const courseName = coursesRef\.current\.find\(\(c\) => c\.id === id\)\?\.name/);
-  assert.match(deleteCourseFn, /writeCourseDeletion\(currentUserId, id, courseName, now, now\)/);
+console.log('5 — the explicit delete/restore actions now use the UUID-keyed sync path; writeCourseDeletion stays live for its one remaining caller');
+check('deleteCourse (explicit user action) is UUID-keyed via syncCourseDeletion, not writeCourseDeletion — see course-deletion-confirm-timestamp.test.mjs (#6)', () => {
+  // Release A (#6): deleteCourse/restoreCourse's own confirmation used to be a
+  // byte-identical timestamp compare through writeCourseDeletion, which never
+  // confirmed a real write (Z vs +00:00 — see course-deletion-confirm-timestamp
+  // .test.mjs). syncCourseDeletion supersedes it for these two explicit,
+  // UUID-only actions; this file's sections 1-4 above are untouched — legacy
+  // (synthetic-id) Courses have no UUID and are unaffected by that fix.
+  assert.match(deleteCourseFn, /void syncCourseDeletion\(id, now, now\)/);
+  assert.doesNotMatch(deleteCourseFn, /writeCourseDeletion\(/);
 });
-check('restoreCourse resolves the name from local state and passes it to writeCourseDeletion', () => {
-  assert.match(restoreCourseFn, /const courseName = coursesRef\.current\.find\(\(c\) => c\.id === id\)\?\.name/);
-  assert.match(restoreCourseFn, /writeCourseDeletion\(currentUserId, id, courseName, null, now\)/);
+check('restoreCourse (explicit user action) is UUID-keyed via syncCourseDeletion, not writeCourseDeletion', () => {
+  assert.match(restoreCourseFn, /await syncCourseDeletion\(id, null, now\)/);
+  assert.doesNotMatch(restoreCourseFn, /writeCourseDeletion\(/);
+});
+check('writeCourseDeletion is not dead code: restoreLecture still routes its own course-side-effect through it, unchanged', () => {
+  const restoreLectureFn = store.slice(store.indexOf('const restoreLecture = useCallback'), store.indexOf('const permanentlyDeleteCourse'));
+  assert.match(restoreLectureFn, /writeCourseDeletion\(currentUserId, target\.courseId, course\.name, null, now\)/);
 });
 check('createCourse — the "delete then recreate with the same name" path — is unmodified by this fix', () => {
   assert.match(createCourseFn, /id: makeUuid\(\)/);

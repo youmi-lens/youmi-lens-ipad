@@ -81,18 +81,18 @@ check('the grid has no whole-collection invisible style', () => {
 });
 
 check('the store commits local soft-delete before starting its cloud write', () => {
-  const remove = store.slice(store.indexOf('const deleteCourse ='), store.indexOf('const restoreCourse ='));
+  const remove = store.slice(store.indexOf('const deleteCourse ='), store.indexOf('const retryCourseDeletion ='));
   const localCommit = remove.indexOf('setCourses((prev) =>');
-  const remoteWrite = remove.indexOf('writeCourseDeletion(currentUserId, id, courseName, now, now)');
+  const remoteWrite = remove.indexOf('syncCourseDeletion(id, now, now)');
   assert.ok(localCommit >= 0 && remoteWrite > localCommit, 'local state must commit before remote sync');
-  assert.equal(/await\s+writeCourseDeletion/.test(remove), false, 'UI must never wait for cloud deletion');
+  assert.equal(/await\s+syncCourseDeletion/.test(remove), false, 'UI must never wait for cloud deletion');
 });
 
 check('create and delete both mutate the same continuously-rendered array', () => {
   assert.match(courses, /courses\.length/);
   assert.match(courses, /courses\.map\(\(course, index\)/);
   assert.match(store, /setCourses\(\(prev\) => \[\.\.\.prev, course\]\)/);
-  assert.match(store, /c\.id === id \? \{ \.\.\.c, deletedAt:/);
+  assert.match(store, /c\.id === id\s*\? \{ \.\.\.c, deletedAt:/);
 });
 
 console.log(`\ncourses mutation visibility: ${passed} checks passed`);

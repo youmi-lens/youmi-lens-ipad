@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Animated,
@@ -37,14 +37,21 @@ import { useLiveCaptions } from '@/lib/liveCaptions';
 import { getLiveMicStreamStatus, startMicStream, stopMicStream } from '@/lib/liveMicStream';
 import { useRecordingNotes } from '@/lib/recordingNotes';
 import { useData } from '@/lib/store';
+import { resolveFinalLectureDurationMillis } from '@/lib/recording/policy.mjs';
 import { useRolloutEligibility } from '@/lib/recording/useRolloutEligibility';
 import { useLectureRecorder } from '@/lib/useLectureRecorder';
+import { useUnresolvedRecordingGuard } from '@/lib/recording/useUnresolvedRecordingGuard';
 import { resolveCaptionAreaState, recordingControlsEnabled } from '@/lib/lectureStartupState.mjs';
 import {
   captionsToTranscript,
   hasMeaningfulRecordingContent,
 } from '@/lib/recordingPersistence.mjs';
-import { persistLectureLocalAudio, persistLectureResumeSegment } from '@/lib/lectureLocalAudio';
+import {
+  isVerifiedDurableLectureAudio,
+  localAudioFileHasBytes,
+  persistLectureLocalAudio,
+  persistLectureResumeSegment,
+} from '@/lib/lectureLocalAudio';
 import {
   LEGACY_RESUME_ASSEMBLY_REQUIRED,
   planLegacyResumeFinalization,
@@ -68,6 +75,7 @@ export default function RecordingScreen() {
   const rollout = useRolloutEligibility({ userId: user?.id ?? null, authLoading });
   const {
     getCourse,
+    loaded: dataLoaded,
     createLecture,
     saveInProgressLecture,
     updateLecture,
@@ -111,11 +119,85 @@ export default function RecordingScreen() {
       setSourceLanguage(pair.sourceLanguage); setTranslationLanguage(pair.translationLanguage);
     }).finally(() => setContentPreferencesLoaded(true));
   }, [resumeLecture]);
-  const course = getCourse(resumeLecture?.courseId ?? params.courseId);
+  // Canonical id only — never title/name (same discipline as the same-name course ownership bugs this
+  // app has already been burned by once). Scopes unresolved-recording recovery to the CURRENT course.
+  const currentCourseId = resumeLecture?.courseId ?? params.courseId ?? '';
+  const course = getCourse(currentCourseId);
   const courseName = course?.name ?? t('recording.defaultCourse');
   // One stable lecture identity owns both the local draft and (when gated on)
   // exactly one native durable recording session.
   const [pendingLectureId] = useState(() => resumeLecture?.id ?? reserveLectureId());
+
+  // P0 identity-safety guard: only meaningful for the param-less "start
+  // fresh" path (no explicit lectureId) — an explicit reopen is always
+  // authoritative and already goes through the normal per-lecture recovery
+  // lookup below.  `lectures` is already the DataContext's current-account,
+  // non-deleted-course/non-deleted-lecture view; requiring in_progress here
+  // makes that exact ID set the sole authority for automatic recovery.
+  const activeRecoveryLectureIds = useMemo(
+    () => lectures.filter((lecture) => lecture.status === 'in_progress').map((lecture) => lecture.id),
+    [lectures],
+  );
+  const unresolvedGuard = useUnresolvedRecordingGuard(
+    dataLoaded && !isResume && !isGuest && !visualFixture,
+    pendingLectureId,
+    activeRecoveryLectureIds,
+    currentCourseId,
+    lectures,
+  );
+  // P0 (2026-09-11): a single recoverable session used to silently hijack EVERY param-less "Start New
+  // Lecture" tap with no user-facing choice. Recording safety (never orphan real audio) and user intent
+  // (let them actually start something new) are separate concerns: once the owner explicitly chooses
+  // "Start New Recording" for a matched session in this mount, that match must never re-block or
+  // re-redirect this screen. The recoverable lecture itself is NOT touched — it stays exactly as
+  // recoverable as before, reachable from its own course page.
+  const [dismissedSingleMatchId, setDismissedSingleMatchId] = useState<string | null>(null);
+  const singleMatchPendingChoice =
+    unresolvedGuard.singleMatch !== null && unresolvedGuard.singleMatch.lectureId !== dismissedSingleMatchId;
+  const unresolvedGuardHandledRef = useRef(false);
+  useEffect(() => {
+    if (isResume || isGuest || visualFixture) return;
+    if (!unresolvedGuard.checked || unresolvedGuardHandledRef.current) return;
+    if (unresolvedGuard.singleMatch && singleMatchPendingChoice) {
+      const matchedLectureId = unresolvedGuard.singleMatch.lectureId;
+      const matchedLecture = lectures.find((l) => l.id === matchedLectureId);
+      // The guard only returns current-account active IDs. Keep this local
+      // check as a defensive boundary too: an unknown historical session must
+      // remain an orphaned recovery artifact, never be adopted by a new route.
+      if (matchedLecture?.status === 'in_progress') {
+        unresolvedGuardHandledRef.current = true;
+        Alert.alert(
+          t('recording.unresolvedFoundTitle'),
+          t('recording.unresolvedFoundBody'),
+          [
+            {
+              text: t('recording.startNewAnyway'),
+              style: 'cancel',
+              // The ref stays true: this exact match is fully resolved for this mount (see
+              // singleMatchPendingChoice) and must never re-alert; the fresh recording just continues.
+              onPress: () => setDismissedSingleMatchId(matchedLectureId),
+            },
+            {
+              text: t('recording.resume'),
+              onPress: () => router.replace({ pathname: '/recording', params: { lectureId: matchedLectureId } }),
+            },
+          ],
+        );
+        return;
+      }
+    }
+    if (unresolvedGuard.ambiguous) {
+      // More than one real unresolved recording exists — never guess which
+      // one to reattach. Block this fresh recording and send the owner back
+      // to resolve them from their course pages.
+      unresolvedGuardHandledRef.current = true;
+      Alert.alert(
+        t('recording.multipleUnresolvedTitle'),
+        t('recording.multipleUnresolvedBody'),
+        [{ text: t('common.ok'), onPress: () => router.back() }],
+      );
+    }
+  }, [isResume, isGuest, visualFixture, unresolvedGuard, singleMatchPendingChoice, lectures, router, t]);
 
   const {
     engine: recordingEngine,
@@ -126,11 +208,13 @@ export default function RecordingScreen() {
     isRecording,
     isPaused,
     durationMillis,
+    liveFileUri,
     error,
     startRecording,
     pauseRecording,
     resumeRecording,
     stopRecording,
+    getFinalAudioDurationMillis,
     leaveRecording,
     recoverRecording,
     finishRecoverableRecording,
@@ -156,6 +240,10 @@ export default function RecordingScreen() {
   const [micStreamError, setMicStreamError] = useState<string | null>(null);
   const [startFailed, setStartFailed] = useState(false);
   const [finishing, setFinishing] = useState(false);
+  // A legacy recorder is physically paused while its cache file is promoted.
+  // Until that promotion verifies, this state prevents the UI from claiming
+  // the pause is safe and exposes a retry that never adopts an unknown file.
+  const [pauseDurabilityError, setPauseDurabilityError] = useState<string | null>(null);
   const [recoveryDismissed, setRecoveryDismissed] = useState(false);
   const [materialPickerVisible, setMaterialPickerVisible] = useState(false);
   const [importingMaterial, setImportingMaterial] = useState(false);
@@ -163,7 +251,18 @@ export default function RecordingScreen() {
   // are shown but the recorder/mic/live captions do NOT start until the user
   // resumes from the existing central Pause/Continue control.
   const [continueRequested, setContinueRequested] = useState(false);
-  const isReviewingResume = isResume && !continueRequested;
+  // A legacy Pause finalizes a first segment.  If it is then resumed, the
+  // next capture is a distinct M4A and must be assembled rather than replacing
+  // the already-verified first segment.
+  const [legacyResumeAfterCheckpoint, setLegacyResumeAfterCheckpoint] = useState(false);
+  // A durable session that remains native-recording belongs to the persistent
+  // native module, not to the earlier Recording screen instance. This is a
+  // live reattachment, not the paused review state used for an intentional
+  // reopen of a previously-paused lecture.
+  const isLiveNativeReattachment = recordingEngine === 'nativeDurable'
+    && recoverableSession?.state === 'recording'
+    && isRecording;
+  const isReviewingResume = isResume && !continueRequested && !isLiveNativeReattachment;
   // New content APPENDS to the resumed lecture's id (no duplicate); a fresh
   // recording reserves a new id. Prior caption history / marks / audio are
   // snapshotted once at mount so we can merge new content onto them.
@@ -205,14 +304,15 @@ export default function RecordingScreen() {
   const granted = permissionStatus === 'granted';
   const sessionDurationMillis = recordingEngine === 'nativeDurable'
     ? durationMillis
-    : isResume
+    : isResume || legacyResumeAfterCheckpoint
     ? priorDurationMillisRef.current + (isReviewingResume ? 0 : durationMillis)
     : durationMillis;
-  const legacyResumeHasPriorAudio = isResume
+  const legacyResumeHasPriorAudio = (isResume || legacyResumeAfterCheckpoint)
     && recordingEngine === 'legacy'
     && Boolean(priorAudioUriRef.current);
   const seconds = Math.floor(sessionDurationMillis / 1000);
   const recordingSessionActive = isRecording || isPaused || durationMillis > 0;
+  const safelyPaused = isPaused && !pauseDurabilityError;
   // Reliable "audio is genuinely capturing" signal — the recorder's own state,
   // not just permission. Controls and caption copy derive from this so the UI
   // never claims recording is active when startup failed.
@@ -285,7 +385,9 @@ export default function RecordingScreen() {
         ...priorMarksRef.current,
         ...marksRef.current.map((mark) => mark.timestampMillis),
       ];
-      const nextAudio = audioUri ?? priorAudioUriRef.current;
+      // `null` explicitly clears an unsafe live/cache URI. `undefined` means
+      // retain a previously verified canonical asset during ordinary autosave.
+      const nextAudio = audioUri === null ? null : audioUri ?? priorAudioUriRef.current;
       const currentLinks = materialLinksForLectureRef.current(pendingLectureId);
       const currentAnnotations = materialAnnotationsRef.current.filter(
         (annotation) => annotation.lectureId === pendingLectureId && !annotation.deletedAt,
@@ -329,7 +431,7 @@ export default function RecordingScreen() {
       lastProgressSaveRef.current = Date.now();
       return true;
     },
-    [isGuest, pendingLectureId, saveInProgressLecture, sourceLanguage, translationLanguage],
+    [isGuest, pendingLectureId, recordingEngine, saveInProgressLecture, sourceLanguage, translationLanguage],
   );
   const persistProgressRef = useRef(persistProgress);
   persistProgressRef.current = persistProgress;
@@ -384,7 +486,13 @@ export default function RecordingScreen() {
       return;
     }
     if (!progressCreatedRef.current || Date.now() - lastProgressSaveRef.current > 5000) {
-      persistProgress();
+      // A resumed session with prior audio to protect must never let this
+      // autosave carry the CURRENT (in-flight, still-growing) file into
+      // localAudioUri — that would replace the earlier, longer canonical
+      // audio, the exact CS111 truncation mechanism. A fresh legacy session
+      // also must not make its cache file the recovery authority: Pause
+      // promotes a verified Documents checkpoint synchronously instead.
+      persistProgress(recordingEngine === 'legacy' || legacyResumeHasPriorAudio ? undefined : liveFileUri);
     }
   }, [
     captionLines.length,
@@ -399,6 +507,9 @@ export default function RecordingScreen() {
     materialAnnotations,
     pendingLectureId,
     isGuest,
+    recordingEngine,
+    legacyResumeHasPriorAudio,
+    liveFileUri,
     isReviewingResume,
     persistProgress,
   ]);
@@ -512,8 +623,8 @@ export default function RecordingScreen() {
   }, [sessionDurationMillis, setCurrentDurationMillis]);
 
   useEffect(() => {
-    setLectureSessionPaused(isReviewingResume || isPaused);
-  }, [isPaused, isReviewingResume, setLectureSessionPaused]);
+    setLectureSessionPaused(isReviewingResume || safelyPaused);
+  }, [isReviewingResume, safelyPaused, setLectureSessionPaused]);
 
   // Begin recording automatically when the screen opens with permission
   // granted. The local recorder starts first so it owns the audio session;
@@ -523,6 +634,14 @@ export default function RecordingScreen() {
     // Resumed lecture: wait for the existing central Pause/Continue control
     // before the recorder/mic/captions start, so opening it is a safe review.
     if (isResume && !continueRequested) return;
+    // Do not silently start a brand-new recording while a real, unresolved
+    // recoverable session belongs to another lecture — wait for the guard to
+    // resolve, and never proceed if it found something (the effect above
+    // handles redirecting/blocking in that case). See
+    // useUnresolvedRecordingGuard.
+    // singleMatchPendingChoice (not the raw singleMatch object): once the owner chooses Start New, the
+    // stale non-null match must stop blocking or the screen hangs at "Preparing microphone…" forever.
+    if (!isResume && (!dataLoaded || !unresolvedGuard.checked || singleMatchPendingChoice || unresolvedGuard.ambiguous)) return;
     autoStarted.current = true;
     void startRecording().then((started) => {
       if (__DEV__) console.info('[recording] automatic local recording result', { started });
@@ -533,7 +652,7 @@ export default function RecordingScreen() {
     });
   // The recorder and caption starters intentionally run once after permission resolves.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visualFixture, granted, isGuest, isResume, continueRequested, contentPreferencesLoaded, recoveryChecked, recoverableSession]);
+  }, [visualFixture, granted, isGuest, isResume, continueRequested, contentPreferencesLoaded, recoveryChecked, recoverableSession, dataLoaded, unresolvedGuard, singleMatchPendingChoice]);
 
   // Keep this fresh for the mount-once AppState listener below.
   isRecordingRef.current = isRecording;
@@ -603,16 +722,104 @@ export default function RecordingScreen() {
       setContinueRequested(true);
       return;
     }
+    if (pauseDurabilityError) {
+      const retriedAudio = recordingEngine === 'legacy' && liveFileUri
+        ? await persistLectureLocalAudio(liveFileUri, pendingLectureId)
+        : null;
+      if (retriedAudio && isVerifiedDurableLectureAudio(retriedAudio)) {
+        setPauseDurabilityError(null);
+        if (!isGuest && !finishedRef.current) {
+          persistProgress(legacyResumeHasPriorAudio ? undefined : retriedAudio);
+        }
+        return;
+      }
+      Alert.alert(
+        'Paused recording is not yet safe',
+        'Its audio could not be verified in durable storage. Keep Youmi Lens open and use this control to retry saving it.',
+      );
+      return;
+    }
     if (isPaused) {
-      await resumeRecording();
+      const resumed = await resumeRecording();
+      if (resumed && recordingEngine === 'legacy') setLegacyResumeAfterCheckpoint(true);
       // Reconnect captions/mic only — never wipe accumulated live history.
       if (!isGuest) await startCaptionPipeline({ preserveHistory: true });
     } else {
-      await pauseRecording();
+      const paused = await pauseRecording();
+      if (!paused) return;
       stopMicStream();
       stopLiveCaptions();
-      // Pausing keeps the session — persist so it survives a later exit.
-      if (!isGuest && !finishedRef.current) persistProgress();
+      // The current capture is now finalized by the legacy hook.  A resumed
+      // legacy lecture already owns a first canonical segment, so preserve
+      // this new segment separately and enter the existing safe assembly
+      // gate.  Never overwrite the first segment merely because Pause was
+      // pressed a second time.
+      if (recordingEngine === 'legacy' && legacyResumeHasPriorAudio && liveFileUri) {
+        const segmentUri = await persistLectureResumeSegment(liveFileUri, pendingLectureId);
+        const plan = planLegacyResumeFinalization({
+          priorCanonicalUri: priorAudioUriRef.current,
+          resumedSegmentUri: segmentUri,
+          existingSegments: resumeLecture?.audioSegments,
+          priorCreatedAt: resumeLecture?.date,
+          now: new Date().toISOString(),
+        });
+        if (plan.kind === 'assembly_required') {
+          persistProgress();
+          updateLecture(pendingLectureId, {
+            recordingEngine,
+            localAudioUri: plan.canonicalUri,
+            audioAssemblyStatus: 'required',
+            audioAssemblyReason: plan.reason,
+            audioSegments: plan.segments,
+            uploadStatus: 'upload_failed',
+            uploadError: 'Audio segments were preserved. Final assembly is required before upload.',
+          });
+          void preserveLegacyAudioSourcesEarly(pendingLectureId, plan.segments).then((preserved) => {
+            if (__DEV__ && !preserved.ok) {
+              console.warn('[AudioAssembly] early-preservation-failed', { lectureId: pendingLectureId, error: preserved.error });
+            }
+          });
+          router.replace({ pathname: '/processing', params: { lectureId: pendingLectureId } });
+          return;
+        }
+        setPauseDurabilityError('durable_copy_failed');
+        Alert.alert('Pause was not completed safely', 'The resumed audio could not be verified as a separate durable segment. Keep Youmi Lens open and do not retry this recording.');
+        return;
+      }
+      // A legacy recorder writes under Caches/ExpoAudio. A paused recorder can
+      // outlive this JS screen only if its current bytes are promoted now;
+      // saving the cache URI alone made lock/process-restart Finish point at a
+      // file iOS was free to evict. Do this synchronously at the Pause boundary.
+      const pausedLegacyAudio = recordingEngine === 'legacy' && liveFileUri
+        ? await persistLectureLocalAudio(liveFileUri, pendingLectureId)
+        : null;
+      const verifiedPausedLegacyAudio = pausedLegacyAudio && isVerifiedDurableLectureAudio(pausedLegacyAudio)
+        ? pausedLegacyAudio
+        : null;
+      if (recordingEngine === 'legacy' && !verifiedPausedLegacyAudio) {
+        // Do not make an ephemeral cache URI the recovery authority. The source
+        // is left untouched for forensic recovery, but the user must not be
+        // led to believe this paused recording is safely persisted.
+        setPauseDurabilityError('durable_copy_failed');
+        if (!isGuest && !finishedRef.current) persistProgress(null);
+        Alert.alert(
+          'Pause was not completed safely',
+          'The captured audio could not be verified in durable storage. Keep Youmi Lens open and use the main control to retry saving the paused audio.',
+        );
+        return;
+      }
+      setPauseDurabilityError(null);
+      if (recordingEngine === 'legacy' && verifiedPausedLegacyAudio) {
+        // The legacy hook stopped the AVAudioRecorder before this copy, so
+        // this is a finalized, native-validated Documents checkpoint.
+        priorAudioUriRef.current = verifiedPausedLegacyAudio;
+        priorDurationMillisRef.current = sessionDurationMillis;
+      }
+      // Pausing keeps the session — persist only a verified legacy checkpoint
+      // so a later remount owns a Documents asset, never a cache-only URI.
+      if (!isGuest && !finishedRef.current) {
+        persistProgress(legacyResumeHasPriorAudio ? undefined : verifiedPausedLegacyAudio);
+      }
     }
   };
 
@@ -625,6 +832,7 @@ export default function RecordingScreen() {
   }, [
     registerLectureSessionPauseToggle,
     isPaused,
+    pauseDurabilityError,
     isReviewingResume,
     isGuest,
     resumeRecording,
@@ -639,6 +847,15 @@ export default function RecordingScreen() {
     if (!isGuest && !finishedRef.current) {
       stopMicStream();
       stopLiveCaptions();
+      // A nativeDurable recording is owned by the persistent native module,
+      // so returning to Course must not be translated into Pause. Persist the
+      // product-side lecture shell, then let this same native session keep
+      // checkpointing until the owner explicitly presses Pause or Finish.
+      if (recordingEngine === 'nativeDurable' && isRecording) {
+        persistProgress();
+        router.back();
+        return;
+      }
       let uri: string | null = null;
       try {
         uri = await leaveRecording();
@@ -676,7 +893,13 @@ export default function RecordingScreen() {
           }
         }
       } else {
-        persistProgress(uri);
+        const persistedExitAudio = recordingEngine === 'legacy' && uri
+          ? await persistLectureLocalAudio(uri, pendingLectureId)
+          : uri;
+        const verifiedExitAudio = recordingEngine === 'legacy'
+          ? isVerifiedDurableLectureAudio(persistedExitAudio)
+          : localAudioFileHasBytes(persistedExitAudio);
+        persistProgress(verifiedExitAudio ? persistedExitAudio : null);
       }
     }
     router.back();
@@ -751,13 +974,26 @@ export default function RecordingScreen() {
         return;
       }
       const durableGuestAudio = await persistLectureLocalAudio(uri, pendingLectureId);
+      const verifiedGuestAudio = recordingEngine === 'legacy'
+        ? isVerifiedDurableLectureAudio(durableGuestAudio)
+        : localAudioFileHasBytes(durableGuestAudio);
+      if (!verifiedGuestAudio) {
+        finishedRef.current = false;
+        guestAutoStopped.current = false;
+        setFinishing(false);
+        Alert.alert(
+          t('recording.notSavedTitle'),
+          'The final audio could not be verified on this device. The original file was left untouched for recovery.',
+        );
+        return;
+      }
       createLecture({
         id: pendingLectureId,
         courseId: params.courseId ?? '',
         title: (params.lectureTitle ?? '').trim() || 'Untitled Lecture',
         durationMillis: finalDuration,
         recordingEngine,
-        localAudioUri: durableGuestAudio ?? uri,
+        localAudioUri: durableGuestAudio,
         markedTimestamps: marks.map((mark) => mark.timestampMillis),
         liveTranscript: '',
         notes: draftNotes,
@@ -856,16 +1092,38 @@ export default function RecordingScreen() {
 
     const rawFinalAudio = uri ?? priorAudioUriRef.current;
     const finalAudio = rawFinalAudio
-      ? (await persistLectureLocalAudio(rawFinalAudio, pendingLectureId)) ?? rawFinalAudio
+      ? await persistLectureLocalAudio(rawFinalAudio, pendingLectureId)
       : null;
-    const savedDuration = Math.max(existing?.durationMillis ?? 0, finalDuration);
+    const verifiedFinalAudio = recordingEngine === 'legacy'
+      ? isVerifiedDurableLectureAudio(finalAudio)
+      : localAudioFileHasBytes(finalAudio);
+    // Captions and duration are valuable recovery evidence, but they cannot
+    // turn a missing recording file into a "Recording Saved" result. Keep the
+    // screen mounted and leave every candidate untouched if final ownership is
+    // not proven.
+    if (finalDuration > 0 && !verifiedFinalAudio) {
+      finishedRef.current = false;
+      setFinishing(false);
+      Alert.alert(
+        t('recording.notSavedTitle'),
+        'The final audio could not be verified in durable storage. No upload was started and original audio candidates were left untouched for recovery.',
+      );
+      return;
+    }
+    const savedDuration = resolveFinalLectureDurationMillis({
+      engine: recordingEngine,
+      finalAssetDurationMs: getFinalAudioDurationMillis?.() ?? null,
+      committedDurationMs: null,
+      existingDurationMs: existing?.durationMillis ?? 0,
+      sessionDurationMs: finalDuration,
+    });
     const currentLinks = materialLinksForLecture(pendingLectureId);
     const currentAnnotations = materialAnnotations.filter(
       (annotation) => annotation.lectureId === pendingLectureId && !annotation.deletedAt,
     );
     const meaningful = hasMeaningfulRecordingContent({
       durationMillis: savedDuration,
-      hasAudio: Boolean(finalAudio),
+      hasAudio: Boolean(verifiedFinalAudio),
       captionCount: lines.length,
       markCount: mergedMarks.length,
       transcriptLength: en.length,
@@ -1032,8 +1290,8 @@ export default function RecordingScreen() {
 
         {granted ? (
           <StatusPill
-            label={isReviewingResume ? t('recording.pausedShort') : isPaused ? t('recording.pausedShort') : t('recording.recordingShort')}
-            variant={isReviewingResume || isPaused ? 'paused' : 'recording'}
+            label={pauseDurabilityError ? 'Audio needs saving' : isReviewingResume ? t('recording.pausedShort') : safelyPaused ? t('recording.pausedShort') : t('recording.recordingShort')}
+            variant={pauseDurabilityError || isReviewingResume || safelyPaused ? 'paused' : 'recording'}
           />
         ) : null}
         <View style={[styles.courseChip, isCompact && styles.courseChipCompact]}>
@@ -1162,17 +1420,19 @@ export default function RecordingScreen() {
               {visualGuest ? (
                 <GlassCard padding={spacing.xl} style={styles.guestCard}>
                   <View style={styles.stateHeader}>
-                    <View style={[styles.stateIcon, isPaused && styles.stateIconPaused]}>
+                    <View style={[styles.stateIcon, safelyPaused && styles.stateIconPaused]}>
                       <Ionicons
-                        name={isPaused ? 'pause' : 'mic'}
+                        name={safelyPaused ? 'pause' : 'mic'}
                         size={20}
-                        color={isPaused ? colors.mutedBlueGray : colors.deepNavy}
+                        color={safelyPaused ? colors.mutedBlueGray : colors.deepNavy}
                       />
                     </View>
                     <View style={styles.stateHeaderText}>
                       <Text style={styles.stateTitle}>{t('recording.localRecording')}</Text>
                       <Text style={styles.stateStatus}>
-                        {isPaused
+                        {pauseDurabilityError
+                          ? 'Audio needs saving'
+                          : safelyPaused
                           ? t('recording.paused')
                           : recordingSessionActive
                             ? t('recording.recordingToDevice')
@@ -1204,10 +1464,19 @@ export default function RecordingScreen() {
                 ) : captionAreaState === 'captions_connecting' ? (
                   <Text style={styles.stateBody}>{t('recording.connectingCaptions')}</Text>
                 ) : captionAreaState === 'captions_unavailable' ? (
-                  // Only reachable while audio is active — the copy is accurate.
+                  // Reachable while audio is active OR while a native forced
+                  // pause (checkpoint rollover failure, interruption, route
+                  // change) has since stopped capture without this state
+                  // re-resolving — isRecording is checked directly at render
+                  // so the "still active" claim is never shown when it's
+                  // false. This is the P0 fix: the copy used to assume audio
+                  // was always active here, which is exactly what silently
+                  // broke down during the checkpoint-rollover incident.
                   <View style={styles.captionFallback}>
                     <Text style={styles.stateBody}>
-                      {micStreamError ?? liveCaptionError ?? t('recording.captionsUnavailable')}
+                      {isRecording
+                        ? (micStreamError ?? liveCaptionError ?? t('recording.captionsUnavailable'))
+                        : t('recording.captionsUnavailablePaused')}
                     </Text>
                     <SecondaryButton
                       label={t('recording.retryCaptions')}
@@ -1269,14 +1538,14 @@ export default function RecordingScreen() {
 
             <PressableScale
               accessibilityRole="button"
-              accessibilityLabel={isReviewingResume || isPaused ? t('recording.resume') : t('recording.pause')}
+              accessibilityLabel={pauseDurabilityError ? 'Retry saving paused audio' : isReviewingResume || safelyPaused ? t('recording.resume') : t('recording.pause')}
               accessibilityState={{ disabled: !centralControlEnabled }}
               disabled={!centralControlEnabled}
               onPress={() => { void togglePause(); }}
               style={[styles.roundBtn, !centralControlEnabled && styles.disabled]}
             >
               <Ionicons
-                name={isReviewingResume || isPaused ? 'play' : 'pause'}
+                name={pauseDurabilityError ? 'refresh' : isReviewingResume || safelyPaused ? 'play' : 'pause'}
                 size={32}
                 color={colors.pearlWhite}
               />
@@ -1362,7 +1631,7 @@ export default function RecordingScreen() {
           </Modal>
 
           <Modal
-            visible={Boolean(recoverableSession) && !recoveryDismissed}
+            visible={Boolean(recoverableSession) && !recoveryDismissed && !isLiveNativeReattachment}
             transparent
             animationType="fade"
             onRequestClose={() => { setRecoveryDismissed(true); dismissRecovery(); }}

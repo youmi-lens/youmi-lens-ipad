@@ -3,6 +3,7 @@ import { StyleSheet, View } from 'react-native';
 import { Gesture, GestureDetector, PointerType } from 'react-native-gesture-handler';
 import Svg, { Circle, Path } from 'react-native-svg';
 
+import { strokeNearSweep } from '@/lib/inkEraser.mjs';
 import type { MaterialAnnotationStroke, MaterialAnnotationTool, MaterialAnnotationPoint } from '@/lib/models';
 
 const MIN_POINT_DISTANCE = 1.8;
@@ -45,15 +46,6 @@ function strokeToPath(points: MaterialAnnotationPoint[]): string {
   const last = points[points.length - 1];
   d += ` L ${last.x} ${last.y}`;
   return d;
-}
-
-function strokeNearPoint(
-  stroke: MaterialAnnotationStroke,
-  x: number,
-  y: number,
-  radius: number,
-): boolean {
-  return stroke.points.some((point) => Math.hypot(point.x - x, point.y - y) <= radius);
 }
 
 function hasUsefulStylusData(value: unknown): boolean {
@@ -204,7 +196,13 @@ export function MaterialAnnotationOverlay({
   // Live points now live entirely inside ActiveAnnotationInkHost's own local
   // state (see its doc comment) — this component never re-renders per point.
   const activeInkRef = useRef<ActiveAnnotationInkHandle>(null);
-  const erasedIdsRef = useRef<string[]>([]);
+  // Erasing is visually local and immediate. The final parent/store write is
+  // deliberately deferred to gesture-end so dense Pencil movement never
+  // sends a persistence update for every sampled point.
+  const erasedIdsRef = useRef<Set<string>>(new Set());
+  const [suppressedEraseIds, setSuppressedEraseIds] = useState<Set<string>>(() => new Set());
+  const suppressedEraseIdsRef = useRef<Set<string>>(new Set());
+  const lastErasePointRef = useRef<MaterialAnnotationPoint | null>(null);
   const strokesRef = useRef(strokes);
   strokesRef.current = strokes;
   const modeRef = useRef(mode);
@@ -215,13 +213,30 @@ export function MaterialAnnotationOverlay({
   eraserRadiusRef.current = eraserRadius;
   const onStylusStrokeActiveChangeRef = useRef(onStylusStrokeActiveChange);
   onStylusStrokeActiveChangeRef.current = onStylusStrokeActiveChange;
+  const onEraseStrokeIdsRef = useRef(onEraseStrokeIds);
+  onEraseStrokeIdsRef.current = onEraseStrokeIds;
   const activeTouchIdRef = useRef<number | null>(null);
   const drawingRef = useRef(false);
   const erasingRef = useRef(false);
 
   useEffect(() => {
+    // A parent snapshot that no longer has a suppressed id acknowledges the
+    // one final erase write. Keep old snapshots from repainting erased ink.
+    const currentIds = new Set(strokes.map((stroke) => stroke.id));
+    let changed = false;
+    for (const id of suppressedEraseIdsRef.current) {
+      if (!currentIds.has(id)) {
+        suppressedEraseIdsRef.current.delete(id);
+        changed = true;
+      }
+    }
+    if (changed) setSuppressedEraseIds(new Set(suppressedEraseIdsRef.current));
+  }, [strokes]);
+
+  useEffect(() => {
     activeInkRef.current?.clear();
-    erasedIdsRef.current = [];
+    erasedIdsRef.current.clear();
+    lastErasePointRef.current = null;
     activeTouchIdRef.current = null;
     drawingRef.current = false;
     erasingRef.current = false;
@@ -232,17 +247,18 @@ export function MaterialAnnotationOverlay({
     activeInkRef.current?.append({ x, y });
   }, []);
 
-  const eraseAt = useCallback((x: number, y: number) => {
+  const eraseAt = useCallback((from: MaterialAnnotationPoint, to: MaterialAnnotationPoint) => {
     let changed = false;
     for (const stroke of strokesRef.current) {
-      if (erasedIdsRef.current.includes(stroke.id)) continue;
-      if (strokeNearPoint(stroke, x, y, eraserRadiusRef.current)) {
-        erasedIdsRef.current.push(stroke.id);
+      if (erasedIdsRef.current.has(stroke.id)) continue;
+      if (strokeNearSweep(stroke, from, to, eraserRadiusRef.current)) {
+        erasedIdsRef.current.add(stroke.id);
+        suppressedEraseIdsRef.current.add(stroke.id);
         changed = true;
       }
     }
-    if (changed) onEraseStrokeIds([...erasedIdsRef.current]);
-  }, [onEraseStrokeIds]);
+    if (changed) setSuppressedEraseIds(new Set(suppressedEraseIdsRef.current));
+  }, []);
 
   const commitStroke = useCallback(() => {
     const points = activeInkRef.current?.getPoints() ?? [];
@@ -264,10 +280,13 @@ export function MaterialAnnotationOverlay({
   const finishStylusGesture = useCallback(() => {
     if (drawingRef.current) commitStroke();
     const shouldRestoreAfterErase = erasingRef.current;
+    const erasedIds = [...erasedIdsRef.current];
     drawingRef.current = false;
     erasingRef.current = false;
     activeTouchIdRef.current = null;
-    erasedIdsRef.current = [];
+    erasedIdsRef.current.clear();
+    lastErasePointRef.current = null;
+    if (erasedIds.length > 0) onEraseStrokeIdsRef.current(erasedIds);
     onStylusStrokeActiveChangeRef.current?.(false);
     if (shouldRestoreAfterErase) {
       onModeChange(previousDrawingToolRef.current);
@@ -324,12 +343,14 @@ export function MaterialAnnotationOverlay({
           manager.activate();
           onStylusStrokeActiveChangeRef.current?.(true);
           activeTouchIdRef.current = touch.id;
-          erasedIdsRef.current = [];
+          erasedIdsRef.current.clear();
 
           if (activeMode === 'eraser') {
             erasingRef.current = true;
             drawingRef.current = false;
-            eraseAt(touch.x, touch.y);
+            const point = { x: touch.x, y: touch.y };
+            lastErasePointRef.current = point;
+            eraseAt(point, point);
           } else {
             drawingRef.current = true;
             erasingRef.current = false;
@@ -343,7 +364,10 @@ export function MaterialAnnotationOverlay({
           if (!touch) return;
 
           if (erasingRef.current) {
-            eraseAt(touch.x, touch.y);
+            const point = { x: touch.x, y: touch.y };
+            const previous = lastErasePointRef.current ?? point;
+            lastErasePointRef.current = point;
+            eraseAt(previous, point);
           } else if (drawingRef.current) {
             addPoint(touch.x, touch.y);
           }
@@ -372,8 +396,12 @@ export function MaterialAnnotationOverlay({
   // never re-filters the full per-page stroke history — only an actual
   // change to `strokes` does. The live/in-progress stroke never touches
   // these; it renders entirely inside ActiveAnnotationInkHost below.
-  const highlighterStrokes = useMemo(() => strokes.filter((stroke) => stroke.tool === 'highlighter'), [strokes]);
-  const penStrokes = useMemo(() => strokes.filter((stroke) => stroke.tool !== 'highlighter'), [strokes]);
+  const visibleStrokes = useMemo(
+    () => strokes.filter((stroke) => !suppressedEraseIds.has(stroke.id)),
+    [strokes, suppressedEraseIds],
+  );
+  const highlighterStrokes = useMemo(() => visibleStrokes.filter((stroke) => stroke.tool === 'highlighter'), [visibleStrokes]);
+  const penStrokes = useMemo(() => visibleStrokes.filter((stroke) => stroke.tool !== 'highlighter'), [visibleStrokes]);
   const showActiveInk = mode !== 'eraser' && mode !== 'scroll';
 
   const content = (

@@ -25,12 +25,17 @@ assert.equal(shouldStartToolbarTransition(collapsed, false), false, 'duplicate r
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const source = fs.readFileSync(path.join(root, 'components/NotebookCanvas.tsx'), 'utf8');
-assert.match(source, /LayoutAnimation\.configureNext/);
-assert.match(source, /toolbarTransition\.stopAnimation\(\)/);
-assert.match(source, /useNativeDriver: true/);
-assert.doesNotMatch(source, /width:\s*toolbarTransition\.interpolate/);
-assert.doesNotMatch(source, /height:\s*toolbarTransition\.interpolate/);
 assert.match(source, /const CompletedStrokeLayer = memo/);
 assert.match(source, /export const NotebookCanvas = memo/);
+
+// PK4-C1: the collapse/expand transition itself now lives in the one shared
+// SharedAnnotationToolbar component that both Notebook and Course Material
+// render — not duplicated back into NotebookCanvas.tsx.
+const toolbarSource = fs.readFileSync(path.join(root, 'components/SharedAnnotationToolbar.tsx'), 'utf8');
+assert.match(toolbarSource, /LayoutAnimation\.configureNext/);
+assert.match(toolbarSource, /toolbarTransition\.stopAnimation\(\)/);
+assert.match(toolbarSource, /useNativeDriver: true/);
+assert.doesNotMatch(toolbarSource, /width:\s*toolbarTransition\.interpolate/);
+assert.doesNotMatch(toolbarSource, /height:\s*toolbarTransition\.interpolate/);
 
 console.log('Notebook toolbar transition tests passed.');

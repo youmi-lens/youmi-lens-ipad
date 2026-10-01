@@ -60,7 +60,7 @@ check('G1: live subscriptions are not blocked by the retired Student Basic sales
 check('G2: handlePurchase no longer alerts sign-in-required for a guest — it resolves a guest-IAP identity instead', () => {
   const fn = plans.slice(plans.indexOf('const handlePurchase = async () => {'), plans.indexOf('const handleRefreshAccess = async () => {'));
   assert.doesNotMatch(fn, /isGuest.*Alert\.alert\(t\('plans\.signInRequired'\)/);
-  assert.match(fn, /const identity = await resolvePurchaseIdentity\(\);/);
+  assert.match(fn, /const identity = await boundedPaymentTask\(resolvePurchaseIdentity, PAYMENT_UI_WAIT_TIMEOUT_MS,/);
 });
 
 console.log('\nG3 — guest purchase reuses the unmodified purchase call + backend');
@@ -84,7 +84,7 @@ console.log('\nG4 — guest Restore works the same way');
 check('G4: handleRefreshAccess also resolves the guest-IAP identity and calls the unmodified restore', () => {
   const fn = plans.slice(plans.indexOf('const handleRefreshAccess = async () => {'), plans.indexOf('const handleManageSubscription = async () => {'));
   assert.doesNotMatch(fn, /isGuest.*Alert\.alert\(t\('plans\.signInRequired'\)/);
-  assert.match(fn, /const identity = await resolvePurchaseIdentity\(\);/);
+  assert.match(fn, /const identity = await boundedPaymentTask\(resolvePurchaseIdentity, PAYMENT_UI_WAIT_TIMEOUT_MS,/);
   assert.match(fn, /const result = await subscriptionService\.restore\(identity\.token\);/);
 });
 check('the Restore button is no longer disabled for guests', () => {

@@ -1,10 +1,18 @@
-import { forwardRef, useImperativeHandle, useRef } from 'react';
+import { forwardRef, memo, useImperativeHandle, useRef } from 'react';
 import { Platform, StyleProp, ViewStyle } from 'react-native';
+import type { AnnotationShape } from '@/lib/annotationShape';
 
 import {
   ExpoPdfAnnotationView,
   type ExpoPdfAnnotationNativeRef,
   type NativePdfAnnotationMode,
+  type NativePdfSelectionShape,
+  type NativePdfSelectionChangedEvent,
+  type NativePdfSelectionMovedEvent,
+  type NativePdfShapeEditedEvent,
+  type NativePdfSelectionScaledEvent,
+  type NativePdfPencilActivityEvent,
+  type NativePdfShapeHoldEvent,
   type NativePdfAnnotationsByPage,
   type NativePdfAnnotationsChangedEvent,
   type NativePdfEraserGestureEndedEvent,
@@ -13,6 +21,7 @@ import {
   type NativePdfViewport,
   type NativePdfPageChangedEvent,
   type NativePdfTextAnnotationsByPage,
+  type NativePdfTextAnnotation,
   type NativePdfTextAnnotationActionEvent,
   type NativePdfViewportDiagnosticEvent,
 } from '@/modules/expo-pdf-annotation';
@@ -25,9 +34,34 @@ const NativePdfViewComponent = ExpoPdfAnnotationView as React.ComponentType<
 
 export type NativePdfAnnotationViewRef = {
   setPage: (pageNumber: number) => void;
+  /** Changes the active tool without reconciling the annotation-data props. */
+  setAnnotationMode: (mode: NativePdfAnnotationMode) => void;
+  /** Changes the Pen color without reconciling the annotation-data props. */
+  setPenColor: (color: string) => void;
+  /** Changes the Highlighter color without reconciling the annotation-data props. */
+  setHighlighterColor: (color: string) => void;
   flushViewport: () => void;
   /** Reads PDFKit's current page/zoom/page-space anchor without waiting for its normal debounce. */
   captureViewport: () => Promise<NativePdfViewport | null>;
+  /**
+   * Tell the native view these stroke ids are being intentionally removed
+   * by JS (Undo, or a Redo-of-a-delete) — must be called BEFORE sending the
+   * `annotationsByPage` snapshot that excludes them, so the native
+   * stale-snapshot protection (`pendingLocalStrokeIds`) doesn't silently
+   * re-draw a stroke the user just asked to remove. See
+   * AnnotationOverlay.markStrokeRemovalIntent's doc comment for the full
+   * race this closes.
+   */
+  markStrokeRemovalIntent: (ids: string[]) => void;
+  /** Allow an intentional Undo to restore ink previously removed natively. */
+  markStrokeRestorationIntent: (ids: string[]) => void;
+  /** Explicit Undo/Redo overrides a pending native text-render commit. */
+  setTextHistoryIntent: (pageNumber: number, annotations: NativePdfTextAnnotation[]) => void;
+  clearSelection: () => void;
+  /** Selects existing ink by id (e.g. the copies produced by Duplicate). */
+  setSelection: (pageNumber: number, ids: string[]) => void;
+  /** Shape Snap: replace the live stroke (identified by the hold event's token) with clean geometry. */
+  applyShapeSnap: (token: number, points: [number, number][], shape?: AnnotationShape) => void;
 };
 
 export type NativePdfAnnotationViewProps = {
@@ -37,6 +71,7 @@ export type NativePdfAnnotationViewProps = {
   style?: StyleProp<ViewStyle>;
   /** "scroll" lets PDFKit own all touches; "pen" turns the Apple-Pencil overlay on. */
   annotationMode?: NativePdfAnnotationMode;
+  selectionShape?: NativePdfSelectionShape;
   penColor?: string;
   penWidth?: number;
   highlighterColor?: string;
@@ -45,7 +80,6 @@ export type NativePdfAnnotationViewProps = {
   annotationsByPage?: NativePdfAnnotationsByPage;
   appendedBlankPageCount?: number;
   textAnnotationsByPage?: NativePdfTextAnnotationsByPage;
-  selectedTextAnnotationId?: string;
   onPageChanged?: (event: NativePdfPageChangedEvent) => void;
   onLoadComplete?: (event: NativePdfLoadCompleteEvent) => void;
   onViewportChanged?: (event: NativePdfViewport) => void;
@@ -53,12 +87,21 @@ export type NativePdfAnnotationViewProps = {
   onAnnotationsChanged?: (event: NativePdfAnnotationsChangedEvent) => void;
   onEraserGestureEnded?: (event: NativePdfEraserGestureEndedEvent) => void;
   onTextAnnotationAction?: (event: NativePdfTextAnnotationActionEvent) => void;
+  onSelectionChanged?: (event: NativePdfSelectionChangedEvent) => void;
+  onSelectionMoved?: (event: NativePdfSelectionMovedEvent) => void;
+  onShapeEdited?: (event: NativePdfShapeEditedEvent) => void;
+  onSelectionScaled?: (event: NativePdfSelectionScaledEvent) => void;
+  onPencilActivity?: (event: NativePdfPencilActivityEvent) => void;
+  onShapeHold?: (event: NativePdfShapeHoldEvent) => void;
+  shapeSnapEnabled?: boolean;
+  shapeSnapHoldMs?: number;
+  shapeSnapTolerancePt?: number;
   onViewportDiagnostic?: (event: NativePdfViewportDiagnosticEvent) => void;
 };
 
 export const NATIVE_PDF_ANNOTATION_AVAILABLE = Platform.OS === 'ios';
 
-export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, NativePdfAnnotationViewProps>(
+export const NativePdfAnnotationView = memo(forwardRef<NativePdfAnnotationViewRef, NativePdfAnnotationViewProps>(
   function NativePdfAnnotationView(
     {
       fileUri,
@@ -66,6 +109,7 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
       initialViewport,
       style,
       annotationMode,
+      selectionShape,
       penColor,
       penWidth,
       highlighterColor,
@@ -74,7 +118,6 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
       annotationsByPage,
       appendedBlankPageCount,
       textAnnotationsByPage,
-      selectedTextAnnotationId,
       onPageChanged,
       onLoadComplete,
       onViewportChanged,
@@ -82,6 +125,15 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
       onAnnotationsChanged,
       onEraserGestureEnded,
       onTextAnnotationAction,
+      onSelectionChanged,
+      onSelectionMoved,
+      onShapeEdited,
+      onSelectionScaled,
+      onPencilActivity,
+      onShapeHold,
+      shapeSnapEnabled,
+      shapeSnapHoldMs,
+      shapeSnapTolerancePt,
       onViewportDiagnostic,
     },
     ref,
@@ -94,6 +146,21 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
           if (__DEV__) console.warn('[native-pdf] setPageAsync failed', error);
         });
       },
+      setAnnotationMode(mode: NativePdfAnnotationMode) {
+        nativeRef.current?.setAnnotationModeAsync?.(mode).catch((error: unknown) => {
+          if (__DEV__) console.warn('[native-pdf] setAnnotationModeAsync failed', error);
+        });
+      },
+      setPenColor(color: string) {
+        nativeRef.current?.setPenColorAsync?.(color).catch((error: unknown) => {
+          if (__DEV__) console.warn('[native-pdf] setPenColorAsync failed', error);
+        });
+      },
+      setHighlighterColor(color: string) {
+        nativeRef.current?.setHighlighterColorAsync?.(color).catch((error: unknown) => {
+          if (__DEV__) console.warn('[native-pdf] setHighlighterColorAsync failed', error);
+        });
+      },
       flushViewport() {
         nativeRef.current?.flushViewportAsync?.().catch((error) => {
           if (__DEV__) console.warn('[native-pdf] flushViewportAsync failed', error);
@@ -101,6 +168,36 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
       },
       captureViewport() {
         return nativeRef.current?.captureViewportAsync?.() ?? Promise.resolve(null);
+      },
+      markStrokeRemovalIntent(ids: string[]) {
+        nativeRef.current?.markStrokeRemovalIntentAsync?.(ids).catch((error: unknown) => {
+          if (__DEV__) console.warn('[native-pdf] markStrokeRemovalIntentAsync failed', error);
+        });
+      },
+      markStrokeRestorationIntent(ids: string[]) {
+        nativeRef.current?.markStrokeRestorationIntentAsync?.(ids).catch((error: unknown) => {
+          if (__DEV__) console.warn('[native-pdf] markStrokeRestorationIntentAsync failed', error);
+        });
+      },
+      setTextHistoryIntent(pageNumber: number, annotations: NativePdfTextAnnotation[]) {
+        nativeRef.current?.setTextHistoryIntentAsync?.(pageNumber, annotations).catch((error: unknown) => {
+          if (__DEV__) console.warn('[native-pdf] setTextHistoryIntentAsync failed', error);
+        });
+      },
+      clearSelection() {
+        nativeRef.current?.clearSelectionAsync?.().catch((error: unknown) => {
+          if (__DEV__) console.warn('[native-pdf] clearSelectionAsync failed', error);
+        });
+      },
+      applyShapeSnap(token, points, shape) {
+        nativeRef.current?.applyShapeSnapAsync?.(token, points, shape).catch((error: unknown) => {
+          if (__DEV__) console.warn('[native-pdf] applyShapeSnapAsync failed', error);
+        });
+      },
+      setSelection(pageNumber, ids) {
+        nativeRef.current?.setSelectionAsync?.(pageNumber, ids).catch((error: unknown) => {
+          if (__DEV__) console.warn('[native-pdf] setSelectionAsync failed', error);
+        });
       },
     }), []);
 
@@ -111,7 +208,8 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
         fileUri={fileUri}
         initialPage={initialPage}
         initialViewport={initialViewport}
-        annotationMode={annotationMode}
+        {...(annotationMode === undefined ? {} : { annotationMode })}
+        selectionShape={selectionShape}
         penColor={penColor}
         penWidth={penWidth}
         highlighterColor={highlighterColor}
@@ -120,7 +218,6 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
         annotationsByPage={annotationsByPage}
         appendedBlankPageCount={appendedBlankPageCount}
         textAnnotationsByPage={textAnnotationsByPage}
-        selectedTextAnnotationId={selectedTextAnnotationId}
         onPageChanged={(event) => onPageChanged?.(event.nativeEvent)}
         onLoadComplete={(event) => onLoadComplete?.(event.nativeEvent)}
         onViewportChanged={(event) => onViewportChanged?.(event.nativeEvent)}
@@ -128,8 +225,17 @@ export const NativePdfAnnotationView = forwardRef<NativePdfAnnotationViewRef, Na
         onAnnotationsChanged={(event) => onAnnotationsChanged?.(event.nativeEvent)}
         onEraserGestureEnded={(event) => onEraserGestureEnded?.(event.nativeEvent)}
         onTextAnnotationAction={(event) => onTextAnnotationAction?.(event.nativeEvent)}
+        onSelectionChanged={(event) => onSelectionChanged?.(event.nativeEvent)}
+        onSelectionMoved={(event) => onSelectionMoved?.(event.nativeEvent)}
+        onShapeEdited={(event) => onShapeEdited?.(event.nativeEvent)}
+        onSelectionScaled={(event) => onSelectionScaled?.(event.nativeEvent)}
+        onPencilActivity={(event) => onPencilActivity?.(event.nativeEvent)}
+        onShapeHold={(event) => onShapeHold?.(event.nativeEvent)}
+        shapeSnapEnabled={shapeSnapEnabled}
+        shapeSnapHoldMs={shapeSnapHoldMs}
+        shapeSnapTolerancePt={shapeSnapTolerancePt}
         onViewportDiagnostic={(event) => onViewportDiagnostic?.(event.nativeEvent)}
       />
     );
   },
-);
+));

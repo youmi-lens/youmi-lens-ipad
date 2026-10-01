@@ -23,7 +23,12 @@ const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)),
 
 const recording = read('../app/recording.tsx');
 const liveCaptions = read('../lib/liveCaptions.tsx');
-const notebook = read('../components/NotebookCanvas.tsx');
+// PK4-C1 moved the toolbar's contextFade/toolbarTransition Animated values
+// (and the Mini screen's own NotebookCanvas render) out of NotebookCanvas.tsx
+// into the one shared SharedAnnotationToolbar component both Notebook and
+// Course Material render — the driver-consistency invariant this guards now
+// lives there.
+const notebook = read('../components/SharedAnnotationToolbar.tsx');
 
 console.log('P0-1 — recording decoupled from captions');
 check('the recorder starts first; captions only after `started`, never awaited before', () => {

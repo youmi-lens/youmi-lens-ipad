@@ -46,7 +46,7 @@ export type RecoverySource = {
 
 export type RecoverySourceDiscoveryResult =
   | { ok: true; sources: RecoverySource[] }
-  | { ok: false; reason: 'ambiguous_overlap' | 'durable_export_failed' | 'legacy_persist_failed' | 'no_sources'; detail: string };
+  | { ok: false; reason: 'ambiguous_overlap' | 'durable_export_failed' | 'legacy_persist_failed' | 'legacy_source_invalid' | 'no_sources'; detail: string };
 
 function durableSessionWindow(session: DurableRecordingSession): { startMs: number | null; endMs: number | null } {
   const segments = session.segments ?? [];
@@ -132,7 +132,12 @@ export async function discoverRecoverySources(
     } catch (error) {
       return {
         ok: false,
-        reason: 'legacy_persist_failed',
+        // A native AVAudioFile validation failure is deterministic for this
+        // immutable source. Retrying it cannot make an unfinalized/corrupt
+        // M4A valid, so callers must not render an endless Retry loop.
+        reason: error instanceof LegacyAudioAssemblyError && error.code === 'ERR_LEGACY_AUDIO_ASSEMBLY_SOURCE_VALIDATION_FAILED'
+          ? 'legacy_source_invalid'
+          : 'legacy_persist_failed',
         detail: error instanceof Error ? error.message : String(error),
       };
     }

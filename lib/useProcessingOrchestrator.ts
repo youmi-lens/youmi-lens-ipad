@@ -24,13 +24,26 @@ import { useEffect, useRef } from 'react';
 import { useAuth } from './auth';
 import { resolvePlayableLocalAudioUri } from './lectureLocalAudio';
 import { ProcessingUnrecoverableError, startRemoteProcessing } from './processRecording';
-import { nextProcessingAction, mergeProcessingSnapshot } from './processingResume.mjs';
+import {
+  nextProcessingAction,
+  mergeProcessingSnapshot,
+  resolvePollTick,
+  unreachablePollTickPatch,
+} from './processingResume.mjs';
 import { useData } from './store';
 import { fetchRemoteRecording } from './syncRecording';
 import { uploadLectureAudio } from './uploadRecording';
 
 const POLL_INTERVAL_MS = 3000;
 const MAX_POLL_ATTEMPTS = 80;
+// Real-incident evidence (2026-09-24, recording 9ca64d1f-…): a healthy backend
+// job legitimately took 6m14s and 5m33s to transcribe a 38-minute lecture —
+// both longer than MAX_POLL_ATTEMPTS * POLL_INTERVAL_MS (4 minutes). Crossing
+// that budget must never mean "failed"; it only means "stop polling this
+// aggressively." After it, polling continues indefinitely at this slower
+// cadence until the backend reports a real ready/failed — the backend holds
+// the authoritative job state, not this client-side budget.
+const SLOW_POLL_INTERVAL_MS = 20000;
 
 export function useProcessingOrchestrator(): void {
   const { loaded, lectures, getCourse, updateLecture } = useData();
@@ -231,29 +244,22 @@ export function useProcessingOrchestrator(): void {
           if (state.cancelled) return;
 
           const reference = lectures.find((l) => l.id === lectureId) ?? {};
-          const patch = mergeProcessingSnapshot(reference, remote);
-          updateLecture(lectureId, { ...patch, lastSyncedAt: new Date().toISOString() });
+          const merged = mergeProcessingSnapshot(reference, remote);
+          const result = resolvePollTick(merged, state.attempts, MAX_POLL_ATTEMPTS);
+          updateLecture(lectureId, { ...result.patch, lastSyncedAt: new Date().toISOString() });
 
-          if (patch.processingStatus === 'ready' || patch.processingStatus === 'failed') {
+          if (result.action === 'stop') {
             stop();
             return;
           }
-          if (state.attempts >= MAX_POLL_ATTEMPTS) {
-            updateLecture(lectureId, {
-              processingStatus: 'failed',
-              processingError: 'Processing is taking longer than expected. Please retry in a moment.',
-            });
-            stop();
-            return;
-          }
-          state.timer = setTimeout(() => void tick(), POLL_INTERVAL_MS);
-        } catch (error) {
+          state.timer = setTimeout(() => void tick(), result.slow ? SLOW_POLL_INTERVAL_MS : POLL_INTERVAL_MS);
+        } catch {
           if (state.cancelled) return;
-          updateLecture(lectureId, {
-            processingStatus: 'failed',
-            processingError: error instanceof Error ? error.message : 'Could not sync processing status.',
-          });
-          stop();
+          // A dropped status check is not backend failure — status is simply
+          // unknown for this tick. Keep polling (slow cadence) instead of
+          // declaring the lecture failed on one network hiccup.
+          updateLecture(lectureId, unreachablePollTickPatch());
+          state.timer = setTimeout(() => void tick(), SLOW_POLL_INTERVAL_MS);
         }
       };
 

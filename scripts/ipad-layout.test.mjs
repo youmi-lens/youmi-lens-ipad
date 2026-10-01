@@ -15,7 +15,15 @@ assert.match(responsive, /COMPACT_WIDTH_BREAKPOINT = 900/);
 assert.match(home, /const isTabletCompact = isPad && isCompact/);
 assert.match(home, /scrollTabletCompact/);
 assert.match(home, /emptyGridTabletCompact/);
-assert.match(home, /emptyGridTabletCompact: \{ minHeight: 650, justifyContent: 'space-between'/);
+// Release A note: this was a stale test, not a product bug. `git log -p`
+// confirms the layout was deliberately changed from
+// `{ minHeight: 650, justifyContent: 'space-between', ... }` to
+// `{ gap: 24, paddingBottom: 12 }` — the prior fixed-height/space-between
+// layout left a portrait-iPad empty state reading as an accidental hole
+// between two cramped cards rather than deliberate negative space. That
+// change already shipped (an ancestor of this release's own baseline); only
+// this assertion was never updated to match it.
+assert.match(home, /emptyGridTabletCompact: \{ gap: 24, paddingBottom: 12 \}/);
 assert.match(settings, /isCompact \? styles\.gridCompact : styles\.gridWide/);
 assert.match(settings, /gridWide: \{ gap: 24 \}/);
 assert.match(settings, /column: \{ gap: 16 \}/);

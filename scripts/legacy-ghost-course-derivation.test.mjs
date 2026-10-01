@@ -83,17 +83,17 @@ console.log('2/3 — an active legacy recording still derives its Course, includ
 check('a non-deleted row reaches the existing derivation logic unchanged (name compute, dedup, purge check, addCourse)', () => {
   assert.match(step2, /const courseName = normalizedCourseName\(row\.course\);/);
   assert.match(step2, /const nameKey = courseName\.toLowerCase\(\);/);
-  assert.match(step2, /if \(coursesByName\.has\(nameKey\)\) continue;/);
+  assert.match(step2, /if \(hasActiveCourseByName\(nameKey\)\) continue;/);
   assert.match(step2, /if \(isPurgedCourseName\(purged, courseName\)\) continue;/);
   assert.match(step2, /addCourse\(/);
 });
-check('the same-name dedup (coursesByName.has) is what makes "derive once" hold across a mix of rows for one name', () => {
+check('the same-name dedup (hasActiveCourseByName) is what makes "derive once" hold across a mix of rows for one name', () => {
   // Whichever row (active) is processed first adds the name; every other row
   // for that name — active or deleted — then short-circuits here, so a mix
   // of one deleted + one active recording still yields exactly one Course,
   // and only ever from an active row (the deleted-row guard runs first).
   const guardIdx = step2.indexOf('if (row.deleted_at) continue;');
-  const dedupIdx = step2.indexOf('if (coursesByName.has(nameKey)) continue;');
+  const dedupIdx = step2.indexOf('if (hasActiveCourseByName(nameKey)) continue;');
   assert.ok(guardIdx > -1 && dedupIdx > -1 && guardIdx < dedupIdx);
 });
 
@@ -101,7 +101,19 @@ console.log('5/6 — canonical Courses (step 1, id-based) are untouched by this 
 check('step 1 has no reference to liveRemoteRows or row.deleted_at — it is scoped to remoteCourses only, unchanged', () => {
   assert.doesNotMatch(step1, /liveRemoteRows/);
   assert.doesNotMatch(step1, /row\.deleted_at/);
-  assert.match(step1, /resolveDeletionState\(\{/); // still the sole authority for canonical Course deletion state
+  // Untouched by THIS (legacy ghost course) fix. A later, separate fix (the
+  // stale-hydration-race guard) wraps the call in resolveCourseDeletionState —
+  // which itself delegates straight to resolveDeletionState for every case
+  // except a newly-committed local lecture racing a not-yet-landed remote
+  // tombstone (see lib/deletionSync.mjs), so the freshness-clock comparison
+  // is still the sole authority for canonical Course deletion state, not
+  // reinvented here.
+  assert.match(step1, /resolveCourseDeletionState\(\{/);
+  const deletionSync = read('../lib/deletionSync.mjs');
+  const wrapper = deletionSync.slice(
+    deletionSync.indexOf('export function resolveCourseDeletionState'),
+  );
+  assert.match(wrapper, /return resolveDeletionState\(\{/);
 });
 check('step 1 still reserves cloud course identity (id + name) unconditionally, deleted or not', () => {
   assert.match(step1, /cloudCourseIds\.add\(cr\.id\)/);

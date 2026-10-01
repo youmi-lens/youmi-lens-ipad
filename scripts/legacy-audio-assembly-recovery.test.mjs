@@ -46,7 +46,7 @@ check('AudioSegmentComposer exists and uses AVMutableComposition + sequential in
 });
 
 check('DurableFinalAssetExporter (existing durable-session export) now delegates to the shared composer instead of its own inline loop', () => {
-  assert.match(durableExporter, /AudioSegmentComposer\.compose\(orderedSources: plan\.sourceURLs, outputURL: plan\.temporaryURL\)/);
+  assert.match(durableExporter, /AudioSegmentComposer\.compose\(\s*orderedSources: plan\.sourceURLs,\s*outputURL: plan\.temporaryURL(,\s*cancellation: cancellation)?\s*\)/);
   assert.doesNotMatch(durableExporter, /AVMutableComposition\(\)/, 'the composition loop must be extracted, not duplicated');
 });
 
@@ -385,9 +385,9 @@ check('the JS orchestrator exposes an early-preservation call distinct from the 
   assert.doesNotMatch(fn.slice(0, fn.indexOf('\n\n', 200)), /assembleLegacyAudio\(/);
 });
 
-check('recording.tsx calls early preservation right where audioAssemblyStatus is first set to required, in BOTH handleBack and finish\'s legacy branches — and never blocks navigation on its failure', () => {
+check('recording.tsx calls early preservation right where audioAssemblyStatus is first set to required, including finalized legacy Pause — and never blocks navigation on its failure', () => {
   const occurrences = (recordingScreen.match(/preserveLegacyAudioSourcesEarly\(/g) || []).length;
-  assert.equal(occurrences, 2, 'both write-sites call it');
+  assert.equal(occurrences, 3, 'every assembly-required write-site calls it');
   // Every call site must be followed by a dev-only warn, never a throw/Alert/return that would block leaving.
   let cursor = 0;
   for (let i = 0; i < occurrences; i += 1) {
@@ -406,12 +406,13 @@ check('a raw LegacyAudioAssemblyError message is never rendered directly to the 
   assert.match(processingScreen, /assemblyError \? t\('processing\.step\.assemblyFailed'\)/);
 });
 
-check('the retry button for an assembly failure is labeled distinctly from "Retry Upload" — assembly and upload are different failures', () => {
-  const start = processingScreen.indexOf('{assemblyRequired && !assembling ?');
+check('the retry button for a retryable assembly failure is labeled distinctly from "Retry Upload", while a native-proven invalid source is terminal', () => {
+  const start = processingScreen.indexOf('{assemblyRequired && !assembling && !assemblySourceInvalid ?');
   const end = processingScreen.indexOf('\n', start);
   const line = processingScreen.slice(start, end);
   assert.match(line, /t\('processing\.step\.retryRecovery'\)/);
   assert.doesNotMatch(line, /retryUpload/);
+  assert.match(processingScreen, /const assemblySourceInvalid = lecture\?\.mediaIntegrityStatus === 'legacy_source_invalid';/);
 });
 
 check('the friendly failure copy does not overclaim full safety when a source is actually missing', () => {

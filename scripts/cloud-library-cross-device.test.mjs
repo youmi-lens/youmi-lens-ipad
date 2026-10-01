@@ -157,8 +157,19 @@ check('G write: delete sends deleted_at + deletion_updated_at atomically, with n
   assert.match(deletionWriter, /\.update\(\{ deleted_at: deletedAt, deletion_updated_at: deletionUpdatedAt \}\)/);
   assert.doesNotMatch(deletionWriter, /pushRecordingPatch|delete next\[key\]|retrying without/);
 });
-check('H write: restore preserves the existing explicit deletion freshness write', () => {
-  assert.match(store, /pushRecordingPatch\(\{ deleted_at: null, deletion_updated_at: now \}/);
+check('H write: lecture restore reuses the VERIFIED deletion sync path (read-back, retryable), not fire-and-forget', () => {
+  const fn = store.slice(store.indexOf('const restoreLecture ='), store.indexOf('const permanentlyDeleteCourse ='));
+  assert.match(fn, /void syncLectureDeletion\(\[id\], \[target\.remoteRecordingId\], null, now\)/);
+  assert.doesNotMatch(fn, /pushRecordingPatch/, 'restore must not use the unverified fire-and-forget push');
+});
+check('H: restoreLecture stamps deletionSyncState pending optimistically, same as delete', () => {
+  const fn = store.slice(store.indexOf('const restoreLecture ='), store.indexOf('const permanentlyDeleteCourse ='));
+  assert.match(fn, /deletionSyncState: 'pending' as const, deletionSyncError: undefined/);
+});
+check('H: restoring a lecture whose parent course is cloud-deleted also restores the course server-side', () => {
+  const fn = store.slice(store.indexOf('const restoreLecture ='), store.indexOf('const permanentlyDeleteCourse ='));
+  assert.match(fn, /if \(course\?\.deletedAt\)/);
+  assert.match(fn, /writeCourseDeletion\(currentUserId, target\.courseId, course\.name, null, now\)/);
 });
 check('E/F write: notes & marks push notes/marked_timestamps + their freshness clocks', () => {
   assert.match(store, /cloud\.notes = patch\.notes[\s\S]{0,60}cloud\.notes_updated_at = now/);
@@ -187,7 +198,7 @@ check('course rename updates authoritative courses.name by stable id (+ legacy l
 console.log('Course identity — merge associates lectures by stable course_id first');
 check('merge resolves a lecture course by course_id before name, and heals missing course_id', () => {
   assert.match(store, /const courseById = row\.course_id \? coursesById\.get\(row\.course_id\) : undefined;/);
-  assert.match(store, /const course = courseById \?\? coursesByName\.get\(courseName\.toLowerCase\(\)\);/);
+  assert.match(store, /const course = courseById \?\? resolveActiveCourseByName\(courseName\);/);
   assert.match(store, /courseIdFixups\.push\(\{ id: row\.id, course_id: course\.id \}\)/);
 });
 
@@ -206,20 +217,45 @@ check('A: createCourse inserts an authoritative courses row keyed by a stable UU
   const fn = store.slice(store.indexOf('const createCourse ='), store.indexOf('const createLecture ='));
   assert.match(fn, /id: makeUuid\(\)/);                              // id === courses.id
   assert.match(fn, /supabase\.from\('courses'\)\.insert\(full\)/);   // cloud insert (icon/tint/accent)
-  assert.match(fn, /insert\(\{ id: course\.id, user_id: currentUserId, name: course\.name \}\)/); // prod fallback
+  assert.match(fn, /insert\(\{ id: course\.id, user_id: currentUserId, name: course\.name, icon: course\.icon, tint: course\.tint, accent: course\.accent \}\)/); // fallback retains required visual fields
 });
-check('I: deleteCourse/restoreCourse write account-level courses deletion with a freshness clock', () => {
+check('I: deleteCourse/restoreCourse use UUID-keyed, read-back-confirmed course deletion', () => {
   const del = store.slice(store.indexOf('const deleteCourse ='), store.indexOf('const restoreCourse ='));
   const res = store.slice(store.indexOf('const restoreCourse ='), store.indexOf('const restoreLecture ='));
-  assert.match(del, /writeCourseDeletion\(currentUserId, id, courseName, now, now\)/);
-  assert.match(res, /writeCourseDeletion\(currentUserId, id, courseName, null, now\)/);
+  assert.match(del, /deletionSyncState: 'pending'/);
+  assert.match(del, /syncCourseDeletion\(id, now, now\)/);
+  assert.match(res, /await syncCourseDeletion\(id, null, now\)/);
 });
-check('writeCourseDeletion targets courses.deleted_at + deletion_updated_at, with a prod-minimal retry', () => {
-  const at = store.indexOf('function writeCourseDeletion');
-  const fn = store.slice(at, at + 1000);
+check('syncCourseDeletion targets exact UUID and requires the row back from Supabase', () => {
+  const at = store.indexOf('const syncCourseDeletion =');
+  const fn = store.slice(at, at + 2200);
   assert.match(fn, /\.from\('courses'\)/);
-  assert.match(fn, /deleted_at: deletedAt, deletion_updated_at: now, updated_at: now/);
-  assert.match(fn, /\.update\(\{ deleted_at: deletedAt \}\)/);       // minimal retry where freshness col absent
+  assert.match(fn, /\.eq\('id', courseId\)/);
+  assert.match(fn, /\.eq\('user_id', currentUserId\)/);
+  assert.match(fn, /\.select\('id,deleted_at,deletion_updated_at'\)/);
+  assert.match(fn, /deletionSyncState: 'failed'/);
+});
+console.log('I2 — production courses now carry a real deletion freshness clock (schema gap closed)');
+check('§restore-regression: a second device with a STALE cached-deleted course (no clock) adopts a genuinely newer remote restore', () => {
+  // This is the exact bug: before courses.deletion_updated_at existed, remote
+  // never carried a clock, so a device that once cached this course as deleted
+  // (no clock either side) permanently won the tie-break and could never see a
+  // restore from another device. With a real remote clock now populated by an
+  // explicit restore, the newer decision wins regardless of local's own clock.
+  const restore = applyDeletionDecision(false, T2);
+  const r = resolveDeletionState({
+    localDeletedAt: T1, localDeletionUpdatedAt: undefined, // B: cached deleted from before the schema fix, no clock
+    remoteDeletedAt: restore.deletedAt, remoteDeletionUpdatedAt: restore.deletionUpdatedAt,
+  });
+  assert.equal(r.deletedAt, null, 'a real remote restore clock must override a clockless stale local deletion');
+  assert.equal(r.source, 'remote');
+});
+check('§restore-regression: a course with NO remote clock at all (pre-migration data) still falls back to remote deleted_at, never silently active', () => {
+  const r = resolveDeletionState({
+    localDeletedAt: null, localDeletionUpdatedAt: undefined,
+    remoteDeletedAt: T1, remoteDeletionUpdatedAt: undefined,
+  });
+  assert.equal(isDeleted(r.deletedAt), true, 'no-clock-either-side must still respect an actual remote deleted_at');
 });
 check('applyRemoteRecordings heals missing course_id pointers server-side (fire-and-forget)', () => {
   assert.match(store, /for \(const fix of merged\.courseIdFixups\)/);

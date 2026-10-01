@@ -16,7 +16,8 @@ assert.match(
 );
 assert.match(sources, /performCheckpointRollover/, 'internal checkpoint rollover must exist');
 assert.match(sources, /checkpointGeneration/, 'stale checkpoint callbacks must be identity-gated');
-assert.match(sources, /reason: "checkpoint"/, 'checkpoint commits must tag interruptionReason');
+assert.match(sources, /commitReason: String = "checkpoint"/, 'checkpoint commits must tag interruptionReason');
+assert.match(sources, /finalizeActiveSegment\(recordingSessionId: recordingSessionId, reason: commitReason\)/);
 assert.match(
   sources,
   /func scheduleCheckpoint\(\)/,
@@ -30,8 +31,13 @@ assert.doesNotMatch(
 
 assert.match(
   sources,
-  /_ = try beginSegment\(recordingSessionId: recordingSessionId, resuming: true\)\s*\n\s*scheduleCheckpoint\(\)/,
+  /try beginCheckpointSegment\(recordingSessionId: recordingSessionId, previousCommitted: previousCommitted\)\s*\n\s*scheduleCheckpoint\(\)/,
   'successful checkpoint must begin the next segment and reschedule',
+);
+assert.match(
+  sources,
+  /failureInterruption: String = "checkpoint_begin_segment_failed"/,
+  'a failed next-segment open during checkpoint rollover must be distinguishably tagged for JS',
 );
 assert.match(
   sources,

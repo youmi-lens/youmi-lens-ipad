@@ -20,7 +20,9 @@ import { formatDate } from '@/lib/format';
 import { ensureGuestIapIdentity, hasGuestIapIdentity } from '@/lib/guestIap';
 import { useI18n } from '@/lib/i18n';
 import { fetchPlanStatus, PlanStatus, safeAccessLabel } from '@/lib/planStatus';
-import { purchaseService } from '@/lib/purchases';
+import { subscriptionService } from '@/lib/subscriptions';
+import { boundedPaymentTask, PAYMENT_UI_WAIT_TIMEOUT_MS } from '@/lib/boundedPaymentTask';
+import { logDiag } from '@/lib/iapDiag';
 import { useData } from '@/lib/store';
 import { useTutorial } from '@/lib/tutorial';
 import { useTutorialTour } from '@/lib/tutorialTour';
@@ -139,9 +141,12 @@ export default function SettingsScreen() {
     setPlanLoading(true);
     setPlanError(null);
     try {
-      setPlanStatus(await fetchPlanStatus(session.access_token));
+      const status = await boundedPaymentTask(() => fetchPlanStatus(session.access_token), PAYMENT_UI_WAIT_TIMEOUT_MS, 'plan_status');
+      setPlanStatus(status);
+      return status;
     } catch {
       setPlanError(t('settings.plan.statusUnavailable'));
+      return null;
     } finally {
       setPlanLoading(false);
     }
@@ -200,10 +205,17 @@ export default function SettingsScreen() {
     if (restoringPurchases) return;
     setRestoringPurchases(true);
     try {
-      const result = await purchaseService.restoreStudentPass(session.access_token);
-      await loadPlan();
+      const result = await subscriptionService.restore(session.access_token);
+      logDiag('entitlement_refresh_started');
+      const refreshedStatus = await boundedPaymentTask(loadPlan, PAYMENT_UI_WAIT_TIMEOUT_MS, 'entitlement_refresh');
+      logDiag(refreshedStatus ? 'entitlement_refresh_succeeded' : 'entitlement_refresh_failed');
+      if (!refreshedStatus && result.ok) {
+        Alert.alert(t('settings.alerts.accessRefreshFailTitle'), t('settings.alerts.accessRefreshFailBody'));
+        return;
+      }
       Alert.alert(result.ok ? t('settings.alerts.accessRefreshedTitle') : t('settings.alerts.accessStatusTitle'), result.message);
     } catch (error) {
+      logDiag('entitlement_refresh_failed');
       // Raw technical detail stays in logs; the user sees a localized generic message.
       console.warn('[settings] refresh access failed', error);
       Alert.alert(
@@ -212,6 +224,7 @@ export default function SettingsScreen() {
       );
     } finally {
       setRestoringPurchases(false);
+      logDiag('restore_busy_cleared');
     }
   };
   const handleClearData = () => Alert.alert(t('settings.alerts.clearTitle'), t('settings.alerts.clearBody'), [

@@ -32,7 +32,7 @@ let passed = 0;
 const check = (label, fn) => { fn(); passed += 1; console.log(`  ok  ${label}`); };
 
 const endStroke = source.slice(source.indexOf('  func endStroke('), source.indexOf('  func cancelStroke('));
-const eraseStroke = source.slice(source.indexOf('  func eraseStroke('), source.indexOf('  // MARK: - Loading committed strokes from JS'));
+const eraseSweep = source.slice(source.indexOf('  private func eraseSweep('), source.indexOf('  /// JS calls this immediately before an Undo restores'));
 const loadAnnotations = source.slice(source.indexOf('  func loadAnnotations('), source.indexOf('  func loadTextAnnotations('));
 
 console.log('Stroke identity: reconciliation is ID-based (the model already carries UUIDs)');
@@ -81,10 +81,22 @@ check('no arbitrary timers were introduced to hide the flash', () => {
 
 console.log('Intentional delete still wins even for a not-yet-acknowledged stroke');
 
-check('eraseStroke clears the erased id from pendingLocalStrokeIds before removing it, so a stale snapshot cannot resurrect it', () => {
-  assert.match(eraseStroke, /pendingLocalStrokeIds\.remove\(strokes\[eraseIndex\]\.id\)/);
-  assert.ok(eraseStroke.indexOf('pendingLocalStrokeIds.remove(strokes[eraseIndex].id)') <
-    eraseStroke.indexOf('strokes.remove(at: eraseIndex)'), 'unmarked as pending before the actual removal');
+check('eraseSweep clears unacknowledged additions and adds deletion tombstones before removing, so stale snapshots cannot resurrect them', () => {
+  assert.match(eraseSweep, /pendingLocalStrokeIds\.subtract\(removedIds\)/);
+  assert.match(eraseSweep, /pendingLocalEraseIds\.formUnion\(removedIds\)/);
+  assert.match(eraseSweep, /strokes\.removeAll \{ removed\.contains\(\$0\.id\) \}/);
+  assert.ok(eraseSweep.indexOf('pendingLocalEraseIds.formUnion(removedIds)') <
+    eraseSweep.indexOf('strokes.removeAll'), 'tombstone exists before actual native removal');
+});
+
+check('loadAnnotations filters an older snapshot while its erased ids remain pending, then acknowledges their absence', () => {
+  assert.match(loadAnnotations, /let acknowledgedEraseIds = pendingLocalEraseIds\.subtracting\(loadedIds\)/);
+  assert.match(loadAnnotations, /pendingLocalEraseIds\.subtract\(acknowledgedEraseIds\)/);
+  assert.match(loadAnnotations, /filter \{ !pendingLocalEraseIds\.contains\(\$0\.id\) \}/);
+});
+
+check('an intentional Undo can clear only the erase tombstone before restoring its snapshot', () => {
+  assert.match(source, /func markStrokeRestorationIntent\(ids: \[String\]\)[\s\S]*?pendingLocalEraseIds\.subtract\(ids\)/);
 });
 
 console.log('Existing annotation persistence format and layer-reuse optimization are untouched');

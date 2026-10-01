@@ -19,6 +19,12 @@ public final class ExpoPdfAnnotationModule: Module {
         "onAnnotationsChanged",
         "onEraserGestureEnded",
         "onTextAnnotationAction",
+        "onSelectionChanged",
+        "onSelectionMoved",
+        "onShapeEdited",
+        "onSelectionScaled",
+        "onPencilActivity",
+        "onShapeHold",
         "onViewportDiagnostic"
       )
 
@@ -34,11 +40,30 @@ public final class ExpoPdfAnnotationModule: Module {
       }
 
       Prop("annotationMode") { (view: PdfAnnotationView, mode: String?) in
-        view.annotationMode = mode ?? "scroll"
+        // Expo Fabric invokes every declared prop setter on a view update and
+        // supplies nil for props this screen intentionally controls by command.
+        // Absence therefore means "leave imperative interaction state alone";
+        // callers that want navigation pass the explicit "scroll" mode.
+        guard let mode else { return }
+        view.annotationMode = mode
+      }
+      Prop("selectionShape") { (view: PdfAnnotationView, shape: String?) in
+        view.selectionShape = shape == "rect" ? "rect" : "lasso"
+      }
+
+      Prop("shapeSnapEnabled") { (view: PdfAnnotationView, enabled: Bool?) in
+        view.shapeSnapEnabled = enabled ?? false
+      }
+      Prop("shapeSnapHoldMs") { (view: PdfAnnotationView, ms: Double?) in
+        view.shapeSnapHoldMs = ms ?? 650
+      }
+      Prop("shapeSnapTolerancePt") { (view: PdfAnnotationView, pt: Double?) in
+        view.shapeSnapTolerancePt = pt ?? 3.5
       }
 
       Prop("penColor") { (view: PdfAnnotationView, color: String?) in
-        view.penColor = color ?? "#061B34"
+        guard let color else { return }
+        view.penColor = color
       }
 
       Prop("penWidth") { (view: PdfAnnotationView, width: Double?) in
@@ -46,7 +71,8 @@ public final class ExpoPdfAnnotationModule: Module {
       }
 
       Prop("highlighterColor") { (view: PdfAnnotationView, color: String?) in
-        view.highlighterColor = color ?? "#FFE066"
+        guard let color else { return }
+        view.highlighterColor = color
       }
 
       Prop("highlighterWidth") { (view: PdfAnnotationView, width: Double?) in
@@ -69,18 +95,41 @@ public final class ExpoPdfAnnotationModule: Module {
         view.textAnnotationsByPage = value
       }
 
-      Prop("selectedTextAnnotationId") { (view: PdfAnnotationView, value: String?) in
-        view.selectedTextAnnotationId = value
-      }
-
       AsyncFunction("setPageAsync") { (view: PdfAnnotationView, pageNumber: Int) in
         view.setPage(pageNumber)
+      }
+      AsyncFunction("setAnnotationModeAsync") { (view: PdfAnnotationView, mode: String) in
+        view.annotationMode = mode
+      }
+      AsyncFunction("setPenColorAsync") { (view: PdfAnnotationView, color: String) in
+        view.penColor = color
+      }
+      AsyncFunction("setHighlighterColorAsync") { (view: PdfAnnotationView, color: String) in
+        view.highlighterColor = color
       }
       AsyncFunction("flushViewportAsync") { (view: PdfAnnotationView) in
         view.flushViewport()
       }
       AsyncFunction("captureViewportAsync") { (view: PdfAnnotationView) -> [String: Any] in
         view.captureViewportPayload()
+      }
+      AsyncFunction("markStrokeRemovalIntentAsync") { (view: PdfAnnotationView, ids: [String]) in
+        view.markStrokeRemovalIntent(ids: ids)
+      }
+      AsyncFunction("markStrokeRestorationIntentAsync") { (view: PdfAnnotationView, ids: [String]) in
+        view.markStrokeRestorationIntent(ids: ids)
+      }
+      AsyncFunction("setTextHistoryIntentAsync") { (view: PdfAnnotationView, pageNumber: Int, annotations: [[String: Any]]) in
+        view.setTextHistoryIntent(pageNumber: pageNumber, annotations: annotations)
+      }
+      AsyncFunction("applyShapeSnapAsync") { (view: PdfAnnotationView, token: Int, points: [[Double]], shape: [String: Any]?) in
+        view.applyShapeSnap(token: token, points: points, shape: shape)
+      }
+      AsyncFunction("clearSelectionAsync") { (view: PdfAnnotationView) in
+        view.clearSelection()
+      }
+      AsyncFunction("setSelectionAsync") { (view: PdfAnnotationView, pageNumber: Int, ids: [String]) in
+        view.setSelection(pageNumber: pageNumber, ids: ids)
       }
     }
   }
@@ -108,23 +157,49 @@ enum PdfAnnotatedExporter {
         let bounds = page?.bounds(for: .mediaBox) ?? finalBounds
         rendererContext.beginPage(withBounds: bounds, pageInfo: [:])
         let context = rendererContext.cgContext
-        if let page { page.draw(with: .mediaBox, to: context) }
-        drawStrokes(strokes[String(index + 1)] as? [[String: Any]] ?? [], context: context)
+        if let page {
+          // UIGraphicsPDFRenderer hands out a context in the top-left-origin,
+          // y-down (UIKit) coordinate convention. PDFPage.draw(with:to:) draws
+          // assuming the standard PDF bottom-left-origin, y-up convention —
+          // calling it directly here rendered every exported page vertically
+          // mirrored (proven via an isolated fixture export: TOP/BOTTOM swapped,
+          // every glyph upside-down). This flips the context to PDF's own
+          // convention for just this one draw call, then restores it so the
+          // annotation drawing below (already authored for this context's
+          // native y-down convention) is unaffected.
+          context.saveGState()
+          context.translateBy(x: 0, y: bounds.height)
+          context.scaleBy(x: 1, y: -1)
+          page.draw(with: .mediaBox, to: context)
+          context.restoreGState()
+        }
+        drawStrokes(strokes[String(index + 1)] as? [[String: Any]] ?? [], context: context, pageHeight: bounds.height)
         drawText(texts[String(index + 1)] as? [[String: Any]] ?? [], context: context, pageHeight: bounds.height)
       }
     }
     return destination.absoluteString
   }
 
-  private static func drawStrokes(_ strokes: [[String: Any]], context: CGContext) {
+  private static func drawStrokes(_ strokes: [[String: Any]], context: CGContext, pageHeight: CGFloat) {
+    // Stroke points are captured and stored in PDF PAGE space — bottom-left
+    // origin, y-UP (PdfAnnotationView captures them via
+    // `pdfView.convert(viewPoint, to: page)`). The export context supplied by
+    // UIGraphicsPDFRenderer is top-left origin, y-DOWN. The base page above is
+    // flipped to draw correctly, then restored to y-down before annotations
+    // draw — so stroke points must be flipped here to `pageHeight - y`, the
+    // same convention drawText already uses for this same y-down context, or
+    // every stroke renders vertically mirrored relative to the (correct) base
+    // page (physically observed: printed content upright, handwriting
+    // upside-down). Proven by the rendered geometry fixture in
+    // __tests__/pdf_export_annotation_orientation_fixture.swift.
     for stroke in strokes {
       guard let raw = stroke["points"] as? [[Double]], let first = raw.first, first.count >= 2 else { continue }
       context.saveGState()
       if (stroke["tool"] as? String) == "highlighter" { context.setBlendMode(.multiply) }
       context.setStrokeColor(PdfExporterColor(hex: stroke["color"] as? String ?? "#061B34").withAlphaComponent(CGFloat(stroke["opacity"] as? Double ?? ((stroke["tool"] as? String) == "highlighter" ? 0.34 : 1))).cgColor)
       context.setLineWidth(CGFloat(stroke["width"] as? Double ?? 2.4)); context.setLineCap(.round); context.setLineJoin(.round)
-      context.move(to: CGPoint(x: first[0], y: first[1]))
-      for point in raw.dropFirst() where point.count >= 2 { context.addLine(to: CGPoint(x: point[0], y: point[1])) }
+      context.move(to: CGPoint(x: first[0], y: pageHeight - first[1]))
+      for point in raw.dropFirst() where point.count >= 2 { context.addLine(to: CGPoint(x: point[0], y: pageHeight - point[1])) }
       context.strokePath()
       context.restoreGState()
     }
@@ -135,11 +210,13 @@ enum PdfAnnotatedExporter {
       guard let text = annotation["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
       let x = CGFloat(annotation["x"] as? Double ?? 0), y = CGFloat(annotation["y"] as? Double ?? 0), width = max(40, CGFloat(annotation["width"] as? Double ?? 180))
       let font = UIFont.systemFont(ofSize: max(8, CGFloat(annotation["fontSize"] as? Double ?? 16)))
-      let paragraph = NSMutableParagraphStyle(); paragraph.lineBreakMode = .byWordWrapping
-      let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.label, .paragraphStyle: paragraph]
-      let size = (text as NSString).boundingRect(with: CGSize(width: width, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: attributes, context: nil).size
+      let attributes = MaterialTextGeometry.attributes(fontSize: Double(font.pointSize))
+      let rect = MaterialTextGeometry.pageRect(
+        text: text, x: Double(x), y: Double(y), width: Double(width),
+        fontSize: Double(font.pointSize), anchor: annotation["anchor"] as? String
+      )
       UIGraphicsPushContext(context)
-      (text as NSString).draw(in: CGRect(x: x, y: pageHeight - y - size.height, width: width, height: size.height + 2), withAttributes: attributes)
+      (text as NSString).draw(in: CGRect(x: rect.minX, y: pageHeight - rect.maxY, width: rect.width, height: rect.height), withAttributes: attributes)
       UIGraphicsPopContext()
     }
   }

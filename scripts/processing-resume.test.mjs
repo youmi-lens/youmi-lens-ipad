@@ -5,6 +5,7 @@ import {
   isLectureComplete,
   nextProcessingAction,
   mergeProcessingSnapshot,
+  resolvePollTick,
 } from '../lib/processingResume.mjs';
 
 // A committed lecture that has finished recording and has a remote key + audio.
@@ -224,6 +225,56 @@ const genuineRaceStillBlocked = mergeProcessingSnapshot(
   { ...wr2Snapshot, translated_live_transcript: null },
 );
 assert.equal(genuineRaceStillBlocked.processingStatus, 'processing', 'with no translated content anywhere, done is still just a race, not readiness');
+
+// ---- No-speech empty success: ai_status 'done' is authoritative even with
+// empty content (real production incidents, 2026-09-28: recordings
+// 7885e218-2814-4284-bfe9-dbca471a33a8 and b1aee347-08be-4b45-b12f-3e3e7a0cd869) ----
+// A genuine DashScope SUCCESS_WITH_NO_VALID_FRAGMENT completion: the backend
+// (server/processRecording.mjs's markDoneEmptyNoSpeech) writes transcript as
+// an explicit empty STRING, atomically with ai_status/summary fields. Before
+// this fix, mergeProcessingSnapshot's content-based hasCompleteLanguagePair
+// gate could never be satisfied by empty content, so the poll loop never
+// reached a terminal state — the exact "infinite Waiting for Processing
+// updates" / Ready↔Processing flicker the physical test exposed (store.tsx's
+// separate, unconditional processingStatusFromRemote() correctly computed
+// 'ready' from ai_status alone, so the two paths disagreed and fought over
+// the same stored field — see scripts/processing-status-no-speech-ready
+// .test.mjs for the full mechanism proof).
+const noSpeechReady = mergeProcessingSnapshot(
+  {},
+  { ai_status: 'done', transcript: '', summary_en: '', summary_zh: '', source_summary: '', translated_summary: null },
+);
+assert.equal(noSpeechReady.processingStatus, 'ready', 'ai_status done + transcript "" (no-speech) must be ready immediately, not processing');
+
+// Must be reachable from an in-progress lecture too, not just a blank reference.
+const noSpeechReadyFromProcessing = mergeProcessingSnapshot(
+  { processingStatus: 'processing' },
+  { ai_status: 'done', transcript: '' },
+);
+assert.equal(noSpeechReadyFromProcessing.processingStatus, 'ready');
+
+// The poll loop must actually STOP on this snapshot — this is what makes
+// "Waiting for Processing updates" disappear instead of spinning forever.
+const noSpeechPollResult = resolvePollTick(noSpeechReady, 1, 80);
+assert.equal(noSpeechPollResult.action, 'stop', 'the poll loop must stop on a no-speech ready snapshot, not keep polling indefinitely');
+
+// A merely-missing (null/undefined) transcript is NOT the same signal and must
+// NOT be treated as no-speech-ready — only an explicit empty STRING (the
+// literal value markDoneEmptyNoSpeech writes) qualifies. This is exactly the
+// pre-existing `doneButEmpty` guard above (transcript: null stays
+// 'processing') — restated here to make the null-vs-empty-string distinction
+// this fix depends on explicit and directly regression-tested.
+const doneWithNullTranscriptStillProcessing = mergeProcessingSnapshot({}, { ai_status: 'done', transcript: null });
+assert.equal(doneWithNullTranscriptStillProcessing.processingStatus, 'processing', 'transcript: null (missing) must not be confused with transcript: "" (no-speech)');
+const doneWithUndefinedTranscriptStillProcessing = mergeProcessingSnapshot({}, { ai_status: 'done' });
+assert.equal(doneWithUndefinedTranscriptStillProcessing.processingStatus, 'processing', 'transcript: undefined (absent field) must not be confused with transcript: "" (no-speech)');
+
+// The existing multi-stage race guards (WR112/WR2, French/Chinese) must be
+// completely unaffected — they all have REAL, non-empty transcript content,
+// so the new transcript === '' branch never fires for them; they still fall
+// through to the unchanged hasCompleteLanguagePair check below.
+assert.equal(frenchChineseRace.processingStatus, 'processing', 'regression: the no-speech branch must not affect the real French/Chinese race guard');
+assert.equal(genuineRaceStillBlocked.processingStatus, 'processing', 'regression: the no-speech branch must not affect the real WR112/WR2 race guard');
 
 // ---- Terminal-state monotonicity: READY must never regress to PROCESSING ----
 // A lecture already marked 'ready' locally must stay 'ready' even if a fresh

@@ -65,10 +65,11 @@ export function useLectureRecorder(options: {
   }, [options.visualFixture, fixturePaused]);
   const fixture: LectureRecorder = {
     engine: 'legacy', permissionChecked: true, permissionStatus: 'granted', recoveryChecked: true,
-    recoverableSession: null, isRecording: true, isPaused: fixturePaused, durationMillis: fixtureMillis,
-    recordingUri: null, error: null, errorDetail: null,
+    recoverableSession: null, isRecording: true, isPaused: fixturePaused, degradedReason: null, durationMillis: fixtureMillis,
+    recordingUri: null, liveFileUri: null, error: null, errorDetail: null,
     requestPermission: async () => true, startRecording: async () => true,
-    pauseRecording: async () => setFixturePaused(true), resumeRecording: async () => setFixturePaused(false),
+    pauseRecording: async () => { setFixturePaused(true); return true; },
+    resumeRecording: async () => { setFixturePaused(false); return true; },
     stopRecording: async () => null, leaveRecording: async () => null, recoverRecording: async () => false,
     finishRecoverableRecording: async () => null, acknowledgeFinalizedOutput: async () => true,
     discardRecoverableRecording: async () => {}, dismissRecovery: () => {},

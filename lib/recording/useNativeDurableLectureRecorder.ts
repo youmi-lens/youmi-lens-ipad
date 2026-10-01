@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
+import { traceRecordingLifecycle } from './lifecycleTrace';
 
 import {
   abandonSession,
@@ -11,6 +12,7 @@ import {
   finalizeSession,
   getMicrophonePermissionStatus,
   getRecordingStatus,
+  getSession,
   listRecoverableSessions,
   pauseRecording as pauseNative,
   prepareRecording,
@@ -19,18 +21,29 @@ import {
   startRecording as startNative,
   stopRecording as stopNative,
   transitionSession,
+  DurableRecorderError,
   type DurableRecordingSession,
   type DurableRecordingStatus,
 } from '@/modules/expo-durable-recorder';
 
 import { durationBucket, logRecordingEvent } from './diagnostics';
 import { finalizeAndExportDurableSession } from './durableSessionRecovery';
+import { finishFailureUserMessage } from './finishFailure.mjs';
 import { finalizedDurationMillis, recoverableSessionsForLecture } from './policy.mjs';
 import { evaluateNativeStatusUpdate } from './statusSync.mjs';
 import type { LectureRecorder, RecorderPermission } from './types';
 
 function permission(value: string): RecorderPermission {
   return value === 'granted' ? 'granted' : value === 'denied' || value === 'restricted' ? 'denied' : 'undetermined';
+}
+
+// A different session is GENUINELY, actively recording right now — the one
+// conflict a paused session's ownership release (native claim()) still
+// correctly refuses to silently resolve. Distinguishing it lets the UI show
+// a clear, specific reason instead of the generic "Could not resume/start
+// the recording." both share otherwise.
+function isRecorderBusyError(failure: unknown): boolean {
+  return failure instanceof DurableRecorderError && failure.code === 'ERR_DURABLE_RECORDER_BUSY';
 }
 
 export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: string): LectureRecorder {
@@ -40,6 +53,9 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
   const [recoverableSession, setRecoverableSession] = useState<DurableRecordingSession | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
+  // See LectureRecorder.degradedReason — non-null only for a pause the owner
+  // didn't choose (checkpoint rollover failure, interruption, route change).
+  const [degradedReason, setDegradedReason] = useState<string | null>(null);
   const [durationMillis, setDurationMillis] = useState(0);
   const [recordingUri, setRecordingUri] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -50,6 +66,9 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
   const activeRef = useRef(false);
   const lastStatusSequenceRef = useRef(0);
   const finishingRef = useRef(false);
+  // Duration of the durable final asset (AVFoundation-inspected) from the last successful Finish. The only
+  // authoritative lecture duration for this engine — see resolveFinalLectureDurationMillis.
+  const finalAssetDurationMillisRef = useRef<number | null>(null);
 
   const noteStatusSequence = useCallback((status: DurableRecordingStatus | null | undefined) => {
     if (typeof status?.statusSequence === 'number' && status.statusSequence > lastStatusSequenceRef.current) {
@@ -57,7 +76,14 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
     }
   }, []);
 
+  const fail = useCallback((message: string, failure: unknown) => {
+    const detail = failure instanceof Error ? failure.message : String(failure);
+    setError(message); setErrorDetail(detail);
+    if (__DEV__) console.warn('[recorder] native durable operation failed', { message: detail });
+  }, []);
+
   const applySession = useCallback((session: DurableRecordingSession) => {
+    traceRecordingLifecycle('SESSION_APPLIED', { state: session.state, segments: session.segments.length });
     sessionRef.current = session;
     const base = finalizedDurationMillis(session);
     baseDurationRef.current = base;
@@ -66,9 +92,19 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
     setIsRecording(session.state === 'recording');
     activeRef.current = session.state === 'recording';
     setIsPaused(session.state === 'paused');
+    // Any direct session apply (recovery hydration, explicit pause/resume/
+    // finish) reflects the owner's own action or a fresh reattachment —
+    // clear any stale degraded flag. The one place that SETS it
+    // (applyNativeStatus's forced-pause branch, below) calls this first via
+    // the same path, then sets it right after.
+    setDegradedReason(null);
   }, []);
 
   const applyNativeStatus = useCallback((status: DurableRecordingStatus) => {
+    traceRecordingLifecycle('NATIVE_STATUS_RECEIVED', {
+      runtime: status.runtimeState, sessionState: status.session?.state, interruption: status.interruptionState ?? null,
+      route: status.routeChangeState ?? null, seq: status.statusSequence ?? null,
+    });
     const current = sessionRef.current;
     const decision = evaluateNativeStatusUpdate({
       currentSessionId: current?.recordingSessionId,
@@ -94,6 +130,26 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
       const wasRecording = activeRef.current || current.state === 'recording';
       applySession(session);
       if (wasRecording) {
+        // A forced transition FROM recording (never one the owner chose —
+        // pauseRecording() below applies its own session directly and never
+        // reaches this branch). Surface the reason so the UI can show a
+        // targeted "tap Resume to continue" recovery state instead of a
+        // plain, indistinguishable paused screen — this is the fix for the
+        // P0 where a checkpoint rollover failure left the owner staring at
+        // an ordinary-looking paused screen with no indication anything had
+        // gone wrong.
+        setDegradedReason(status.interruptionState ?? status.routeChangeState ?? 'native_forced_pause');
+        // Reuses the SAME error surface the screen already renders (no new
+        // UI) — only for this specific, previously-silent P0 case. A plain
+        // interruption/route-change forced pause is left exactly as it
+        // already behaved (out of this fix's scope), since those already
+        // have their own established, working recovery flow.
+        if (
+          status.interruptionState === 'checkpoint_begin_segment_failed'
+          || status.interruptionState === 'route_recovery_failed'
+        ) {
+          fail('Recording paused — tap Resume to continue.', status.interruptionState);
+        }
         logRecordingEvent('native_recording_paused', {
           segmentCount: session.segments.length,
           reason: status.interruptionState
@@ -115,6 +171,9 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
         setIsPaused(false);
         setIsRecording(true);
         setDurationMillis(baseDurationRef.current);
+        // Native recovered on its own (automatic recovery after a protective pause): the pause warning is stale.
+        setDegradedReason(null);
+        setError(null); setErrorDetail(null);
       }
       return;
     }
@@ -125,25 +184,29 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
       setIsRecording(false);
       setIsPaused(false);
     }
-  }, [applySession]);
-
-  useEffect(() => () => {
-    const session = sessionRef.current;
-    if (enabled && activeRef.current && session) {
-      void pauseNative({ recordingSessionId: session.recordingSessionId }).catch(() => {});
-      activeRef.current = false;
-    }
-  }, [enabled]);
+  }, [applySession, fail]);
 
   useEffect(() => {
     if (!enabled) return;
     let mounted = true;
-    void Promise.all([getMicrophonePermissionStatus(), listRecoverableSessions()]).then(([state, sessions]) => {
+    // The Expo native module, not this React hook, owns an active durable
+    // capture. A screen can unmount while the module keeps recording and
+    // checkpointing. On remount, read live native status as well as durable
+    // metadata so the UI reattaches rather than treating navigation as Pause.
+    void Promise.all([
+      getMicrophonePermissionStatus(),
+      listRecoverableSessions(),
+      getRecordingStatus().catch(() => null),
+    ]).then(([state, sessions, liveStatus]) => {
       if (!mounted) return;
       setPermissionStatus(permission(state)); setPermissionChecked(true);
       const match = recoverableSessionsForLecture(sessions, lectureId)[0] ?? null;
       setRecoverableSession(match);
-      if (match) applySession(match);
+      const liveMatch = match && liveStatus?.recordingSessionId === match.recordingSessionId
+        ? liveStatus?.session ?? null
+        : null;
+      if (liveMatch) noteStatusSequence(liveStatus);
+      if (liveMatch ?? match) applySession(liveMatch ?? match);
       logRecordingEvent('recorder_engine_selected', {
         engine: 'nativeDurable',
         hasRecoverableSession: Boolean(match),
@@ -165,7 +228,7 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
       logRecordingEvent('native_initialization_failed', { reason: 'native_storage_unavailable' });
     }).finally(() => { if (mounted) setRecoveryChecked(true); });
     return () => { mounted = false; };
-  }, [applySession, enabled, lectureId]);
+  }, [applySession, enabled, lectureId, noteStatusSequence]);
 
   // Native is authoritative for forced-pause. One listener for the hook lifetime.
   useEffect(() => {
@@ -179,14 +242,16 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
   useEffect(() => {
     if (!enabled) return;
     const subscription = AppState.addEventListener('change', (next) => {
+      traceRecordingLifecycle('APPSTATE', { state: next, sessionState: sessionRef.current?.state ?? null, uiRecording: activeRef.current });
       if (next !== 'active') return;
       const session = sessionRef.current;
       if (!session) return;
       if (session.state === 'finalized' || session.state === 'abandoned' || session.state === 'failed') return;
       if (!activeRef.current && session.state !== 'paused' && session.state !== 'recording') return;
+      traceRecordingLifecycle('FOREGROUND_REFRESH_START');
       void getRecordingStatus()
-        .then((status) => { applyNativeStatus(status); })
-        .catch(() => {});
+        .then((status) => { traceRecordingLifecycle('FOREGROUND_REFRESH_DONE', { runtime: status.runtimeState, sessionState: status.session?.state }); applyNativeStatus(status); })
+        .catch(() => { traceRecordingLifecycle('FOREGROUND_REFRESH_FAILED'); });
     });
     return () => subscription.remove();
   }, [applyNativeStatus, enabled]);
@@ -199,12 +264,6 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
     }, 250);
     return () => clearInterval(timer);
   }, [isRecording]);
-
-  const fail = useCallback((message: string, failure: unknown) => {
-    const detail = failure instanceof Error ? failure.message : String(failure);
-    setError(message); setErrorDetail(detail);
-    if (__DEV__) console.warn('[recorder] native durable operation failed', { message: detail });
-  }, []);
 
   const requestPermission = useCallback(async () => {
     try {
@@ -237,14 +296,25 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
       logRecordingEvent('native_recording_started', { engine: 'nativeDurable' });
       return true;
     } catch (failure) {
-      fail('Could not start the recording. Please try again.', failure);
+      // A genuinely active OTHER session is the one conflict a paused
+      // session's ownership release still correctly refuses to silently
+      // resolve (native claim()) — give a specific, actionable reason
+      // instead of the generic message this catch otherwise shares with
+      // every other start failure.
+      fail(
+        isRecorderBusyError(failure)
+          ? 'Another recording is currently active. Finish or pause it before starting a new one.'
+          : 'Could not start the recording. Please try again.',
+        failure,
+      );
       logRecordingEvent('native_initialization_failed', { reason: 'native_initialization_failed' });
       return false;
     }
   }, [applySession, enabled, fail, lectureId, noteStatusSequence, recoverableSession]);
 
   const pauseRecording = useCallback(async () => {
-    const session = sessionRef.current; if (!session || !isRecording) return;
+    const session = sessionRef.current; if (!session || !isRecording) return false;
+    traceRecordingLifecycle('UI_PAUSE_REQUEST');
     try {
       const status = await pauseNative({ recordingSessionId: session.recordingSessionId });
       noteStatusSequence(status);
@@ -252,11 +322,13 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
       logRecordingEvent('native_recording_paused', {
         segmentCount: status.session?.segments.length ?? session.segments.length,
       });
-    } catch (failure) { fail('Could not pause the recording.', failure); }
+      return true;
+    } catch (failure) { fail('Could not pause the recording.', failure); return false; }
   }, [applySession, fail, isRecording, noteStatusSequence]);
 
   const resumeRecording = useCallback(async () => {
-    const session = sessionRef.current; if (!session) return;
+    const session = sessionRef.current; if (!session) return false;
+    traceRecordingLifecycle('UI_RESUME_REQUEST', { sessionState: session.state });
     try {
       const status = session.state === 'paused'
         ? await resumeNative({ recordingSessionId: session.recordingSessionId })
@@ -273,20 +345,69 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
       if (status.session) sessionRef.current = status.session;
       baseDurationRef.current = finalizedDurationMillis(status.session ?? session);
       activeStartedAtRef.current = Date.now(); activeRef.current = true; setIsPaused(false); setIsRecording(true);
+      // A successful resume — including retrying the segment a checkpoint
+      // rollover failed to open — is no longer degraded. Clear the visible
+      // pause message ONLY now that native confirmed the recording is active;
+      // a failed resume (catch below) leaves it in place.
+      setDegradedReason(null);
+      setError(null); setErrorDetail(null);
       logRecordingEvent('native_recording_resumed', {
         segmentCount: (status.session ?? session).segments.length,
       });
-    } catch (failure) { fail('Could not resume the recording.', failure); }
+      return true;
+    } catch (failure) {
+      fail(
+        isRecorderBusyError(failure)
+          ? 'Another recording is currently active. Finish or pause it before resuming this one.'
+          : 'Could not resume the recording.',
+        failure,
+      );
+      return false;
+    }
   }, [fail, noteStatusSequence]);
 
   const finishSession = useCallback(async (session: DurableRecordingSession): Promise<string | null> => {
     finishingRef.current = true;
-    const result = await finalizeAndExportDurableSession(session, noteStatusSequence);
-    if (!result.ok) {
+    // A session with no committed segments AND no active capture in flight
+    // has genuinely nothing to finalize — the exact P0 shape (a session
+    // stuck at `created`, zero segments, that never actually started
+    // capturing). Without this, it would fall through to
+    // finalizeAndExportDurableSession's `durationMs <= 0` guard and surface
+    // the SAME generic "Could not finish the recording." as a real,
+    // committed-audio finalize failure — indistinguishable to the owner.
+    // `state !== 'recording'` matters: a session mid-first-segment (zero
+    // committed segments because no checkpoint has fired yet) still has
+    // real audio in flight and must go through the normal finalize path.
+    if (session.segments.length === 0 && session.state !== 'recording') {
       finishingRef.current = false;
-      fail('Could not finish the recording.', result.error);
+      fail('Nothing has been recorded yet.', 'zero_segment_session');
       return null;
     }
+    finalAssetDurationMillisRef.current = null;
+    const finishStartedAt = Date.now();
+    traceRecordingLifecycle('FINISH_JS_BEGIN', { state: session.state, segments: session.segments.length, appState: AppState.currentState });
+    const result = await finalizeAndExportDurableSession(session, noteStatusSequence);
+    traceRecordingLifecycle('FINISH_JS_RESULT', {
+      ok: result.ok, ms: Date.now() - finishStartedAt, appState: AppState.currentState,
+      durationMs: result.ok ? result.durationMs : null,
+    });
+    if (!result.ok) {
+      finishingRef.current = false;
+      // A failed Finish may already have stopped native capture. Re-read the durable session so the JS timer stops
+      // counting wall-clock time against a recorder that is no longer recording (P0 d184e93f: the stale timer kept
+      // running and was autosaved as the lecture duration).
+      try {
+        const latest = await getSession(session.recordingSessionId);
+        if (latest.state !== 'recording') {
+          applySession(latest); activeRef.current = false; setIsRecording(false); setIsPaused(true);
+        }
+      } catch {
+        // Keep the existing state; the error below is still surfaced.
+      }
+      fail(finishFailureUserMessage(result), result.error);
+      return null;
+    }
+    finalAssetDurationMillisRef.current = result.durationMs;
     applySession(result.session); activeRef.current = false; setIsRecording(false); setIsPaused(false);
     setRecordingUri(result.fileUri);
     logRecordingEvent('native_recording_finalized', {
@@ -301,9 +422,12 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
     const session = sessionRef.current; return session ? finishSession(session) : null;
   }, [finishSession]);
   const leaveRecording = useCallback(async () => {
-    if (isRecording) await pauseRecording();
+    // Deliberately no-op for the durable engine. Navigation and React
+    // unmounting are not recording-state transitions; only pauseRecording
+    // and stopRecording may stop native capture. The native module retains
+    // exclusive ownership of this recordingSessionId while the screen is away.
     return null;
-  }, [isRecording, pauseRecording]);
+  }, []);
   const recoverRecording = useCallback(async () => {
     const session = recoverableSession; if (!session) return false;
     try {
@@ -371,8 +495,9 @@ export function useNativeDurableLectureRecorder(enabled: boolean, lectureId: str
 
   return {
     engine: 'nativeDurable', permissionChecked, permissionStatus, recoveryChecked, recoverableSession,
-    isRecording, isPaused, durationMillis, recordingUri, error, errorDetail,
+    isRecording, isPaused, degradedReason, durationMillis, recordingUri, liveFileUri: null, error, errorDetail,
     requestPermission, startRecording, pauseRecording, resumeRecording, stopRecording, leaveRecording,
+    getFinalAudioDurationMillis: () => finalAssetDurationMillisRef.current,
     recoverRecording, finishRecoverableRecording, discardRecoverableRecording,
     acknowledgeFinalizedOutput,
     // Visibility is screen-local. Keeping this session selected ensures a

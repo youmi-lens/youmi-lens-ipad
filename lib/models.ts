@@ -6,6 +6,8 @@
  * mock "sample" content applied after the local recording is captured.
  */
 
+import type { AnnotationShape } from './annotationShape';
+
 export type LectureStatus =
   /** Recording started and has meaningful content but was not finished yet;
    *  it can be reopened and continued (draft / paused / in progress). */
@@ -40,7 +42,14 @@ export type TranscriptSegment = {
 };
 
 /** A single freehand handwriting point, in canvas pixel coordinates. */
-export type NotePoint = { x: number; y: number };
+/**
+ * `p` (normalized 0...1 Apple Pencil pressure) and `t` (native touch
+ * timestamp) are additive and optional — absent on every historical point,
+ * present only on samples captured through the native pencil sampler (see
+ * `lib/notebookPencilSampler.ts`). No rendering or persistence code depends
+ * on them yet; existing strokes render exactly as before.
+ */
+export type NotePoint = { x: number; y: number; p?: number | null; t?: number };
 
 /** One freehand handwriting stroke on a notebook page. */
 export type NoteStroke = {
@@ -54,6 +63,12 @@ export type NoteStroke = {
   /** Optional stroke opacity. Highlighter uses this to keep content readable. */
   opacity?: number;
   points: NotePoint[];
+  /**
+   * Structured shape (Shape System Phase 2): authoritative geometry for a snapped
+   * line/triangle/rectangle/circle/ellipse in canvas coordinates. `points` are always
+   * derived from it. Absent on every handwriting and historical stroke (no migration).
+   */
+  shape?: AnnotationShape;
   /** ISO timestamp. */
   createdAt: string;
 };
@@ -98,6 +113,9 @@ export type Course = {
   deletionUpdatedAt?: string;
   /** Why the course was soft-deleted (e.g. 'manual'). */
   deletedReason?: string | null;
+  /** Local delivery state for a course soft-delete/restore awaiting cloud confirmation. */
+  deletionSyncState?: 'pending' | 'failed';
+  deletionSyncError?: string;
 };
 
 /** A recorded lecture belonging to a course. */
@@ -150,7 +168,7 @@ export type Lecture = {
    * uploading an incomplete subset, and this records why — auditable even
    * though nothing was lost (every source stays exactly where it was).
    */
-  mediaIntegrityStatus?: 'ambiguous_overlap' | 'durable_export_failed' | 'legacy_persist_failed' | 'no_sources';
+  mediaIntegrityStatus?: 'ambiguous_overlap' | 'durable_export_failed' | 'legacy_persist_failed' | 'legacy_source_invalid' | 'no_sources';
   mediaIntegrityDetail?: string;
   mediaIntegrityCheckedAt?: string;
   /**
@@ -192,6 +210,15 @@ export type Lecture = {
   uploadedAt?: string;
   processingStatus?: LectureProcessingStatus;
   processingError?: string;
+  /**
+   * True only while processingStatus is still 'processing' AND the client has
+   * either crossed its fast-polling window or just had a status check fail —
+   * i.e. "we don't have fresh confirmation this is done, but nothing says it
+   * failed either." Never implies failure; a genuine backend failure is
+   * expressed by processingStatus === 'failed', not by this flag. Cleared the
+   * moment a real server response resolves the lecture to 'ready' or 'failed'.
+   */
+  processingSlow?: boolean;
   remoteAiStatus?: string;
   remoteAiError?: string;
   lastSyncedAt?: string;
@@ -377,6 +404,8 @@ export type MaterialAnnotationStroke = {
   points: MaterialAnnotationPoint[];
   /** Coordinate space the points live in. See MaterialAnnotationCoordSpace. */
   coordSpace?: MaterialAnnotationCoordSpace;
+  /** Structured shape in PDF-page coordinates (see NoteStroke.shape). Absent on ordinary ink. */
+  shape?: AnnotationShape;
   createdAt: string;
 };
 
@@ -388,6 +417,8 @@ export type MaterialTextAnnotation = {
   y: number;
   width: number;
   fontSize: number;
+  /** New tap placements use a top-left anchor. Absent preserves legacy geometry. */
+  anchor?: 'top-left';
   createdAt: string;
   updatedAt: string;
 };

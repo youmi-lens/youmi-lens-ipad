@@ -32,7 +32,8 @@ check('cloneStroke (the per-point deep clone) has been removed entirely', () => 
 });
 
 check('cloneSnapshot copies strokes/images by shallow array reference, not by deep-cloning each one', () => {
-  const fn = src.slice(src.indexOf('function cloneSnapshot('), src.indexOf('/** Ray-casting point-in-polygon'));
+  const fnStart = src.indexOf('function cloneSnapshot(');
+  const fn = src.slice(fnStart, src.indexOf('\n}\n', fnStart) + 3);
   assert.match(fn, /strokes:\s*snapshot\.strokes\.slice\(\)/, 'strokes must be a shallow .slice(), not a per-stroke map');
   assert.match(fn, /images:\s*snapshot\.images\.slice\(\)/, 'images must be a shallow .slice(), not a per-image map');
   assert.doesNotMatch(fn, /\.map\(cloneStroke\)/, 'must not still map every stroke through a deep clone');
@@ -57,7 +58,7 @@ check('no code path mutates a NoteStroke.points array element in place', () => {
 });
 
 check('commitStroke appends via spread into a NEW array — never mutates strokesRef.current in place', () => {
-  const fn = src.slice(src.indexOf('const commitStroke = useCallback('), src.indexOf('// Erase any not-yet-erased stroke'));
+  const fn = src.slice(src.indexOf('const commitStroke = useCallback('), src.indexOf('const publishEraseSuppression = useCallback('));
   assert.match(fn, /onStrokesChangeRef\.current\(\[\.\.\.strokesRef\.current, stroke\]\)/, 'new stroke is appended into a fresh array');
   assert.doesNotMatch(fn, /strokesRef\.current\.push/, 'must never push onto the live array');
 });
@@ -76,7 +77,7 @@ check('commitMove maps into a NEW array — untouched strokes keep their same ob
 console.log('recordHistory still fires at every commit — undo/redo wiring is unchanged, only its storage cost is');
 
 check('recordHistory() is still called before commitStroke, commitErase, and commitMove each mutate state', () => {
-  const commitStrokeFn = src.slice(src.indexOf('const commitStroke = useCallback('), src.indexOf('// Erase any not-yet-erased stroke'));
+  const commitStrokeFn = src.slice(src.indexOf('const commitStroke = useCallback('), src.indexOf('const publishEraseSuppression = useCallback('));
   assert.match(commitStrokeFn, /recordHistory\(\);/, 'commitStroke still records history before mutating');
   const commitEraseFn = src.slice(src.indexOf('const commitErase = useCallback('), src.indexOf('/**\n   * End the live stroke'));
   assert.match(commitEraseFn, /recordHistory\(\);/, 'commitErase still records history before mutating');

@@ -113,7 +113,7 @@ assert.match(plans, /if \(!result\.ok\) \{[\s\S]*plans\.purchaseIncomplete[\s\S]
 // App Review 5.1.1(v): status refresh is dispatched to loadStatus (signed-in)
 // or loadGuestStatus (guest) — refreshCurrentStatus is the single indirection
 // point; assert both the call site and that the dispatch itself is correct.
-assert.match(plans, /const refreshedStatus = await refreshCurrentStatus\(\);/);
+assert.match(plans, /const refreshedStatus = await refreshPaymentStatus\(\);/);
 assert.match(plans, /const refreshCurrentStatus = \(\) => \(isGuest \? loadGuestStatus\(\) : loadStatus\(\)\);/);
 assert.match(plans, /refreshedStatus && confirmsStudentBasicGrant\(refreshedStatus\)/);
 assert.match(plans, /t\('plans\.refreshNeededBody'\)/);
@@ -122,8 +122,8 @@ assert.doesNotMatch(plans, /Student Basic active'[^]*result\.ok/);
 // 11. Refresh Access is backend-first and refreshes quota/status before reporting success.
 assert.match(subscriptions, /\/api\/iap\/entitlement/);
 assert.match(subscriptions, /\/api\/iap\/restore/);
-assert.match(subscriptions, /await syncIOS\(\)/);
-assert.match(plans, /const result = await subscriptionService\.restore\(identity\.token\);[\s\S]*const refreshedStatus = await refreshCurrentStatus\(\);/);
+assert.match(subscriptions, /await boundedPaymentTask\(\(\) => syncIOS\(\)/);
+assert.match(plans, /const result = await subscriptionService\.restore\(identity\.token\);[\s\S]*const refreshedStatus = await refreshPaymentStatus\(\);/);
 assert.match(plans, /plans\.refreshAccess/);
 
 // 12. Status is keyed to Supabase user.id and stale requests are discarded.
@@ -167,7 +167,11 @@ assert.ok(restoreBody.includes('usedStoreKitRecovery: true'));
 // Recovery re-verifies through the same idempotent backend verify endpoint.
 assert.match(purchases, /getUnfinishedStudentPassPurchases\(\)/);
 assert.match(purchases, /verifyPurchaseWithBackend\(purchase, accessToken\)/);
-assert.match(subscriptions, /finishTransaction\(\{ purchase, isConsumable: false \}\)/);
+// finishTransaction is called through a bounded wrapper (see purchase-stall-fix
+// tests) so a hung native call can never leave the purchase/restore spinner
+// stuck — but the underlying StoreKit call still happens with the same args.
+assert.match(subscriptions, /finishTransactionBounded\(purchase, false\)/);
+assert.match(subscriptions, /finishTransaction\(\{ purchase, isConsumable \}\)/);
 
 // 14. Required product language is present and prohibited paywall language is absent.
 assert.match(plans, /plans\.subtitle/);
@@ -223,7 +227,7 @@ assert.equal(storekit.products.length, 2);
 assert.equal(storekit.products[0].displayPrice, '4.99');
 assert.equal(storekit.products[1].productID, legacyProductId);
 assert.equal(storekit.products[1].type, 'NonConsumable');
-assert.equal(appConfig.expo.version, '0.1.9');
-assert.equal(appConfig.expo.ios.buildNumber, '50');
+assert.equal(appConfig.expo.version, '0.2.1');
+assert.equal(appConfig.expo.ios.buildNumber, '57');
 
 console.log('Phase 3 purchase hardening tests passed.');

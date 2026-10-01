@@ -14,6 +14,8 @@ import {
 import { Platform } from 'react-native';
 
 import { API_BASE_URL } from './config';
+import { boundedFetch } from './boundedFetch';
+import { boundedVoidTask } from './boundedTask';
 import { logIap } from './iapLog';
 import type { PlanStatus } from './planStatus';
 
@@ -310,7 +312,14 @@ function entitlementRestoreResult(
 }
 
 async function fetchJson<T>(url: string, accessToken: string, init?: RequestInit): Promise<{ status: number; payload: T }> {
-  const response = await fetch(url, {
+  // Bounded: Restore Purchase (the only live caller of this legacy service —
+  // see restoreStudentPass) must never spin forever on a hung/unreachable
+  // backend. Reuses the same boundedFetch primitive as the live purchase
+  // flow (lib/subscriptions.ts) rather than a second timeout implementation.
+  // On timeout this throws, which every caller here already wraps in a
+  // try/catch that returns a terminal, recoverable result — see
+  // restoreStudentPass and verifyPurchaseWithBackend below.
+  const response = await boundedFetch(url, {
     ...init,
     headers: {
       Accept: 'application/json',
@@ -321,6 +330,24 @@ async function fetchJson<T>(url: string, accessToken: string, init?: RequestInit
   });
   const payload = (await response.json().catch(() => null)) as T;
   return { status: response.status, payload };
+}
+
+// finishTransaction is a native StoreKit bridge call with no bound of its own
+// (ExpoIapModule.finishTransaction). By the time it's called in
+// verifyPurchaseWithBackend below, the backend has ALREADY granted or
+// rejected the entitlement, so nothing about correctness depends on this
+// call finishing promptly. Matches the FINISH_TRANSACTION_TIMEOUT_MS bound
+// used for the live purchase flow (lib/subscriptions.ts), reusing the same
+// boundedVoidTask primitive rather than a second timeout implementation.
+const FINISH_TRANSACTION_TIMEOUT_MS = 10_000;
+
+function finishTransactionBounded(purchase: Purchase, isConsumable: boolean): Promise<void> {
+  return boundedVoidTask(
+    () => finishTransaction({ purchase, isConsumable }),
+    FINISH_TRANSACTION_TIMEOUT_MS,
+    () => logIap('finishTransaction timed out; transaction left unfinished for replay/restore'),
+    (error) => logIap('finishTransaction failed', error instanceof Error ? error.name : 'unknown'),
+  );
 }
 
 function hasConnectionPrereqs(accessToken: string | null | undefined): PurchaseResult | null {
@@ -718,7 +745,7 @@ class RealPurchaseService implements PurchaseService {
     const payload = verification.payload ?? {};
 
     if (shouldFinishAfterBackend(payload)) {
-      await finishTransaction({ purchase, isConsumable: true });
+      await finishTransactionBounded(purchase, true);
     }
 
     if (status >= 200 && status < 300 && payload?.ok && payload.granted) {

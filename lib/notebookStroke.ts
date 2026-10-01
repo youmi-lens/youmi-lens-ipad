@@ -5,7 +5,8 @@
  * Kept free of React Native imports so node test scripts can exercise them.
  */
 
-export type NotebookStrokePoint = { x: number; y: number };
+/** `p`/`t` are additive and optional — see `lib/models.ts`'s `NotePoint`. */
+export type NotebookStrokePoint = { x: number; y: number; p?: number | null; t?: number };
 
 /** Minimum distance (canvas px) before a new freehand sample is accepted. */
 export const NOTEBOOK_MIN_POINT_DISTANCE = 1.8;
@@ -60,7 +61,7 @@ export function appendStrokePoint(
 export function snapshotLiveInkPoints(
   points: readonly NotebookStrokePoint[],
 ): NotebookStrokePoint[] {
-  return points.map((point) => ({ x: point.x, y: point.y }));
+  return points.map((point) => ({ ...point }));
 }
 
 /**

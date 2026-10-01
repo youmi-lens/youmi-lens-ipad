@@ -450,7 +450,7 @@ check('NotebookCanvas wires focal zoom + sync scroll lock + no debug overlay', (
   assert.match(source, /canvasTranslateX/);
   assert.match(source, /focalX: event.focalX, focalY: event.focalY/);
   assert.match(source, /translateX: zoomX.value/);
-  const pinch = source.slice(source.indexOf('const pinchGesture ='), source.indexOf('const notebookGestures ='));
+  const pinch = source.slice(source.indexOf('const pinchGesture ='), source.indexOf('const selectionTapGesture ='));
   const update = pinch.slice(pinch.indexOf('.onUpdate('), pinch.indexOf('.onFinalize('));
   assert.doesNotMatch(update, /runOnJS|setCanvas|scrollTo|Ref\.current/);
   assert.doesNotMatch(pinch, /\.runOnJS\(true\)/);

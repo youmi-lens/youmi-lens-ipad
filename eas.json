@@ -13,6 +13,45 @@
         "simulator": false
       }
     },
+    "integrated-physical-validation": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "environment": "production",
+      "env": {
+        "APP_VARIANT": "development",
+        "EXPO_PUBLIC_RECORDING_ENGINE_DIAGNOSTIC": "1",
+        "EXPO_PUBLIC_SUBSCRIPTIONS_LIVE": "true",
+        "EXPO_PUBLIC_USE_REAL_IAP": "true"
+      },
+      "ios": {
+        "simulator": false
+      }
+    },
+    "integrated-physical-validation-release": {
+      "distribution": "internal",
+      "environment": "production",
+      "env": {
+        "APP_VARIANT": "development",
+        "EXPO_PUBLIC_SUBSCRIPTIONS_LIVE": "true",
+        "EXPO_PUBLIC_USE_REAL_IAP": "true"
+      },
+      "ios": {
+        "simulator": false
+      }
+    },
+    "integrated-physical-validation-material-text-trace": {
+      "distribution": "internal",
+      "environment": "production",
+      "env": {
+        "APP_VARIANT": "development",
+        "EXPO_PUBLIC_SUBSCRIPTIONS_LIVE": "true",
+        "EXPO_PUBLIC_USE_REAL_IAP": "true",
+        "YOUMI_MATERIAL_TEXT_TRACE": "1"
+      },
+      "ios": {
+        "simulator": false
+      }
+    },
     "development-simulator": {
       "developmentClient": true,
       "distribution": "internal",
@@ -29,7 +68,8 @@
     },
     "production": {
       "env": {
-        "EXPO_PUBLIC_USE_REAL_IAP": "true"
+        "EXPO_PUBLIC_USE_REAL_IAP": "true",
+        "EXPO_PUBLIC_RECORDING_DEFAULT_ENGINE": "nativeDurable"
       }
     },
     "production-dev-container": {
@@ -37,6 +77,15 @@
       "environment": "production",
       "env": {
         "APP_VARIANT": "development"
+      }
+    },
+    "recording-reliability-b-dogfood": {
+      "distribution": "internal",
+      "environment": "production",
+      "env": {
+        "APP_VARIANT": "development",
+        "EXPO_PUBLIC_NATIVE_RECORDER_DOGFOOD": "1",
+        "EXPO_PUBLIC_RECORDING_ENGINE_DIAGNOSTIC": "1"
       }
     }
   },

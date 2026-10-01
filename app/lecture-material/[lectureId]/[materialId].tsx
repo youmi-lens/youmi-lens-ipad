@@ -28,11 +28,27 @@ import {
   View,
   type ViewStyle,
 } from 'react-native';
+import Svg, { Ellipse, Path, Rect } from 'react-native-svg';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { FloatingMiniCaption } from '@/components/FloatingMiniCaption';
-import { MaterialFloatingToolbar } from '@/components/MaterialFloatingToolbar';
 import { PageIndicatorBadge } from '@/components/PageIndicatorBadge';
+import { SharedAnnotationToolbar } from '@/components/SharedAnnotationToolbar';
+import { SharedSelectionShapeContext, type SelectionShape } from '@/components/SharedSelectionShapeContext';
+import { SharedToolbarGlyphPaths, type SharedToolbarGlyphName } from '@/components/SharedToolbarChrome';
+import { TOOLBAR_ICON_DISABLED, TOOLBAR_ICON_IDLE } from '@/lib/sharedToolbarChrome';
+import {
+  COURSE_MATERIAL_ERASER_RADII,
+  HIGHLIGHTER_WIDTHS as SHARED_HIGHLIGHTER_WIDTHS,
+  LEGACY_STYLE_PEN_WIDTHS,
+} from '@/lib/annotationPresets';
+import type { AnnotationTool } from '@/lib/annotationTools';
+import {
+  courseMaterialCapabilities,
+  courseMaterialSharedTools,
+  materialModeToSharedTool,
+  sharedToolToMaterialMode,
+} from '@/lib/courseMaterialAnnotationAdapter';
 import { useLiveCaptions } from '@/lib/liveCaptions';
 import { useRecordingNotes } from '@/lib/recordingNotes';
 import { useT, localizeSystemDefaultTitle } from '@/lib/i18n';
@@ -44,14 +60,40 @@ import {
 import { NativePdfAnnotationView, type NativePdfAnnotationViewRef } from '@/components/NativePdfAnnotationView';
 import { colors, fontSize, radius, spacing } from '@/constants/theme';
 import { resolveMaterialUri } from '@/lib/importMaterial';
-import { clampedMaterialResumePage, compositePageCount, appendedPageCountAfterFinalPageContent } from '@/lib/materialWorkspace';
+import { clampedMaterialResumePage, compositePageCount, appendedPageCountAfterFinalPageContent, textAnnotationsByPageEqual } from '@/lib/materialWorkspace';
 import { materialViewportEqual, normalizeMaterialViewport } from '@/lib/materialViewport';
+import { recognizeShapeDetailed } from '@/lib/shapeSnap';
+import { shapeFromRecognition, shapeToInkPoints } from '@/lib/annotationShape';
+import { recordShapeSnapAttempt, SHAPE_SNAP_TRACE_ENABLED } from '@/lib/shapeSnapTrace';
+import { SHAPE_SNAP_HOLD_MS, SHAPE_SNAP_HOLD_TOLERANCE_PT } from '@/lib/shapeSnapHold';
+import { INK_PROP_GATE_IDLE, gateDecide, gatePencilDown, gatePencilLifted, gateRequestBypass, gateSettled, type InkPropGateState } from '@/lib/inkPropGate';
+import { materialSelectionChange, materialSelectionMove, materialSelectionScale, materialSelectionTransfer, materialShapeEdit, type MaterialSelection } from '@/lib/materialSelection';
+import {
+  EMPTY_MATERIAL_HISTORY,
+  applyMaterialHistoryRedo,
+  applyMaterialHistoryUndo,
+  popMaterialHistoryRedo,
+  popMaterialHistoryUndo,
+  pushMaterialHistory,
+  type MaterialHistoryAction,
+  type MaterialHistoryApplyResult,
+  type MaterialHistoryState,
+} from '@/lib/materialHistory';
 import type { MaterialAnnotationStroke, MaterialTextAnnotation, MaterialViewport } from '@/lib/models';
 import type {
   NativePdfAnnotationMode,
+  NativePdfSelectionChangedEvent,
+  NativePdfSelectionMovedEvent,
+  NativePdfShapeEditedEvent,
+  NativePdfSelectionScaledEvent,
+  NativePdfPencilActivityEvent,
+  NativePdfShapeHoldEvent,
   NativePdfAnnotationsByPage,
   NativePdfAnnotationsChangedEvent,
   NativePdfAnnotationStroke,
+  NativePdfErrorEvent,
+  NativePdfLoadCompleteEvent,
+  NativePdfPageChangedEvent,
   NativePdfTextAnnotationActionEvent,
   NativePdfViewportDiagnosticEvent,
   NativePdfTextAnnotationsByPage,
@@ -70,41 +112,67 @@ const PAGE_NAV_HIDE_DELAY_MS = 1800;
 /** Phase 1 native PDFKit viewer spike. Old react-native-pdf path remains below as fallback. */
 const USE_NATIVE_PDF_VIEWER = true;
 const PEN_COLORS = [
-  { key: 'Navy', value: '#061B34' },
-  { key: 'Blue', value: '#2D6CDF' },
-  { key: 'Red', value: '#D7263D' },
-  { key: 'Purple', value: '#6C4FB3' },
-  { key: 'Black', value: '#1A1A1A' },
+  { key: 'Charcoal', value: '#222630' },
+  { key: 'Blue', value: '#2D6BD4' },
+  { key: 'Red', value: '#E23B47' },
+  { key: 'Orange', value: '#F08A1E' },
+  { key: 'Purple', value: '#9B30C9' },
+  { key: 'White', value: '#FFFFFF' },
+  { key: 'Teal', value: '#1FB58E' },
 ];
 const HIGHLIGHTER_COLORS = [
-  { key: 'Yellow', value: '#FFE066' },
-  { key: 'Blue', value: '#78D6FF' },
-  { key: 'Pink', value: '#FF9CCB' },
-  { key: 'Green', value: '#9BE7A6' },
+  // PDF native UIColor(annotationHex:) accepts opaque hex only. Match
+  // Notebook's RGB palette/order; native highlighter opacity remains owned
+  // by the existing PDF ink layer rather than duplicating RGBA alpha here.
+  { key: 'Yellow', value: '#F5D246', previewColor: 'rgba(245,210,70,0.9)' },
+  { key: 'Green', value: '#78D78C', previewColor: 'rgba(120,215,140,0.85)' },
+  { key: 'Pink', value: '#F596BE', previewColor: 'rgba(245,150,190,0.85)' },
+  { key: 'Blue', value: '#78B4F5', previewColor: 'rgba(120,180,245,0.85)' },
 ];
 // `dot` is the preview-dot diameter shown inside each width/size nib (matches the
 // Notebook's nib visual language); `value` is the actual stroke width / radius.
-// PEN values are exactly Notebook's own PEN_WIDTHS (components/NotebookCanvas.tsx)
-// — they had drifted ~15-20% thicker at every tier, which is what made this pen
-// feel like a heavier marker than Notebook's despite every other part of the
-// drawing pipeline (gesture handling, point filtering, curve smoothing, opacity)
-// already being identical between the two.
+// PK4-C: `value` is now sourced from the shared semantic preset tables
+// (lib/annotationPresets.ts) instead of re-hardcoded here — same numeric
+// values as before (PEN values are exactly Notebook's own LEGACY_STYLE_PEN_
+// WIDTHS; they had drifted ~15-20% thicker at every tier before being
+// deliberately corrected to match, which is what made this pen feel like a
+// heavier marker than Notebook's). ERASER radii remain Course Material's own
+// (verified DIFFERENT from Notebook's — see PK4-A), not unified with Notebook's.
 const PEN_WIDTHS = [
-  { key: 'Thin', value: 2, dot: 7 },
-  { key: 'Medium', value: 3.5, dot: 11 },
-  { key: 'Thick', value: 6, dot: 16 },
+  { key: 'Thin', value: LEGACY_STYLE_PEN_WIDTHS.thin, dot: 7 },
+  { key: 'Medium', value: LEGACY_STYLE_PEN_WIDTHS.medium, dot: 11 },
+  { key: 'Thick', value: LEGACY_STYLE_PEN_WIDTHS.thick, dot: 16 },
 ];
 const HIGHLIGHTER_WIDTHS = [
-  { key: 'Narrow', value: 12, dot: 8 },
-  { key: 'Medium', value: 18, dot: 12 },
-  { key: 'Wide', value: 26, dot: 17 },
+  { key: 'Narrow', value: SHARED_HIGHLIGHTER_WIDTHS.narrow, dot: 8 },
+  { key: 'Medium', value: SHARED_HIGHLIGHTER_WIDTHS.medium, dot: 12 },
+  { key: 'Wide', value: SHARED_HIGHLIGHTER_WIDTHS.wide, dot: 17 },
 ];
 const ERASER_SIZES = [
-  { key: 'Small', value: 16, dot: 8 },
-  { key: 'Medium', value: 26, dot: 13 },
-  { key: 'Large', value: 40, dot: 19 },
+  { key: 'Small', value: COURSE_MATERIAL_ERASER_RADII.small, dot: 8 },
+  { key: 'Medium', value: COURSE_MATERIAL_ERASER_RADII.medium, dot: 13 },
+  { key: 'Large', value: COURSE_MATERIAL_ERASER_RADII.large, dot: 19 },
 ];
 const MATERIAL_REVIEW_LECTURE_ID = '__material_review__';
+/** Long enough to span normal pauses between words, short enough that the one
+ * deferred `annotationsByPage` delivery still lands while the user is not writing. */
+const INK_PROP_SETTLE_MS = 1200;
+
+/** AnnotationTool -> the shared toolbar's glyph vocabulary. */
+function materialGlyphName(tool: AnnotationTool): SharedToolbarGlyphName {
+  switch (tool) {
+    case 'highlighter':
+      return 'highlighter';
+    case 'eraser':
+      return 'eraser';
+    case 'text':
+      return 'text';
+    case 'scroll':
+      return 'hand';
+    default:
+      return 'pen';
+  }
+}
 
 function debugMaterialViewport(event: string, values: Record<string, unknown>) {
   if (__DEV__) console.log(`[material-viewport] ${event}`, values);
@@ -129,6 +197,7 @@ export default function LectureMaterialWorkspaceScreen() {
     addAnnotationStroke,
     replaceMaterialPageAnnotationStrokesForMaterial,
     replaceMaterialPageTextAnnotationsForMaterial,
+    flushMaterialAnnotations,
   } = useData();
 
   const lectureId = params.lectureId ?? '';
@@ -177,11 +246,13 @@ export default function LectureMaterialWorkspaceScreen() {
 
   // --- Native PDFKit annotation state (Phase 2) ---
   // Native overlay-only state; the legacy JS-overlay branch below does NOT use these.
-  const [nativeAnnotationMode, setNativeAnnotationMode] = useState<NativePdfAnnotationMode>('scroll');
+  const [nativeAnnotationMode, setNativeAnnotationMode] = useState<NativePdfAnnotationMode>('pen');
+  const [nativeSelectionShape, setNativeSelectionShape] = useState<SelectionShape>('lasso');
+  const [nativeSelection, setNativeSelection] = useState<MaterialSelection>({ pageNumber: 0, strokeIds: [] });
   // Pen/Highlight colour are user-selectable from the toolbar's colour strip;
-  // width and eraser size keep their default presets (no width picker). The
-  // native view reads these on every render, so changing the colour applies to
-  // the next stroke without touching committed annotations or PDF coordinates.
+  // width and eraser size keep their default presets (no width picker). Colors
+  // are sent through lightweight native commands so a color-only interaction
+  // cannot reconcile the heavy annotation props or reset native Pencil mode.
   const [nativePenColor, setNativePenColor] = useState<string>(PEN_COLORS[0].value);
   const [nativePenWidth, setNativePenWidth] = useState<number>(PEN_WIDTHS[1].value);
   const [nativeHighlighterColor, setNativeHighlighterColor] = useState<string>(HIGHLIGHTER_COLORS[0].value);
@@ -189,8 +260,15 @@ export default function LectureMaterialWorkspaceScreen() {
   const [nativeEraserRadius, setNativeEraserRadius] = useState<number>(ERASER_SIZES[1].value);
   const [nativeTemporaryEraser, setNativeTemporaryEraser] = useState(false);
   const nativeAnnotationModeRef = useRef<NativePdfAnnotationMode>(nativeAnnotationMode);
+  const nativePenColorRef = useRef(nativePenColor);
+  const nativeHighlighterColorRef = useRef(nativeHighlighterColor);
   const nativePreviousDrawingToolRef = useRef<Extract<NativePdfAnnotationMode, 'pen' | 'highlighter'>>('pen');
   const nativeTemporaryEraserRef = useRef(false);
+  const applyNativeAnnotationMode = useCallback((next: NativePdfAnnotationMode) => {
+    nativeAnnotationModeRef.current = next;
+    pdfRef.current?.setAnnotationMode(next);
+    setNativeAnnotationMode(next);
+  }, []);
   // Refs so the native onAnnotationsChanged handler always sees the latest
   // lecture/material/page without re-creating the callback (which would
   // churn the native prop and risk update-depth loops).
@@ -225,13 +303,14 @@ export default function LectureMaterialWorkspaceScreen() {
   const [totalPages, setTotalPages] = useState<number>(material?.pageCount ?? 0);
   const [sourcePageCount, setSourcePageCount] = useState<number>(material?.sourcePageCount ?? material?.pageCount ?? 0);
   const [appendedPageCount, setAppendedPageCount] = useState<number>(material?.appendedPageCount ?? 0);
-  const [editingText, setEditingText] = useState<MaterialTextAnnotation | null>(null);
-  const [editingTextValue, setEditingTextValue] = useState('');
-  const [selectedTextAnnotationId, setSelectedTextAnnotationId] = useState<string | undefined>();
+  // Text create/edit is a native inline UITextView overlay directly on the
+  // PDF page (PdfAnnotationView.inlineTextEditor) — no JS-side modal. JS
+  // only ever receives the FINAL committed 'create'/'edit' event, already
+  // typed and confirmed natively (see handleNativeTextAnnotationAction).
   const [exporting, setExporting] = useState(false);
   const [loadingPdf, setLoadingPdf] = useState(true);
   const [pdfError, setPdfError] = useState<string | null>(null);
-  const [annotationMode, setAnnotationMode] = useState<MaterialAnnotationMode>('scroll');
+  const [annotationMode, setAnnotationMode] = useState<MaterialAnnotationMode>('pen');
   // Fallback (JS overlay) ink presets — colour, width and eraser size selectable.
   const [penColor, setPenColor] = useState(PEN_COLORS[0].value);
   const [penWidth, setPenWidth] = useState(PEN_WIDTHS[1].value);
@@ -243,11 +322,15 @@ export default function LectureMaterialWorkspaceScreen() {
   const previousDrawModeRef = useRef<MaterialDrawingMode>('pen');
   const doubleTapAvailable = useMemo(() => isPencilDoubleTapAvailable(), []);
 
-  // Per-page redo stacks for the toolbar's Redo action. Undo pushes the removed
-  // stroke here; Redo re-adds it. Stored in component state only — no annotation
-  // schema change. Cleared on page change and whenever a fresh stroke is drawn
-  // or erased (the standard "new action invalidates redo" rule).
-  const [nativeRedoStack, setNativeRedoStack] = useState<MaterialAnnotationStroke[]>([]);
+  // Native path: ONE unified, time-ordered Undo/Redo history covering both
+  // strokes and text (see lib/materialHistory.ts) — a mixed sequence like
+  // draw → move text → draw undoes in true chronological order, which two
+  // independent per-type stacks cannot do correctly. It is only an operation
+  // log ABOVE the existing stroke/text stores; storage is unchanged. Scoped
+  // to the current page/session — cleared on page change, not persisted.
+  const [nativeHistory, setNativeHistory] = useState<MaterialHistoryState>(EMPTY_MATERIAL_HISTORY);
+  // Legacy JS-overlay path keeps its own simpler stroke-only redo stack,
+  // unchanged — text/paste never existed there, so it's out of scope here.
   const [redoStack, setRedoStack] = useState<MaterialAnnotationStroke[]>([]);
 
   // Capture the page we want the PDF to open at ONCE on mount. Passing
@@ -264,9 +347,24 @@ export default function LectureMaterialWorkspaceScreen() {
   useEffect(() => { sourcePageCountRef.current = sourcePageCount; }, [sourcePageCount]);
   useEffect(() => { appendedPageCountRef.current = appendedPageCount; }, [appendedPageCount]);
 
-  // Redo only applies to the page it was undone on — drop it on any page change.
+  // Native-path unified history is scoped to the whole document/editing
+  // session, NOT the current page — a mixed Pen→Highlighter→Text sequence
+  // that happens to cross a page boundary (including an incidental scroll
+  // nudge PDFKit reports as a page change, not just deliberate navigation)
+  // must stay fully undoable. Each history action already carries its own
+  // pageNumber (see lib/materialHistory.ts) and undo/redo apply it there
+  // directly, so nothing here needs the CURRENT page to reconstruct a step.
+  // Only reset when the DOCUMENT itself changes (a genuinely new editing
+  // session) — in practice this component remounts on materialId change,
+  // so this only fires if it's ever reused across materials without an
+  // unmount.
   useEffect(() => {
-    setNativeRedoStack([]);
+    setNativeHistory(EMPTY_MATERIAL_HISTORY);
+  }, [material?.id]);
+
+  // Legacy JS-overlay path keeps its existing, unrelated, page-scoped redo
+  // behavior — untouched, out of scope for this native-path history fix.
+  useEffect(() => {
     setRedoStack([]);
   }, [currentPage]);
 
@@ -294,7 +392,7 @@ export default function LectureMaterialWorkspaceScreen() {
           nativeAnnotationModeRef.current = 'eraser';
           nativeTemporaryEraserRef.current = true;
           setNativeTemporaryEraser(true);
-          setNativeAnnotationMode('eraser');
+          applyNativeAnnotationMode('eraser');
           return;
         }
 
@@ -303,7 +401,7 @@ export default function LectureMaterialWorkspaceScreen() {
           nativeAnnotationModeRef.current = restored;
           nativeTemporaryEraserRef.current = false;
           setNativeTemporaryEraser(false);
-          setNativeAnnotationMode(restored);
+          applyNativeAnnotationMode(restored);
         }
         return;
       }
@@ -312,7 +410,7 @@ export default function LectureMaterialWorkspaceScreen() {
         current === 'eraser' ? previousDrawModeRef.current : 'eraser',
       );
     });
-  }, [doubleTapAvailable, useNativePdfViewer]);
+  }, [applyNativeAnnotationMode, doubleTapAvailable, useNativePdfViewer]);
 
   // Track persistence state via refs so no effect depends on `material`'s
   // React identity. material's identity changes after every updateMaterial,
@@ -395,8 +493,9 @@ export default function LectureMaterialWorkspaceScreen() {
       });
   }, [flushViewportToStore, useNativePdfViewer]);
 
-  // Imperative jump via the native reader / fallback viewer. Keeping the
-  // ref separate from the initial page prop prevents prop-driven page loops.
+  // Imperative jump and tool commands share the native reader ref. Keeping it
+  // separate from live props prevents page and mode changes from reconciling
+  // the full annotation payload.
   const pdfRef = useRef<NativePdfAnnotationViewRef | null>(null);
 
   // True once the beforeRemove-driven authoritative capture has completed
@@ -501,6 +600,7 @@ export default function LectureMaterialWorkspaceScreen() {
         savedViewport: savedViewportRef.current,
       });
       persistAuthoritativeViewport(nativePdf);
+      void flushMaterialAnnotations();
       if (navigatorHideTimerRef.current) {
         clearTimeout(navigatorHideTimerRef.current);
         navigatorHideTimerRef.current = null;
@@ -513,7 +613,7 @@ export default function LectureMaterialWorkspaceScreen() {
         updateMaterial(id, { lastOpenedPage: pending });
       }
     };
-  }, [persistAuthoritativeViewport, updateMaterial, useNativePdfViewer]);
+  }, [flushMaterialAnnotations, persistAuthoritativeViewport, updateMaterial, useNativePdfViewer]);
 
   // A background transition can happen before route cleanup. Ask native for
   // its current PDF-space anchor and immediately persist the latest snapshot.
@@ -525,9 +625,10 @@ export default function LectureMaterialWorkspaceScreen() {
         latestJsViewport: pendingViewportRef.current,
       });
       persistAuthoritativeViewport(pdfRef.current);
+      void flushMaterialAnnotations();
     });
     return () => subscription.remove();
-  }, [persistAuthoritativeViewport, useNativePdfViewer]);
+  }, [flushMaterialAnnotations, persistAuthoritativeViewport, useNativePdfViewer]);
 
   // PRIMARY authoritative-leave boundary for Back/navigation. Proven from a
   // physical repro that the unmount-cleanup effect above runs too late for
@@ -582,12 +683,13 @@ export default function LectureMaterialWorkspaceScreen() {
         // falls back to whatever JS already knew (flushViewportToStore's
         // existing behavior), same as every other leave path.
         flushViewportToStore();
+        await flushMaterialAnnotations();
         leavePersistenceCompletedRef.current = true;
         navigation.dispatch(e.data.action);
       })();
     });
     return unsubscribe;
-  }, [flushViewportToStore, navigation, useNativePdfViewer]);
+  }, [flushMaterialAnnotations, flushViewportToStore, navigation, useNativePdfViewer]);
 
   const fileUri = material ? resolveMaterialUri(material.localPath) : '';
   // Memoize the source prop so react-native-pdf doesn't treat each render
@@ -667,6 +769,21 @@ export default function LectureMaterialWorkspaceScreen() {
     setPdfError(t('material.loadFailed'));
   }, [t]);
 
+  const handleNativeLoadComplete = useCallback((event: NativePdfLoadCompleteEvent) => {
+    pdfRef.current?.setPenColor(nativePenColorRef.current);
+    pdfRef.current?.setHighlighterColor(nativeHighlighterColorRef.current);
+    pdfRef.current?.setAnnotationMode(nativeAnnotationModeRef.current);
+    handlePdfLoadComplete(event.totalPages, event.sourcePageCount);
+  }, [handlePdfLoadComplete]);
+
+  const handleNativePageChanged = useCallback((event: NativePdfPageChangedEvent) => {
+    handlePdfPageChanged(event.pageNumber);
+  }, [handlePdfPageChanged]);
+
+  const handleNativeError = useCallback((event: NativePdfErrorEvent) => {
+    handlePdfError(new Error(event.message));
+  }, [handlePdfError]);
+
   /** Adds one stable synthetic page only when the current final page receives real work. */
   const ensureTrailingBlankPageAfterContent = useCallback((pageNumber: number) => {
     const id = materialIdRef.current;
@@ -710,6 +827,7 @@ export default function LectureMaterialWorkspaceScreen() {
           width: stroke.width,
           opacity: stroke.opacity,
           points: stroke.points.map((p) => [p.x, p.y] as [number, number]),
+          ...(stroke.shape ? { shape: stroke.shape } : {}),
           createdAt: stroke.createdAt,
         });
       }
@@ -718,6 +836,18 @@ export default function LectureMaterialWorkspaceScreen() {
     return grouped;
   }, [annotationsForMaterialPage, lectureId, material?.id, material?.pageCount, totalPages, useNativePdfViewer]);
 
+
+  // `textAnnotationsForMaterialPage`'s reference changes on every unrelated
+  // DataContext update (recording autosave, an unrelated lecture edit —
+  // see nativeAnnotationsByPage's own doc comment above for the sibling,
+  // stroke-side version of this same churn), which would otherwise rebuild
+  // this grouped object from scratch and hand the native overlay a "new"
+  // prop even when no text annotation actually changed — and native
+  // unconditionally reloads + redraws on every prop set (see
+  // PdfAnnotationView.swift's loadTextAnnotations). textAnnotationsByPageEqual
+  // lets an unrelated recompute keep returning the SAME object identity, so
+  // committed/pasted text only ever re-renders when its own content did.
+  const lastTextAnnotationsByPageRef = useRef<NativePdfTextAnnotationsByPage>({});
   const nativeTextAnnotationsByPage = useMemo<NativePdfTextAnnotationsByPage>(() => {
     const grouped: NativePdfTextAnnotationsByPage = {};
     if (!useNativePdfViewer || !material?.id) return grouped;
@@ -726,8 +856,81 @@ export default function LectureMaterialWorkspaceScreen() {
       const annotations = textAnnotationsForMaterialPage(material.id, page);
       if (annotations.length > 0) grouped[String(page)] = annotations;
     }
+    if (textAnnotationsByPageEqual(lastTextAnnotationsByPageRef.current, grouped)) {
+      return lastTextAnnotationsByPageRef.current;
+    }
+    lastTextAnnotationsByPageRef.current = grouped;
     return grouped;
   }, [material?.id, material?.pageCount, textAnnotationsForMaterialPage, totalPages, useNativePdfViewer]);
+
+  // ---- Ink-latency gate for the native `annotationsByPage` / `textAnnotationsByPage` props ----
+  // Every store change rebuilds this prop for ALL pages/points, and Expo then
+  // converts the whole tree to native objects on the MAIN thread. Device logs
+  // showed that landing mid-stroke as a 72-84 ms stall (6-10 dropped frames at
+  // 120 Hz) in every stroke that overlapped a prop delivery. Native already
+  // holds every stroke it just drew, so while the Pencil is down (and briefly
+  // after) the prop is held and delivered once, when writing pauses. Explicit
+  // edits (Undo/Redo, Clear, Delete/Duplicate) bypass the hold. `nativeAnnotationsByPage`
+  // itself stays fresh for export and enable-state.
+  const [nativeAnnotationsProp, setNativeAnnotationsProp] = useState<NativePdfAnnotationsByPage>(nativeAnnotationsByPage);
+  const [nativeTextProp, setNativeTextProp] = useState<NativePdfTextAnnotationsByPage>(nativeTextAnnotationsByPage);
+  const inkGateRef = useRef<InkPropGateState>(INK_PROP_GATE_IDLE);
+  const inkGateTimersRef = useRef<{ settle: ReturnType<typeof setTimeout> | null; failsafe: ReturnType<typeof setTimeout> | null }>({ settle: null, failsafe: null });
+  const latestNativeAnnotationsRef = useRef(nativeAnnotationsByPage);
+  latestNativeAnnotationsRef.current = nativeAnnotationsByPage;
+  const latestNativeTextRef = useRef(nativeTextAnnotationsByPage);
+  latestNativeTextRef.current = nativeTextAnnotationsByPage;
+  const clearInkGateTimers = useCallback(() => {
+    const timers = inkGateTimersRef.current;
+    if (timers.settle) { clearTimeout(timers.settle); timers.settle = null; }
+    if (timers.failsafe) { clearTimeout(timers.failsafe); timers.failsafe = null; }
+  }, []);
+  const flushNativeAnnotationsProp = useCallback(() => {
+    clearInkGateTimers();
+    inkGateRef.current = gateSettled(inkGateRef.current);
+    setNativeAnnotationsProp((current) => (current === latestNativeAnnotationsRef.current ? current : latestNativeAnnotationsRef.current));
+    setNativeTextProp((current) => (current === latestNativeTextRef.current ? current : latestNativeTextRef.current));
+  }, [clearInkGateTimers]);
+  const requestImmediateNativeAnnotations = useCallback(() => {
+    inkGateRef.current = gateRequestBypass(inkGateRef.current);
+  }, []);
+  useEffect(() => {
+    const decision = gateDecide(inkGateRef.current);
+    inkGateRef.current = decision.next;
+    if (decision.deliver) {
+      setNativeAnnotationsProp(nativeAnnotationsByPage);
+      setNativeTextProp(nativeTextAnnotationsByPage);
+    }
+  }, [nativeAnnotationsByPage, nativeTextAnnotationsByPage]);
+  // Shape Snap: native reports an eligible draw-and-hold (page-space points); the SHARED
+  // recognizer decides; native swaps the live stroke for the clean geometry. This is a
+  // single event out / single call back per hold and never touches the annotation props,
+  // so it cannot reintroduce the mid-stroke prop delivery the write gate above prevents.
+  const handleNativeShapeHold = useCallback((event: NativePdfShapeHoldEvent) => {
+    const points = event.points.map(([x, y]) => ({ x, y }));
+    const diagnostics = recognizeShapeDetailed(points, { minSize: 24 / (event.scale || 1) });
+    if (SHAPE_SNAP_TRACE_ENABLED) {
+      recordShapeSnapAttempt({ workspace: 'course-material', points, diagnostics, scale: event.scale || 1, holdMs: SHAPE_SNAP_HOLD_MS, tolerancePt: SHAPE_SNAP_HOLD_TOLERANCE_PT });
+    }
+    const shape = diagnostics.result;
+    if (!shape) return;
+    // The snapped stroke is committed as a STRUCTURED shape (geometry authoritative, points derived).
+    const structured = shapeFromRecognition(shape, points);
+    pdfRef.current?.applyShapeSnap(event.token, shapeToInkPoints(structured).map((p) => [p.x, p.y] as [number, number]), structured);
+  }, []);
+  const handleNativePencilActivity = useCallback((event: NativePdfPencilActivityEvent) => {
+    clearInkGateTimers();
+    const timers = inkGateTimersRef.current;
+    if (event.active) {
+      inkGateRef.current = gatePencilDown(inkGateRef.current);
+      // A lost "lifted" event must never freeze native ink updates.
+      timers.failsafe = setTimeout(flushNativeAnnotationsProp, 10000);
+    } else {
+      inkGateRef.current = gatePencilLifted(inkGateRef.current);
+      timers.settle = setTimeout(flushNativeAnnotationsProp, INK_PROP_SETTLE_MS);
+    }
+  }, [clearInkGateTimers, flushNativeAnnotationsProp]);
+  useEffect(() => clearInkGateTimers, [clearInkGateTimers]);
 
   const saveTextAnnotations = useCallback((pageNumber: number, annotations: MaterialTextAnnotation[]) => {
     const id = materialIdRef.current;
@@ -735,75 +938,170 @@ export default function LectureMaterialWorkspaceScreen() {
     replaceMaterialPageTextAnnotationsForMaterial(id, pageNumber, annotations, materialScopeLectureId(id));
   }, [replaceMaterialPageTextAnnotationsForMaterial]);
 
+  // Shared by 'paste' and the native inline-editor's 'create' commit — both
+  // hand JS the SAME shape (final text + position, already typed/confirmed
+  // natively), so both create exactly one MaterialTextAnnotation and push
+  // exactly one text-create history action. No second text-creation path.
+  const createTextAnnotationFromEvent = useCallback((
+    pageNumber: number, text: string, x: number, y: number, width: number, fontSize: number, anchor?: 'top-left', annotationId?: string,
+  ) => {
+    const id = materialIdRef.current;
+    if (!id) return;
+    const current = textAnnotationsForMaterialPage(id, pageNumber);
+    const now = new Date().toISOString();
+    const created: MaterialTextAnnotation = {
+      id: annotationId ?? `material-text-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      text, x, y, width, fontSize, anchor, createdAt: now, updatedAt: now,
+    };
+    setNativeHistory((h) => pushMaterialHistory(h, { kind: 'text-create', pageNumber, annotation: created }));
+    saveTextAnnotations(pageNumber, [...current, created]);
+    ensureTrailingBlankPageAfterContent(pageNumber);
+  }, [ensureTrailingBlankPageAfterContent, saveTextAnnotations, textAnnotationsForMaterialPage]);
+
   const handleNativeTextAnnotationAction = useCallback((event: NativePdfTextAnnotationActionEvent) => {
     const id = materialIdRef.current;
     if (!id || !event.pageNumber) return;
     const current = textAnnotationsForMaterialPage(id, event.pageNumber);
-    if (event.action === 'select' && event.annotationId) {
-      setSelectedTextAnnotationId(event.annotationId);
-      return;
-    }
-    if (event.action === 'paste') {
+    if (event.action === 'create') {
+      // The native inline editor already collected and confirmed the final
+      // text before emitting this — no modal, nothing left to ask the user.
       const text = event.text?.trim();
       if (!text || !Number.isFinite(event.x) || !Number.isFinite(event.y)) return;
-      const now = new Date().toISOString();
-      saveTextAnnotations(event.pageNumber, [...current, {
-        id: `material-text-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        text,
-        x: event.x!, y: event.y!, width: 180, fontSize: 16,
-        createdAt: now, updatedAt: now,
-      }]);
-      ensureTrailingBlankPageAfterContent(event.pageNumber);
+      createTextAnnotationFromEvent(event.pageNumber, text, event.x!, event.y!, event.width ?? 180, 16, event.anchor, event.annotationId);
       return;
     }
     const selected = current.find((annotation) => annotation.id === event.annotationId);
     if (!selected) return;
     if (event.action === 'delete') {
+      setNativeHistory((h) => pushMaterialHistory(h, { kind: 'text-delete', pageNumber: event.pageNumber, annotation: selected }));
       saveTextAnnotations(event.pageNumber, current.filter((annotation) => annotation.id !== selected.id));
-      setSelectedTextAnnotationId(undefined);
     } else if (event.action === 'edit') {
-      setEditingText(selected); setEditingTextValue(selected.text);
-    } else if (event.action === 'move' && Number.isFinite(event.x) && Number.isFinite(event.y)) {
-      saveTextAnnotations(event.pageNumber, current.map((annotation) => annotation.id === selected.id
-        ? { ...annotation, x: event.x!, y: event.y!, updatedAt: new Date().toISOString() }
-        : annotation));
-    } else if (event.action === 'move') {
-      Alert.alert('Move text', 'Long-press the new location on the page.');
+      // The native inline editor already collected the final text (even if
+      // empty — an empty commit is the existing clear-to-delete path, same
+      // rule the old Save-button modal used, just reached directly now).
+      const text = (event.text ?? '').trim();
+      if (text && text !== selected.text) {
+        setNativeHistory((h) => pushMaterialHistory(h, {
+          kind: 'text-edit', pageNumber: event.pageNumber, annotationId: selected.id, before: selected.text, after: text,
+        }));
+      } else if (!text) {
+        setNativeHistory((h) => pushMaterialHistory(h, { kind: 'text-delete', pageNumber: event.pageNumber, annotation: selected }));
+      }
+      saveTextAnnotations(event.pageNumber, text
+        ? current.map((annotation) => annotation.id === selected.id ? { ...annotation, text, updatedAt: new Date().toISOString() } : annotation)
+        : current.filter((annotation) => annotation.id !== selected.id));
+      if (text) ensureTrailingBlankPageAfterContent(event.pageNumber);
     }
-  }, [ensureTrailingBlankPageAfterContent, saveTextAnnotations, textAnnotationsForMaterialPage]);
-
-  const saveEditedText = useCallback(() => {
-    if (!editingText) return;
-    const text = editingTextValue.trim();
-    const id = materialIdRef.current;
-    if (!id) return;
-    const current = textAnnotationsForMaterialPage(id, currentPage);
-    saveTextAnnotations(currentPage, text
-      ? current.map((annotation) => annotation.id === editingText.id ? { ...annotation, text, updatedAt: new Date().toISOString() } : annotation)
-      : current.filter((annotation) => annotation.id !== editingText.id));
-    if (text) ensureTrailingBlankPageAfterContent(currentPage);
-    setEditingText(null);
-  }, [currentPage, editingText, editingTextValue, ensureTrailingBlankPageAfterContent, saveTextAnnotations, textAnnotationsForMaterialPage]);
+  }, [createTextAnnotationFromEvent, ensureTrailingBlankPageAfterContent, saveTextAnnotations, textAnnotationsForMaterialPage]);
 
   const handleNativeModeChange = useCallback((next: NativePdfAnnotationMode) => {
-    nativeAnnotationModeRef.current = next;
     nativeTemporaryEraserRef.current = false;
     setNativeTemporaryEraser(false);
+    if (next !== 'select') setNativeSelection({ pageNumber: 0, strokeIds: [] });
 
     if (next === 'pen' || next === 'highlighter') {
       nativePreviousDrawingToolRef.current = next;
     }
 
-    setNativeAnnotationMode(next);
+    applyNativeAnnotationMode(next);
+  }, [applyNativeAnnotationMode]);
+
+  const handleNativeSelectionChanged = useCallback((event: NativePdfSelectionChangedEvent) => {
+    setNativeSelection({ pageNumber: event.pageNumber, strokeIds: event.strokeIds });
   }, []);
+
+  // One completed Pencil drag of the selected ink = ONE history action. Native
+  // has already committed the move visually; this persists it in page space.
+  const handleNativeSelectionMoved = useCallback((event: NativePdfSelectionMovedEvent) => {
+    const mid = nativeMaterialIdRef.current;
+    if (!mid || event.pageNumber <= 0) return;
+    // A release on ANOTHER PDF page moves the whole selected group into that page's bucket (ONE history action,
+    // page ownership + geometry). Native already applied the same transform to its own model.
+    if (event.toPageNumber && event.toPageNumber !== event.pageNumber && event.transform?.length === 6) {
+      const [ta, tb, tc, td, ttx, tty] = event.transform;
+      const transfer = materialSelectionTransfer(
+        { pageNumber: event.pageNumber, strokeIds: event.strokeIds },
+        annotationsForMaterialPage(mid, event.pageNumber),
+        event.toPageNumber,
+        annotationsForMaterialPage(mid, event.toPageNumber),
+        { a: ta, b: tb, c: tc, d: td, tx: ttx, ty: tty },
+      );
+      if (!transfer) return;
+      const transferAction: MaterialHistoryAction = {
+        kind: 'selection-transfer', pageNumber: transfer.fromPage, toPageNumber: transfer.toPage, strokeIds: transfer.movedIds,
+        beforeStrokes: transfer.beforeFromStrokes, afterStrokes: transfer.afterFromStrokes,
+        beforeToStrokes: transfer.beforeToStrokes, afterToStrokes: transfer.afterToStrokes,
+      };
+      setNativeHistory((history) => pushMaterialHistory(history, transferAction));
+      requestImmediateNativeAnnotations();
+      replaceMaterialPageAnnotationStrokesForMaterial(mid, transfer.fromPage, transfer.afterFromStrokes, materialScopeLectureId(mid));
+      replaceMaterialPageAnnotationStrokesForMaterial(mid, transfer.toPage, transfer.afterToStrokes, materialScopeLectureId(mid));
+      setNativeSelection({ pageNumber: transfer.toPage, strokeIds: transfer.movedIds });
+      return;
+    }
+    const change = materialSelectionMove(
+      { pageNumber: event.pageNumber, strokeIds: event.strokeIds },
+      annotationsForMaterialPage(mid, event.pageNumber),
+      event.dx, event.dy,
+    );
+    if (!change) return;
+    const action: MaterialHistoryAction = {
+      kind: 'selection-move', pageNumber: event.pageNumber, strokeIds: event.strokeIds, ...change,
+    };
+    setNativeHistory((history) => pushMaterialHistory(history, action));
+    replaceMaterialPageAnnotationStrokesForMaterial(mid, event.pageNumber, change.afterStrokes, materialScopeLectureId(mid));
+  }, [annotationsForMaterialPage, replaceMaterialPageAnnotationStrokesForMaterial, requestImmediateNativeAnnotations]);
+
+  // One completed two-finger pinch of the selected ink = ONE history action. Native already scaled the ink
+  // visually (and in its own model); this persists the same transform from the shared math.
+  const handleNativeSelectionScaled = useCallback((event: NativePdfSelectionScaledEvent) => {
+    const mid = nativeMaterialIdRef.current;
+    if (!mid || event.pageNumber <= 0) return;
+    const change = materialSelectionScale(
+      { pageNumber: event.pageNumber, strokeIds: event.strokeIds },
+      annotationsForMaterialPage(mid, event.pageNumber),
+      event.factor, { x: event.centerX, y: event.centerY },
+    );
+    if (!change) return;
+    const action: MaterialHistoryAction = {
+      kind: 'selection-scale', pageNumber: event.pageNumber, strokeIds: event.strokeIds, ...change,
+    };
+    setNativeHistory((history) => pushMaterialHistory(history, action));
+    replaceMaterialPageAnnotationStrokesForMaterial(mid, event.pageNumber, change.afterStrokes, materialScopeLectureId(mid));
+  }, [annotationsForMaterialPage, replaceMaterialPageAnnotationStrokesForMaterial]);
+
+  // One completed handle drag of a structured shape = ONE history action. Native drew the
+  // live preview; here the SHARED edit semantics produce the authoritative geometry and the
+  // regenerated ink points, and the explicit edit bypasses the write gate.
+  const handleNativeShapeEdited = useCallback((event: NativePdfShapeEditedEvent) => {
+    const mid = nativeMaterialIdRef.current;
+    if (!mid || event.pageNumber <= 0) return;
+    const change = materialShapeEdit(
+      event.pageNumber,
+      annotationsForMaterialPage(mid, event.pageNumber),
+      event.strokeId, event.handleIndex, { x: event.x, y: event.y },
+    );
+    if (!change) return;
+    const action: MaterialHistoryAction = {
+      kind: 'shape-edit', pageNumber: event.pageNumber, strokeId: event.strokeId,
+      beforeStrokes: change.beforeStrokes, afterStrokes: change.afterStrokes,
+    };
+    setNativeHistory((history) => pushMaterialHistory(history, action));
+    requestImmediateNativeAnnotations();
+    replaceMaterialPageAnnotationStrokesForMaterial(mid, event.pageNumber, change.afterStrokes, materialScopeLectureId(mid));
+  }, [annotationsForMaterialPage, replaceMaterialPageAnnotationStrokesForMaterial, requestImmediateNativeAnnotations]);
 
   // Colour selection from the toolbar strip — applies to whichever draw tool is
   // active. Native (PDFKit) and JS-overlay paths each have their own colour state;
   // the toolbar instance for each path calls its matching handler.
   const handleSelectNativeColor = useCallback((color: string) => {
     if (nativeAnnotationModeRef.current === 'highlighter') {
+      nativeHighlighterColorRef.current = color;
+      pdfRef.current?.setHighlighterColor(color);
       setNativeHighlighterColor(color);
     } else {
+      nativePenColorRef.current = color;
+      pdfRef.current?.setPenColor(color);
       setNativePenColor(color);
     }
   }, []);
@@ -845,11 +1143,10 @@ export default function LectureMaterialWorkspaceScreen() {
   const restoreNativeTemporaryEraserIfNeeded = useCallback(() => {
     if (!nativeTemporaryEraserRef.current) return;
     const restored = nativePreviousDrawingToolRef.current ?? 'pen';
-    nativeAnnotationModeRef.current = restored;
     nativeTemporaryEraserRef.current = false;
     setNativeTemporaryEraser(false);
-    setNativeAnnotationMode(restored);
-  }, []);
+    applyNativeAnnotationMode(restored);
+  }, [applyNativeAnnotationMode]);
 
   const handleNativeAnnotationCommitted = useCallback(
     (event: NativePdfAnnotationsChangedEvent) => {
@@ -872,15 +1169,26 @@ export default function LectureMaterialWorkspaceScreen() {
         width: native.width,
         opacity: native.opacity,
         points: native.points.map(([x, y]) => ({ x, y })),
+        ...(native.shape ? { shape: native.shape } : {}),
         coordSpace: 'pdfPage',
         createdAt: native.createdAt,
       });
 
-      // A fresh native edit (draw or erase) invalidates the redo stack.
-      setNativeRedoStack([]);
-
       if (event.action === 'replacePage') {
+        // Native batches an entire Pencil erase gesture and emits exactly one
+        // final page snapshot. Build the history item from that payload now,
+        // rather than waiting for the async store/React round-trip triggered
+        // below, which could otherwise observe a stale page.
+        const before = annotationsForMaterialPage(mid, page);
         const nextStrokes = event.strokes.map(toStoreStroke);
+        const beforeIds = new Set(before.map((stroke) => stroke.id));
+        const afterIds = new Set(nextStrokes.map((stroke) => stroke.id));
+        const changed = beforeIds.size !== afterIds.size || [...beforeIds].some((id) => !afterIds.has(id));
+        if (changed) {
+          setNativeHistory((h) => pushMaterialHistory(h, {
+            kind: 'stroke-erase', pageNumber: page, before, after: nextStrokes,
+          }));
+        }
         replaceMaterialPageAnnotationStrokesForMaterial(mid, page, nextStrokes, materialScopeLectureId(mid));
         debugMaterialViewport('native-annotation-store-update', { action: 'replacePage', page });
         return;
@@ -890,12 +1198,18 @@ export default function LectureMaterialWorkspaceScreen() {
       const stroke: MaterialAnnotationStroke = {
         ...toStoreStroke(event.stroke),
       };
+      // One drawn Pencil stroke = one history action.
+      setNativeHistory((h) => pushMaterialHistory(h, { kind: 'stroke-add', pageNumber: page, stroke }));
       addAnnotationStroke(materialReviewMode ? materialScopeLectureId(mid) : lid, mid, page, stroke);
       debugMaterialViewport('native-annotation-store-update', { action: 'add', page, strokeId: stroke.id });
       ensureTrailingBlankPageAfterContent(page);
     },
-    [addAnnotationStroke, ensureTrailingBlankPageAfterContent, materialReviewMode, replaceMaterialPageAnnotationStrokesForMaterial],
+    [addAnnotationStroke, annotationsForMaterialPage, ensureTrailingBlankPageAfterContent, materialReviewMode, replaceMaterialPageAnnotationStrokesForMaterial],
   );
+
+  const handleNativeEraserGestureEnded = useCallback(() => {
+    restoreNativeTemporaryEraserIfNeeded();
+  }, [restoreNativeTemporaryEraserIfNeeded]);
 
   const addPageStroke = useCallback(
     (stroke: MaterialAnnotationStroke) => {
@@ -939,31 +1253,149 @@ export default function LectureMaterialWorkspaceScreen() {
     );
   }, [addAnnotationStroke, currentPage, lectureId, material?.id, materialReviewMode, redoStack]);
 
+  // Applies one history step's result: strokes go through the stroke store,
+  // text through the text store. Page Clear changes both as one history
+  // action; all other actions touch only one store. Any stroke
+  // ids this step just removed (undo of a stroke-add, or redo of a
+  // stroke-erase) must reach native BEFORE the snapshot that omits them —
+  // see markStrokeRemovalIntent's doc comment for the race this avoids.
+  const applyNativeHistoryStep = useCallback(
+    (action: MaterialHistoryAction, result: MaterialHistoryApplyResult) => {
+      const mid = nativeMaterialIdRef.current;
+      if (!mid) return;
+      requestImmediateNativeAnnotations();
+      if (result.removedStrokeIds.length > 0) {
+        pdfRef.current?.markStrokeRemovalIntent(result.removedStrokeIds);
+      }
+      if (action.kind === 'selection-transfer') {
+        // Both pages change together (page ownership is part of the action); the group is re-selected where it now lives.
+        replaceMaterialPageAnnotationStrokesForMaterial(mid, action.pageNumber, result.strokes, materialScopeLectureId(mid));
+        for (const other of result.otherPages ?? []) {
+          replaceMaterialPageAnnotationStrokesForMaterial(mid, other.pageNumber, other.strokes, materialScopeLectureId(mid));
+        }
+        if (result.selection) {
+          pdfRef.current?.setSelection(result.selection.pageNumber, result.selection.strokeIds);
+          setNativeSelection(result.selection);
+        }
+        return;
+      }
+      if (action.kind === 'stroke-add' || action.kind === 'stroke-erase' || action.kind === 'page-clear' || action.kind === 'selection-change' || action.kind === 'selection-move' || action.kind === 'selection-scale' || action.kind === 'shape-edit') {
+        if (action.kind === 'stroke-erase' || action.kind === 'page-clear' || action.kind === 'selection-change') {
+          const afterIds = new Set((action.kind === 'stroke-erase' ? action.after : action.afterStrokes).map((stroke) => stroke.id));
+          const restoredIds = result.strokes
+            .filter((stroke) => !afterIds.has(stroke.id))
+            .map((stroke) => stroke.id);
+          if (restoredIds.length > 0) {
+            pdfRef.current?.markStrokeRestorationIntent(restoredIds);
+          }
+        }
+        replaceMaterialPageAnnotationStrokesForMaterial(mid, action.pageNumber, result.strokes, materialScopeLectureId(mid));
+        if (action.kind !== 'page-clear') return;
+      }
+      // Undo/Redo is explicit intent, unlike an older React prop echo. It may
+      // supersede a native visual commit that is still awaiting persistence.
+      pdfRef.current?.setTextHistoryIntent(action.pageNumber, result.textAnnotations);
+      saveTextAnnotations(action.pageNumber, result.textAnnotations);
+    },
+    [replaceMaterialPageAnnotationStrokesForMaterial, requestImmediateNativeAnnotations, saveTextAnnotations],
+  );
+
   const undoNativeCurrentPage = useCallback(() => {
-    const lid = nativeLectureIdRef.current;
     const mid = nativeMaterialIdRef.current;
     const page = nativeCurrentPageRef.current;
-    if (!lid || !mid || !Number.isFinite(page) || page <= 0) return;
-    const strokes = annotationsForMaterialPage(mid, page);
-    const removeIndex = strokes.map((stroke, index) => ({ stroke, index }))
-      .reverse()
-      .find(({ stroke }) => stroke.coordSpace === 'pdfPage')?.index;
-    if (removeIndex == null) return;
-    const removed = strokes[removeIndex];
-    const next = strokes.filter((_, index) => index !== removeIndex);
-    replaceMaterialPageAnnotationStrokesForMaterial(mid, page, next, materialScopeLectureId(mid));
-    setNativeRedoStack((stack) => [...stack, removed]);
-  }, [annotationsForMaterialPage, replaceMaterialPageAnnotationStrokesForMaterial]);
+    if (!mid || !Number.isFinite(page) || page <= 0) return;
+    const popped = popMaterialHistoryUndo(nativeHistory);
+    if (!popped) return;
+    const strokes = annotationsForMaterialPage(mid, popped.action.pageNumber);
+    const texts = textAnnotationsForMaterialPage(mid, popped.action.pageNumber);
+    const result = applyMaterialHistoryUndo(popped.action, strokes, texts);
+    setNativeHistory(popped.state);
+    // Undo/redo never deselects by itself: native reconciles the selection against the reloaded
+    // strokes (kept while the objects exist) and reports any change via onSelectionChanged.
+    applyNativeHistoryStep(popped.action, result);
+  }, [annotationsForMaterialPage, applyNativeHistoryStep, nativeHistory, textAnnotationsForMaterialPage]);
 
   const redoNativeCurrentPage = useCallback(() => {
-    const lid = nativeLectureIdRef.current;
     const mid = nativeMaterialIdRef.current;
     const page = nativeCurrentPageRef.current;
-    if (!lid || !mid || !Number.isFinite(page) || page <= 0 || nativeRedoStack.length === 0) return;
-    const restored = nativeRedoStack[nativeRedoStack.length - 1];
-    setNativeRedoStack((stack) => stack.slice(0, -1));
-    addAnnotationStroke(materialReviewMode ? materialScopeLectureId(mid) : lid, mid, page, restored);
-  }, [addAnnotationStroke, materialReviewMode, nativeRedoStack]);
+    if (!mid || !Number.isFinite(page) || page <= 0) return;
+    const popped = popMaterialHistoryRedo(nativeHistory);
+    if (!popped) return;
+    const strokes = annotationsForMaterialPage(mid, popped.action.pageNumber);
+    const texts = textAnnotationsForMaterialPage(mid, popped.action.pageNumber);
+    const result = applyMaterialHistoryRedo(popped.action, strokes, texts);
+    setNativeHistory(popped.state);
+    // Undo/redo never deselects by itself: native reconciles the selection against the reloaded
+    // strokes (kept while the objects exist) and reports any change via onSelectionChanged.
+    applyNativeHistoryStep(popped.action, result);
+  }, [annotationsForMaterialPage, applyNativeHistoryStep, nativeHistory, textAnnotationsForMaterialPage]);
+
+  const clearNativeCurrentPage = useCallback(() => {
+    const mid = nativeMaterialIdRef.current;
+    const pageNumber = nativeCurrentPageRef.current;
+    if (!mid || !Number.isFinite(pageNumber) || pageNumber <= 0) return;
+    const beforeStrokes = annotationsForMaterialPage(mid, pageNumber);
+    const beforeTextAnnotations = textAnnotationsForMaterialPage(mid, pageNumber);
+    // The native PDF displays only PDF-page-space strokes. Keep legacy
+    // viewport-space records untouched, including across Undo/Redo.
+    const afterStrokes = beforeStrokes.filter((stroke) => stroke.coordSpace !== 'pdfPage');
+    if (afterStrokes.length === beforeStrokes.length && beforeTextAnnotations.length === 0) return;
+    Alert.alert(t('tools.clearPage'), t('tools.clearPageBody'), [
+      { text: t('common.cancel'), style: 'cancel' },
+      {
+        text: t('common.clear'),
+        style: 'destructive',
+        onPress: () => {
+          requestImmediateNativeAnnotations();
+          const action: MaterialHistoryAction = {
+            kind: 'page-clear', pageNumber,
+            beforeStrokes, afterStrokes,
+            beforeTextAnnotations, afterTextAnnotations: [],
+          };
+          setNativeHistory((history) => pushMaterialHistory(history, action));
+          const removedIds = beforeStrokes.filter((stroke) => stroke.coordSpace === 'pdfPage').map((stroke) => stroke.id);
+          if (removedIds.length > 0) pdfRef.current?.markStrokeRemovalIntent(removedIds);
+          replaceMaterialPageAnnotationStrokesForMaterial(mid, pageNumber, afterStrokes, materialScopeLectureId(mid));
+          pdfRef.current?.setTextHistoryIntent(pageNumber, []);
+          saveTextAnnotations(pageNumber, []);
+        },
+      },
+    ]);
+  }, [annotationsForMaterialPage, replaceMaterialPageAnnotationStrokesForMaterial, requestImmediateNativeAnnotations, saveTextAnnotations, t, textAnnotationsForMaterialPage]);
+  const changeNativeSelection = useCallback((operation: 'delete' | 'duplicate') => {
+    const mid = nativeMaterialIdRef.current;
+    const pageNumber = nativeSelection.pageNumber;
+    if (!mid || pageNumber <= 0) return;
+    const strokes = annotationsForMaterialPage(mid, pageNumber);
+    let sequence = 0;
+    const change = materialSelectionChange(
+      nativeSelection, strokes, operation,
+      () => `material-selected-${Date.now()}-${sequence++}-${Math.random().toString(36).slice(2, 8)}`,
+      new Date().toISOString(),
+    );
+    if (!change) return;
+    requestImmediateNativeAnnotations();
+    const action: MaterialHistoryAction = { kind: 'selection-change', pageNumber, ...change };
+    setNativeHistory((history) => pushMaterialHistory(history, action));
+    if (operation === 'delete') {
+      pdfRef.current?.markStrokeRemovalIntent(nativeSelection.strokeIds);
+    }
+    replaceMaterialPageAnnotationStrokesForMaterial(mid, pageNumber, change.afterStrokes, materialScopeLectureId(mid));
+    if (operation === 'duplicate') {
+      // Like Notebook, the copies become the selection so they can be dragged.
+      const beforeIds = new Set(change.beforeStrokes.map((stroke) => stroke.id));
+      const copyIds = change.afterStrokes.filter((stroke) => !beforeIds.has(stroke.id)).map((stroke) => stroke.id);
+      pdfRef.current?.setSelection(pageNumber, copyIds);
+      setNativeSelection({ pageNumber, strokeIds: copyIds });
+      return;
+    }
+    pdfRef.current?.clearSelection();
+    setNativeSelection({ pageNumber: 0, strokeIds: [] });
+  }, [annotationsForMaterialPage, nativeSelection, replaceMaterialPageAnnotationStrokesForMaterial, requestImmediateNativeAnnotations]);
+  const hasNativeSelection = nativeSelection.strokeIds.length > 0;
+  const canClearNativeCurrentPage =
+    (nativeAnnotationsByPage[String(currentPage)]?.length ?? 0) > 0 ||
+    (nativeTextAnnotationsByPage[String(currentPage)]?.length ?? 0) > 0;
 
   // ---- Empty / error states ----
   if (!material) {
@@ -1018,24 +1450,30 @@ export default function LectureMaterialWorkspaceScreen() {
           initialPage={initialPage}
           initialViewport={initialViewport}
           style={styles.pdfFill}
-          annotationMode={nativeAnnotationMode}
-          penColor={nativePenColor}
+          selectionShape={nativeSelectionShape}
           penWidth={nativePenWidth}
-          highlighterColor={nativeHighlighterColor}
           highlighterWidth={nativeHighlighterWidth}
           eraserRadius={nativeEraserRadius}
-          annotationsByPage={nativeAnnotationsByPage}
+          annotationsByPage={nativeAnnotationsProp}
           appendedBlankPageCount={appendedPageCount}
-          textAnnotationsByPage={nativeTextAnnotationsByPage}
-          selectedTextAnnotationId={selectedTextAnnotationId}
-          onLoadComplete={(event) => handlePdfLoadComplete(event.totalPages, event.sourcePageCount)}
-          onPageChanged={(event) => handlePdfPageChanged(event.pageNumber)}
+          textAnnotationsByPage={nativeTextProp}
+          onLoadComplete={handleNativeLoadComplete}
+          onPageChanged={handleNativePageChanged}
           onViewportChanged={handleNativeViewportChanged}
           onViewportDiagnostic={handleNativeViewportDiagnostic}
-          onError={(event) => handlePdfError(new Error(event.message))}
+          onError={handleNativeError}
           onAnnotationsChanged={handleNativeAnnotationCommitted}
-          onEraserGestureEnded={restoreNativeTemporaryEraserIfNeeded}
+          onEraserGestureEnded={handleNativeEraserGestureEnded}
           onTextAnnotationAction={handleNativeTextAnnotationAction}
+          onSelectionChanged={handleNativeSelectionChanged}
+          onSelectionMoved={handleNativeSelectionMoved}
+          onSelectionScaled={handleNativeSelectionScaled}
+          onShapeEdited={handleNativeShapeEdited}
+          onPencilActivity={handleNativePencilActivity}
+          shapeSnapEnabled
+          shapeSnapHoldMs={SHAPE_SNAP_HOLD_MS}
+          shapeSnapTolerancePt={SHAPE_SNAP_HOLD_TOLERANCE_PT}
+          onShapeHold={handleNativeShapeHold}
         />
       ) : Pdf ? (
         <View style={styles.legacyPdfWrap}>
@@ -1148,7 +1586,7 @@ export default function LectureMaterialWorkspaceScreen() {
                 setExporting(false);
               }
             }}
-            style={({ pressed }) => [styles.exportButton, { top: insets.top + spacing.md, right: spacing.md }, (pressed || exporting) && styles.pressed]}
+            style={({ pressed }) => [styles.exportButton, { top: insets.top + spacing.md + 52, right: spacing.md }, (pressed || exporting) && styles.pressed]}
           >
             {exporting ? <ActivityIndicator size="small" color={colors.deepNavy} /> : <Ionicons name="share-outline" size={20} color={colors.deepNavy} />}
           </Pressable>
@@ -1169,53 +1607,131 @@ export default function LectureMaterialWorkspaceScreen() {
         <FloatingMiniCaption topOffset={insets.top + 80} enabled={classroomSessionActive} />
       </View>
 
-      {/* Notebook-style draggable annotation toolbar — same board / drag / dock /
-          minimize model as the Notebook toolbar, reduced to the Course Material
-          tool set. Drives the native PDFKit overlay (or the JS fallback overlay)
+      {/* PK4-C1: the exact same SharedAnnotationToolbar component Notebook
+          renders (same board / drag / dock / minimize implementation),
+          parameterized to Course Material's own tool set and capabilities.
+          There is no second, Material-specific toolbar layout anymore.
+          Drives the native PDFKit overlay (or the JS fallback overlay)
           without touching PDF annotation storage. */}
       {useNativePdfViewer ? (
-        <MaterialFloatingToolbar
-          mode={nativeAnnotationMode}
-          onChangeMode={handleNativeModeChange}
-          onUndo={undoNativeCurrentPage}
-          canUndo={pageStrokes.some((stroke) => stroke.coordSpace === 'pdfPage')}
-          onRedo={redoNativeCurrentPage}
-          canRedo={nativeRedoStack.length > 0}
+        <SharedAnnotationToolbar
+          editable
+          storageKey="youmi.materialToolbar.v1"
+          tools={courseMaterialSharedTools(courseMaterialCapabilities({ usingNativePdfViewer: true }))}
+          activeTool={materialModeToSharedTool(nativeAnnotationMode) ?? 'pen'}
+          onSelectTool={(tool) => handleNativeModeChange(sharedToolToMaterialMode(tool))}
+          renderToolIcon={(tool, active, color, size) => (
+            <Svg width={size} height={size} viewBox="0 0 28 28">
+              {tool === 'select'
+                ? <Ellipse cx="14" cy="14" rx="9" ry="8" stroke={color} strokeWidth={1.9} strokeDasharray="3.2 3.4" fill="none" />
+                : <SharedToolbarGlyphPaths name={materialGlyphName(tool)} color={color} />}
+            </Svg>
+          )}
           penColors={PEN_COLORS}
           penColor={nativePenColor}
-          highlighterColors={HIGHLIGHTER_COLORS}
-          highlighterColor={nativeHighlighterColor}
-          onSelectColor={handleSelectNativeColor}
+          onSelectPenColor={handleSelectNativeColor}
           penWidths={PEN_WIDTHS}
           penWidth={nativePenWidth}
+          onSelectPenWidth={handleSelectNativeWidth}
+          highlighterColors={HIGHLIGHTER_COLORS}
+          highlighterColor={nativeHighlighterColor}
+          onSelectHighlighterColor={handleSelectNativeColor}
           highlighterWidths={HIGHLIGHTER_WIDTHS}
           highlighterWidth={nativeHighlighterWidth}
-          onSelectWidth={handleSelectNativeWidth}
+          onSelectHighlighterWidth={handleSelectNativeWidth}
           eraserSizes={ERASER_SIZES}
           eraserSize={nativeEraserRadius}
           onSelectEraserSize={handleSelectNativeEraserSize}
+          onUndo={undoNativeCurrentPage}
+          canUndo={nativeHistory.undo.length > 0}
+          onRedo={redoNativeCurrentPage}
+          canRedo={nativeHistory.redo.length > 0}
+          showFixedHistory
+          extraAction={{
+            onPress: hasNativeSelection ? () => changeNativeSelection('delete') : clearNativeCurrentPage,
+            disabled: !hasNativeSelection && !canClearNativeCurrentPage,
+            accessibilityLabel: hasNativeSelection ? t('tools.deleteSelected') : t('tools.clearPage'),
+            icon: (
+              <Svg width={23} height={23} viewBox="0 0 28 28" accessibilityElementsHidden>
+                <SharedToolbarGlyphPaths name="more" color={hasNativeSelection || canClearNativeCurrentPage ? TOOLBAR_ICON_IDLE : TOOLBAR_ICON_DISABLED} />
+              </Svg>
+            ),
+          }}
+          renderExtraContext={(tool, orientation, helpers) => tool === 'select' ? (
+            <View style={orientation === 'horizontal' ? styles.selectionContextHorizontal : styles.selectionContextVertical}>
+              <SharedSelectionShapeContext
+                shape={nativeSelectionShape}
+                onChange={setNativeSelectionShape}
+                orientation={orientation}
+                runPress={helpers.runPress}
+                dragHandlerProps={helpers.dragHandlerProps}
+              />
+              {hasNativeSelection ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={t('tools.duplicateImage')}
+                  onPress={() => helpers.runPress(() => changeNativeSelection('duplicate'))}
+                  style={styles.selectionDuplicateButton}
+                >
+                  <Svg width={24} height={24} viewBox="0 0 28 28">
+                    <Rect x="9" y="9" width="13" height="13" rx="2.4" stroke={TOOLBAR_ICON_IDLE} strokeWidth={1.8} fill="none" />
+                    <Path d="M6 17V7.5A1.5 1.5 0 0 1 7.5 6H17" stroke={TOOLBAR_ICON_IDLE} strokeWidth={1.8} strokeLinecap="round" fill="none" />
+                  </Svg>
+                </Pressable>
+              ) : null}
+            </View>
+          ) : null}
+          fixedHistoryPosition={{ top: insets.top + spacing.md, right: spacing.md }}
+          moveAccessibilityLabel={t('tools.moveMaterial')}
+          expandAccessibilityLabel={t('tools.expandTools')}
+          minimizeAccessibilityLabel={t('tools.minimizeTools')}
+          handAccessibilityLabel={t('tools.scrollPage')}
         />
       ) : Pdf ? (
-        <MaterialFloatingToolbar
-          mode={annotationMode}
-          onChangeMode={setAnnotationMode}
+        <SharedAnnotationToolbar
+          editable
+          storageKey="youmi.materialToolbar.v1"
+          tools={courseMaterialSharedTools(courseMaterialCapabilities({ usingNativePdfViewer: false }))}
+          activeTool={materialModeToSharedTool(annotationMode) ?? 'pen'}
+          onSelectTool={(tool) => {
+            // The legacy JS-overlay path has no text or selection model, so
+            // neither can reach setAnnotationMode at runtime — the shared
+            // tool set for this path never includes them in the first
+            // place (see courseMaterialCapabilities({ usingNativePdfViewer:
+            // false })), this guard just mirrors that at the type level.
+            const next = sharedToolToMaterialMode(tool);
+            if (next !== 'text' && next !== 'select') setAnnotationMode(next);
+          }}
+          renderToolIcon={(tool, active, color, size) => (
+            <Svg width={size} height={size} viewBox="0 0 28 28">
+              <SharedToolbarGlyphPaths name={materialGlyphName(tool)} color={color} />
+            </Svg>
+          )}
+          penColors={PEN_COLORS}
+          penColor={penColor}
+          onSelectPenColor={handleSelectColor}
+          penWidths={PEN_WIDTHS}
+          penWidth={penWidth}
+          onSelectPenWidth={handleSelectWidth}
+          highlighterColors={HIGHLIGHTER_COLORS}
+          highlighterColor={highlighterColor}
+          onSelectHighlighterColor={handleSelectColor}
+          highlighterWidths={HIGHLIGHTER_WIDTHS}
+          highlighterWidth={highlighterWidth}
+          onSelectHighlighterWidth={handleSelectWidth}
+          eraserSizes={ERASER_SIZES}
+          eraserSize={eraserRadius}
+          onSelectEraserSize={handleSelectEraserSize}
           onUndo={undoCurrentPage}
           canUndo={pageStrokes.length > 0}
           onRedo={redoCurrentPage}
           canRedo={redoStack.length > 0}
-          penColors={PEN_COLORS}
-          penColor={penColor}
-          highlighterColors={HIGHLIGHTER_COLORS}
-          highlighterColor={highlighterColor}
-          onSelectColor={handleSelectColor}
-          penWidths={PEN_WIDTHS}
-          penWidth={penWidth}
-          highlighterWidths={HIGHLIGHTER_WIDTHS}
-          highlighterWidth={highlighterWidth}
-          onSelectWidth={handleSelectWidth}
-          eraserSizes={ERASER_SIZES}
-          eraserSize={eraserRadius}
-          onSelectEraserSize={handleSelectEraserSize}
+          showFixedHistory
+          fixedHistoryPosition={{ top: insets.top + spacing.md, right: spacing.md }}
+          moveAccessibilityLabel={t('tools.moveMaterial')}
+          expandAccessibilityLabel={t('tools.expandTools')}
+          minimizeAccessibilityLabel={t('tools.minimizeTools')}
+          handAccessibilityLabel={t('tools.scrollPage')}
         />
       ) : null}
 
@@ -1227,18 +1743,6 @@ export default function LectureMaterialWorkspaceScreen() {
         onGo={handleJumpGo}
       />
 
-      <Modal transparent visible={Boolean(editingText)} animationType="fade" onRequestClose={() => setEditingText(null)}>
-        <KeyboardAvoidingView style={styles.textEditorBackdrop} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-          <View style={styles.textEditorCard}>
-            <Text style={styles.textEditorTitle}>Edit pasted text</Text>
-            <TextInput value={editingTextValue} onChangeText={setEditingTextValue} multiline autoFocus style={styles.textEditorInput} />
-            <View style={styles.textEditorActions}>
-              <Pressable onPress={() => setEditingText(null)} style={styles.softButton}><Text style={styles.softButtonLabel}>Cancel</Text></Pressable>
-              <Pressable onPress={saveEditedText} style={styles.primaryButton}><Text style={styles.primaryButtonLabel}>Save</Text></Pressable>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
     </View>
   );
 }
@@ -1503,6 +2007,9 @@ function Header({
 }
 
 const styles = StyleSheet.create({
+  selectionContextHorizontal: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  selectionContextVertical: { alignItems: 'center', justifyContent: 'center', gap: 10 },
+  selectionDuplicateButton: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 11 },
   // Full-bleed workspace. Matches the native PDFKit canvas color so the RN
   // background and the PDFKit surround blend seamlessly — no visible
   // rectangle between them when the page floats inside the canvas.
@@ -1512,13 +2019,6 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.94)', borderWidth: 1, borderColor: colors.border,
     alignItems: 'center', justifyContent: 'center', zIndex: 12,
   },
-  textEditorBackdrop: { flex: 1, backgroundColor: 'rgba(6,27,52,0.35)', alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
-  textEditorCard: { width: '100%', maxWidth: 480, backgroundColor: colors.surface, borderRadius: radius.lg, padding: spacing.lg, gap: spacing.md },
-  textEditorTitle: { fontSize: fontSize.lg, fontWeight: '700', color: colors.textPrimary },
-  textEditorInput: { minHeight: 130, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, color: colors.textPrimary, padding: spacing.md, textAlignVertical: 'top' },
-  textEditorActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: spacing.sm },
-  primaryButton: { backgroundColor: colors.deepNavy, borderRadius: radius.md, paddingHorizontal: spacing.lg, paddingVertical: spacing.sm, justifyContent: 'center' },
-  primaryButtonLabel: { color: colors.surface, fontWeight: '700' },
   // PDF view fills the entire screen (no card, no margins).
   pdfFill: { ...StyleSheet.absoluteFillObject, backgroundColor: colors.background },
   // Legacy JS fallback wrap (only rendered when native isn't available — on

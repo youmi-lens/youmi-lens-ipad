@@ -1,5 +1,7 @@
 import Constants, { ExecutionEnvironment } from 'expo-constants';
-import { Platform } from 'react-native';
+import { AppState, Platform } from 'react-native';
+
+import { traceRecordingLifecycle } from './recording/lifecycleTrace';
 
 type NativeAudioRecorder = {
   onError: (callback: (error: { message?: string }) => void) => void;
@@ -159,12 +161,29 @@ function clearWatchdog(): void {
  * lecture recording keeps running across a retry.
  */
 async function configureAudioSession(audioApi: NativeAudioApi): Promise<void> {
+  // Dev-only evidence of WHO mutates the shared AVAudioSession during a durable recording (no-op elsewhere).
+  traceRecordingLifecycle('AUDIO_SESSION_MUTATION', {
+    caller: 'liveMicStream.configureAudioSession', op: 'set_options', category: 'playAndRecord', mode: 'default',
+    options: '', appState: AppState.currentState,
+  });
   audioApi.AudioManager.setAudioSessionOptions({
     iosCategory: 'playAndRecord',
     iosMode: 'default',
     iosOptions: [],
   });
-  await audioApi.AudioManager.setAudioSessionActivity(true);
+  try {
+    const active = await audioApi.AudioManager.setAudioSessionActivity(true);
+    traceRecordingLifecycle('AUDIO_SESSION_MUTATION', {
+      caller: 'liveMicStream.configureAudioSession', op: 'set_active', active: true, result: Boolean(active),
+      appState: AppState.currentState,
+    });
+  } catch (failure) {
+    traceRecordingLifecycle('AUDIO_SESSION_MUTATION', {
+      caller: 'liveMicStream.configureAudioSession', op: 'set_active', active: true, result: 'error',
+      appState: AppState.currentState,
+    });
+    throw failure;
+  }
 }
 
 /** Stop just the native PCM recorder. Does not touch the shared audio session. */

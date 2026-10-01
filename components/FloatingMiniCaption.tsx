@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
   PanResponder,
@@ -10,6 +10,8 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import Reanimated, { runOnJS, useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { NativeLookupText } from '@/components/NativeLookupText';
@@ -102,9 +104,22 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
     x: Math.max(EDGE_MARGIN, width - LISTENING_PILL_WIDTH - 16),
     y: Math.max(EDGE_MARGIN, height - LISTENING_PILL_HEIGHT - 24),
   });
-  const listeningPillPan = useRef(new Animated.ValueXY(initialListeningPill.current)).current;
+  // Collapsed-pill drag: UI-thread worklet (Reanimated shared values), not
+  // PanResponder. PanResponder's touch handling runs on the JS thread, so
+  // every finger-move event had to round-trip through JS before the native
+  // transform updated — with the popup collapsed, this component still
+  // re-renders every ~250ms (the currentDurationMillis subscription below is
+  // unconditional, above the `if (!panelVisible)` early return), and that
+  // re-render can contend with PanResponder's own JS-thread touch handling
+  // for the same thread, showing up as a small but real drag stutter. A
+  // Gesture.Pan() worklet's onUpdate runs entirely on the UI thread — it
+  // cannot be delayed by JS-thread work at all — so this removes the
+  // stutter's cause rather than just reducing its odds. runOnJS is used only
+  // at gesture end, to commit the settled position and the tap-suppression
+  // flag, exactly matching what onPanResponderRelease/Terminate did before.
+  const listeningPillX = useSharedValue(initialListeningPill.current.x);
+  const listeningPillY = useSharedValue(initialListeningPill.current.y);
   const listeningPillPosRef = useRef({ ...initialListeningPill.current });
-  const listeningPillDragStart = useRef({ x: 0, y: 0 });
   const listeningPillWasDraggedRef = useRef(false);
 
   useEffect(() => {
@@ -183,44 +198,72 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
     });
   }, [height, pan, panelSizeAnim, width]);
 
-  const listeningPillResponder = useMemo(() => {
-    const settle = (dx: number, dy: number) => {
-      const maxX = Math.max(EDGE_MARGIN, width - LISTENING_PILL_WIDTH - EDGE_MARGIN);
-      const maxY = Math.max(EDGE_MARGIN, height - LISTENING_PILL_HEIGHT - EDGE_MARGIN);
-      const next = {
-        x: Math.min(Math.max(listeningPillDragStart.current.x + dx, EDGE_MARGIN), maxX),
-        y: Math.min(Math.max(listeningPillDragStart.current.y + dy, EDGE_MARGIN), maxY),
-      };
-      listeningPillPosRef.current = next;
-      Animated.spring(listeningPillPan, { toValue: next, useNativeDriver: true, friction: 9, tension: 80 }).start();
-    };
-    return PanResponder.create({
-      onStartShouldSetPanResponder: () => false,
-      onMoveShouldSetPanResponder: (_e, g) => Math.abs(g.dx) > 5 || Math.abs(g.dy) > 5,
-      onPanResponderGrant: () => {
-        listeningPillWasDraggedRef.current = true;
-        listeningPillDragStart.current = { ...listeningPillPosRef.current };
-      },
-      onPanResponderMove: (_e, g) => {
-        listeningPillPan.setValue({
-          x: listeningPillDragStart.current.x + g.dx,
-          y: listeningPillDragStart.current.y + g.dy,
-        });
-      },
-      onPanResponderRelease: (_e, g) => {
-        settle(g.dx, g.dy);
-        setTimeout(() => {
-          listeningPillWasDraggedRef.current = false;
-        }, 120);
-      },
-      onPanResponderTerminate: (_e, g) => {
-        settle(g.dx, g.dy);
-        setTimeout(() => {
-          listeningPillWasDraggedRef.current = false;
-        }, 120);
-      },
-    });
-  }, [height, listeningPillPan, width]);
+  // Drag-start snapshot, read/written only inside worklets — a plain closure
+  // variable would not reliably persist across onStart/onUpdate/onFinalize
+  // for the same gesture; a shared value does.
+  const listeningPillStartX = useSharedValue(0);
+  const listeningPillStartY = useSharedValue(0);
+
+  const beginListeningPillDrag = useCallback(() => {
+    listeningPillWasDraggedRef.current = true;
+  }, []);
+
+  // Commits the settled position for anything that reads it outside the
+  // gesture (e.g. a future drag's start snapshot) and clears the tap-
+  // suppression flag after the same 120ms window the previous
+  // implementation used, so a drag-release can't also fire the pill's
+  // onPress.
+  const commitListeningPillDrag = useCallback((x: number, y: number) => {
+    listeningPillPosRef.current = { x, y };
+    setTimeout(() => {
+      listeningPillWasDraggedRef.current = false;
+    }, 120);
+  }, []);
+
+  const listeningPillGesture = useMemo(() => {
+    const maxX = Math.max(EDGE_MARGIN, width - LISTENING_PILL_WIDTH - EDGE_MARGIN);
+    const maxY = Math.max(EDGE_MARGIN, height - LISTENING_PILL_HEIGHT - EDGE_MARGIN);
+    return Gesture.Pan()
+      .minDistance(5)
+      .onStart(() => {
+        'worklet';
+        listeningPillStartX.value = listeningPillX.value;
+        listeningPillStartY.value = listeningPillY.value;
+        runOnJS(beginListeningPillDrag)();
+      })
+      .onUpdate((event) => {
+        'worklet';
+        // Unclamped during the drag itself, exactly like the previous
+        // PanResponder implementation — only the settled release position
+        // below is clamped into bounds.
+        listeningPillX.value = listeningPillStartX.value + event.translationX;
+        listeningPillY.value = listeningPillStartY.value + event.translationY;
+      })
+      // Fires exactly once whether the gesture ends normally or is
+      // cancelled — the same "settle" the old code ran from both
+      // onPanResponderRelease and onPanResponderTerminate.
+      .onFinalize((event) => {
+        'worklet';
+        const nextX = Math.min(Math.max(listeningPillStartX.value + event.translationX, EDGE_MARGIN), maxX);
+        const nextY = Math.min(Math.max(listeningPillStartY.value + event.translationY, EDGE_MARGIN), maxY);
+        listeningPillX.value = withSpring(nextX, { damping: 14, stiffness: 140, mass: 1 });
+        listeningPillY.value = withSpring(nextY, { damping: 14, stiffness: 140, mass: 1 });
+        runOnJS(commitListeningPillDrag)(nextX, nextY);
+      });
+  }, [
+    height,
+    width,
+    listeningPillX,
+    listeningPillY,
+    listeningPillStartX,
+    listeningPillStartY,
+    beginListeningPillDrag,
+    commitListeningPillDrag,
+  ]);
+
+  const listeningPillAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: listeningPillX.value }, { translateY: listeningPillY.value }],
+  }));
 
   const captionsLive = status === 'active' || status === 'listening';
   const latestFinalEnglish = latestFinalLine?.text ?? captionLines[captionLines.length - 1]?.text ?? '';
@@ -295,30 +338,43 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
     availableCaptionHeight < 78 ? 0 : availableCaptionHeight < 128 ? 1 : panelMedium ? 1 : 2;
   const showLatestOnlyChinese = latestOnlyChineseLines > 0;
   const currentActiveEnglish = visibleEnglishCaption.trim();
-  const finalizedFeedLines = captionLines.filter((line, index) => {
-    if (!currentActiveEnglish) return true;
-    const isLatest = index === captionLines.length - 1;
-    return !(isLatest && line.text.trim() === currentActiveEnglish);
-  });
-  const activeFeedLine = currentActiveEnglish
-    ? {
-        id: partialCaption ? 'active_interim' : latestFinalLine?.id ?? 'active_current',
-        text: currentActiveEnglish,
-        translatedText: translationLine,
-        translationZh: translationLine,
-        isActive: true,
-      }
-    : null;
-  const feedLines = [
-    ...finalizedFeedLines.map((line) => ({
-      id: line.id,
-      text: line.text,
-      translatedText: line.translatedText ?? line.translationZh,
-      translationZh: line.translationZh,
-      isActive: false,
-    })),
-    ...(activeFeedLine ? [activeFeedLine] : []),
-  ];
+  // Long-run classroom heat/jank investigation: `feedLines` feeds a
+  // ScrollView that renders one row (+ one NativeLookupText, which itself
+  // renders one nested Text per English word) per caption line — hundreds of
+  // rows deep into a long lecture. It used to be a plain `const`, recomputed
+  // (new array, new object identities throughout) on EVERY render, including
+  // the ~4-6/sec renders driven purely by the recording duration ticking
+  // (see currentDurationMillis below) — so the entire feed list was rebuilt
+  // and force-fed into React's reconciler many times a second even when no
+  // caption content had changed. Memoizing it means those duration-only
+  // renders produce the exact same array reference, which is what lets the
+  // memoized CaptionFeedList below actually skip re-rendering the heavy list.
+  const feedLines = useMemo(() => {
+    const finalizedFeedLines = captionLines.filter((line, index) => {
+      if (!currentActiveEnglish) return true;
+      const isLatest = index === captionLines.length - 1;
+      return !(isLatest && line.text.trim() === currentActiveEnglish);
+    });
+    const activeFeedLine = currentActiveEnglish
+      ? {
+          id: partialCaption ? 'active_interim' : latestFinalLine?.id ?? 'active_current',
+          text: currentActiveEnglish,
+          translatedText: translationLine,
+          translationZh: translationLine,
+          isActive: true,
+        }
+      : null;
+    return [
+      ...finalizedFeedLines.map((line) => ({
+        id: line.id,
+        text: line.text,
+        translatedText: line.translatedText ?? line.translationZh,
+        translationZh: line.translationZh,
+        isActive: false,
+      })),
+      ...(activeFeedLine ? [activeFeedLine] : []),
+    ];
+  }, [captionLines, currentActiveEnglish, partialCaption, latestFinalLine, translationLine]);
   const hasAnyCaption = Boolean(visibleEnglishCaption || translationLine);
 
   useEffect(() => {
@@ -338,11 +394,16 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
     };
   }, [autoFollowFeed, showCaptionFeed, captionLines.length, partialCaption]);
 
-  const updateAutoFollowFromScroll = (scrollY: number) => {
+  // Stable identity (empty deps: only reads a ref + a state setter, both of
+  // which React guarantees never change) — required so the memoized
+  // CaptionFeedList below can actually skip re-rendering on ticks that don't
+  // touch caption content. A fresh function reference every render would
+  // defeat that memoization even if feedLines itself were stable.
+  const updateAutoFollowFromScroll = useCallback((scrollY: number) => {
     const { contentHeight, layoutHeight } = feedMetricsRef.current;
     const distanceFromBottom = contentHeight - layoutHeight - scrollY;
     setAutoFollowFeed(distanceFromBottom < 72);
-  };
+  }, []);
 
   const markImportant = () => {
     addMarkMillis(currentDurationMillis);
@@ -361,24 +422,23 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
 
   if (!panelVisible) {
     return (
-      <Animated.View
-        style={[styles.listeningPillWrap, { transform: listeningPillPan.getTranslateTransform() }]}
-        {...listeningPillResponder.panHandlers}
-      >
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={t('mini.showCaptions')}
-          onPress={() => {
-            if (listeningPillWasDraggedRef.current) return;
-            setPanelVisible(true);
-          }}
-          style={({ pressed }) => [styles.listeningPill, pressed && styles.pressed]}
-        >
-          <View style={styles.listeningDot} />
-          <Text style={styles.listeningPillLabel}>{t('mini.listening')}</Text>
-          <Ionicons name="chevron-up" size={15} color={colors.textOnNavyMuted} />
-        </Pressable>
-      </Animated.View>
+      <GestureDetector gesture={listeningPillGesture}>
+        <Reanimated.View style={[styles.listeningPillWrap, listeningPillAnimatedStyle]}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={t('mini.showCaptions')}
+            onPress={() => {
+              if (listeningPillWasDraggedRef.current) return;
+              setPanelVisible(true);
+            }}
+            style={({ pressed }) => [styles.listeningPill, pressed && styles.pressed]}
+          >
+            <View style={styles.listeningDot} />
+            <Text style={styles.listeningPillLabel}>{t('mini.listening')}</Text>
+            <Ionicons name="chevron-up" size={15} color={colors.textOnNavyMuted} />
+          </Pressable>
+        </Reanimated.View>
+      </GestureDetector>
     );
   }
 
@@ -454,86 +514,24 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
         ]}
       >
         {showCaptionFeed ? (
-          <ScrollView
-            ref={feedScrollRef}
-            style={styles.feedScroll}
-            contentContainerStyle={[styles.feedContent, { gap: Math.max(8, Math.round(10 * panelScale)) }]}
-            showsVerticalScrollIndicator={false}
-            maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
-            scrollEnabled
-            scrollEventThrottle={16}
-            onLayout={(event) => {
-              feedMetricsRef.current.layoutHeight = event.nativeEvent.layout.height;
-            }}
-            onScroll={(event) => {
-              if (feedUserScrollingRef.current) updateAutoFollowFromScroll(event.nativeEvent.contentOffset.y);
-            }}
-            onScrollBeginDrag={() => { feedUserScrollingRef.current = true; }}
-            onScrollEndDrag={(event) => {
-              updateAutoFollowFromScroll(event.nativeEvent.contentOffset.y);
-              feedUserScrollingRef.current = false;
-            }}
-            onMomentumScrollBegin={() => { feedUserScrollingRef.current = true; }}
-            onMomentumScrollEnd={(event) => {
-              updateAutoFollowFromScroll(event.nativeEvent.contentOffset.y);
-              feedUserScrollingRef.current = false;
-            }}
-            onContentSizeChange={(_width, contentHeight) => {
-              feedMetricsRef.current.contentHeight = contentHeight;
-              if (feedAutoScrollPendingRef.current) feedScrollRef.current?.scrollToEnd({ animated: false });
-            }}
-          >
-            {feedLines.length > 0 ? (
-              feedLines.map((line) => (
-                <View
-                  key={line.id}
-                  style={[
-                    styles.feedLine,
-                    line.isActive && styles.feedLineActive,
-                    {
-                      borderRadius: Math.round(8 * panelScale),
-                      paddingHorizontal: scaled.rowPaddingX,
-                      paddingVertical: scaled.rowPaddingY,
-                    },
-                  ]}
-                >
-                  <NativeLookupText
-                    style={[
-                      styles.captionText,
-                      styles.feedEnglish,
-                      { fontSize: scaled.english, lineHeight: Math.round(scaled.english * 1.4) },
-                    ]}
-                  >
-                    {line.text}
-                  </NativeLookupText>
-                  {(line.translatedText ?? line.translationZh) ? (
-                    <Text
-                      style={[
-                        styles.captionTranslation,
-                        styles.feedChinese,
-                        { fontSize: scaled.chinese, lineHeight: Math.round(scaled.chinese * 1.5) },
-                      ]}
-                    >
-                      {line.translatedText ?? line.translationZh}
-                    </Text>
-                  ) : line.isActive && translationPending ? (
-                    <Text style={[styles.captionTranslationPending, { fontSize: scaled.chinese }]}>{t('mini.translating')}</Text>
-                  ) : null}
-                </View>
-              ))
-            ) : (
-              <CaptionFallbackRow
-                captionsLive={captionsLive}
-                captionLine={captionLine}
-                iconSize={scaled.icon}
-                englishSize={scaled.english}
-                gap={Math.max(6, Math.round(6 * panelScale))}
-                paddingX={scaled.rowPaddingX}
-                paddingY={scaled.rowPaddingY}
-                radiusValue={Math.round(8 * panelScale)}
-              />
-            )}
-          </ScrollView>
+          <CaptionFeedList
+            feedLines={feedLines}
+            panelScale={panelScale}
+            rowPaddingX={scaled.rowPaddingX}
+            rowPaddingY={scaled.rowPaddingY}
+            englishSize={scaled.english}
+            chineseSize={scaled.chinese}
+            iconSize={scaled.icon}
+            captionsLive={captionsLive}
+            captionLine={captionLine}
+            translationPending={translationPending}
+            translatingLabel={t('mini.translating')}
+            feedScrollRef={feedScrollRef}
+            feedMetricsRef={feedMetricsRef}
+            feedUserScrollingRef={feedUserScrollingRef}
+            feedAutoScrollPendingRef={feedAutoScrollPendingRef}
+            onScrollPositionChange={updateAutoFollowFromScroll}
+          />
         ) : (
           <View
             style={[
@@ -690,6 +688,146 @@ export function FloatingMiniCaption({ topOffset = 76, enabled = true }: Floating
     </>
   );
 }
+
+type FeedLine = {
+  id: string;
+  text: string;
+  translatedText?: string;
+  translationZh?: string;
+  isActive: boolean;
+};
+
+/**
+ * Long-run classroom heat/jank investigation: this is the heavy part of the
+ * popup — one row (+ one NativeLookupText, which renders one nested Text per
+ * English word) per caption line, hundreds deep into a long lecture. The
+ * parent FloatingMiniCaption re-renders roughly 4-6 times a second purely
+ * from the recording duration ticking (unrelated to caption content) — wrapped
+ * in `memo`, this component only actually re-renders (and re-lays-out the
+ * whole list) when a prop genuinely changes, which for `feedLines` means the
+ * parent's memoized computation produced a new array — i.e. real caption
+ * content changed. Every prop here is either a primitive, a stable ref, or a
+ * `useCallback`-stabilized function, specifically so `memo`'s shallow prop
+ * comparison can actually bail out on the duration-only ticks.
+ */
+const CaptionFeedList = memo(function CaptionFeedList({
+  feedLines,
+  panelScale,
+  rowPaddingX,
+  rowPaddingY,
+  englishSize,
+  chineseSize,
+  iconSize,
+  captionsLive,
+  captionLine,
+  translationPending,
+  translatingLabel,
+  feedScrollRef,
+  feedMetricsRef,
+  feedUserScrollingRef,
+  feedAutoScrollPendingRef,
+  onScrollPositionChange,
+}: {
+  feedLines: FeedLine[];
+  panelScale: number;
+  rowPaddingX: number;
+  rowPaddingY: number;
+  englishSize: number;
+  chineseSize: number;
+  iconSize: number;
+  captionsLive: boolean;
+  captionLine: string;
+  translationPending: boolean;
+  translatingLabel: string;
+  feedScrollRef: { current: ScrollView | null };
+  feedMetricsRef: { current: { contentHeight: number; layoutHeight: number } };
+  feedUserScrollingRef: { current: boolean };
+  feedAutoScrollPendingRef: { current: boolean };
+  onScrollPositionChange: (scrollY: number) => void;
+}) {
+  return (
+    <ScrollView
+      ref={feedScrollRef}
+      style={styles.feedScroll}
+      contentContainerStyle={[styles.feedContent, { gap: Math.max(8, Math.round(10 * panelScale)) }]}
+      showsVerticalScrollIndicator={false}
+      maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
+      scrollEnabled
+      scrollEventThrottle={16}
+      onLayout={(event) => {
+        feedMetricsRef.current.layoutHeight = event.nativeEvent.layout.height;
+      }}
+      onScroll={(event) => {
+        if (feedUserScrollingRef.current) onScrollPositionChange(event.nativeEvent.contentOffset.y);
+      }}
+      onScrollBeginDrag={() => { feedUserScrollingRef.current = true; }}
+      onScrollEndDrag={(event) => {
+        onScrollPositionChange(event.nativeEvent.contentOffset.y);
+        feedUserScrollingRef.current = false;
+      }}
+      onMomentumScrollBegin={() => { feedUserScrollingRef.current = true; }}
+      onMomentumScrollEnd={(event) => {
+        onScrollPositionChange(event.nativeEvent.contentOffset.y);
+        feedUserScrollingRef.current = false;
+      }}
+      onContentSizeChange={(_width, contentHeight) => {
+        feedMetricsRef.current.contentHeight = contentHeight;
+        if (feedAutoScrollPendingRef.current) feedScrollRef.current?.scrollToEnd({ animated: false });
+      }}
+    >
+      {feedLines.length > 0 ? (
+        feedLines.map((line) => (
+          <View
+            key={line.id}
+            style={[
+              styles.feedLine,
+              line.isActive && styles.feedLineActive,
+              {
+                borderRadius: Math.round(8 * panelScale),
+                paddingHorizontal: rowPaddingX,
+                paddingVertical: rowPaddingY,
+              },
+            ]}
+          >
+            <NativeLookupText
+              style={[
+                styles.captionText,
+                styles.feedEnglish,
+                { fontSize: englishSize, lineHeight: Math.round(englishSize * 1.4) },
+              ]}
+            >
+              {line.text}
+            </NativeLookupText>
+            {(line.translatedText ?? line.translationZh) ? (
+              <Text
+                style={[
+                  styles.captionTranslation,
+                  styles.feedChinese,
+                  { fontSize: chineseSize, lineHeight: Math.round(chineseSize * 1.5) },
+                ]}
+              >
+                {line.translatedText ?? line.translationZh}
+              </Text>
+            ) : line.isActive && translationPending ? (
+              <Text style={[styles.captionTranslationPending, { fontSize: chineseSize }]}>{translatingLabel}</Text>
+            ) : null}
+          </View>
+        ))
+      ) : (
+        <CaptionFallbackRow
+          captionsLive={captionsLive}
+          captionLine={captionLine}
+          iconSize={iconSize}
+          englishSize={englishSize}
+          gap={Math.max(6, Math.round(6 * panelScale))}
+          paddingX={rowPaddingX}
+          paddingY={rowPaddingY}
+          radiusValue={Math.round(8 * panelScale)}
+        />
+      )}
+    </ScrollView>
+  );
+});
 
 function CaptionFallbackRow({
   captionsLive,

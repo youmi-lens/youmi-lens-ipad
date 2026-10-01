@@ -19,7 +19,11 @@ assert.match(source, /onPressOut\?\.\(event\)/);
 for (const relative of [
   'app/recording.tsx',
   'app/mini-caption.tsx',
-  'components/NotebookCanvas.tsx',
+  // PK4-C1: Notebook's toolbar buttons (the only PressableScale call sites
+  // NotebookCanvas.tsx itself ever had) now live in the one shared
+  // SharedAnnotationToolbar component both Notebook and Course Material
+  // render — not duplicated back into NotebookCanvas.tsx.
+  'components/SharedAnnotationToolbar.tsx',
   'app/lecture/[id].tsx',
   'components/TranscriptReadList.tsx',
 ]) {

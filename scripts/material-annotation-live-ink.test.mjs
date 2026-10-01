@@ -20,6 +20,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
+import { LEGACY_STYLE_PEN_WIDTHS } from '../lib/annotationPresets.ts';
+
 let passed = 0;
 const check = (label, fn) => { fn(); passed += 1; console.log(`  ok  ${label}`); };
 const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
@@ -31,19 +33,28 @@ const materialScreen = read('../app/lecture-material/[lectureId]/[materialId].ts
 console.log('Pen width parity with Notebook (the "too much ink" fix)');
 
 check('Material annotation PEN_WIDTHS exactly match NotebookCanvas PEN_WIDTHS — no drift', () => {
-  const materialWidths = materialScreen.match(/const PEN_WIDTHS = \[[\s\S]*?\];/)[0];
-  assert.match(materialWidths, /value: 2, dot: 7/, 'Thin must match Notebook (2, not the old 2.4)');
-  assert.match(materialWidths, /value: 3\.5, dot: 11/, 'Medium (default) must match Notebook (3.5, not the old 4)');
-  assert.match(materialWidths, /value: 6, dot: 16/, 'Thick must match Notebook (6, not the old 6.5)');
+  // PK4-C: both files now source `value` from the shared LEGACY_STYLE_PEN_
+  // WIDTHS constant (lib/annotationPresets.ts) instead of a literal number —
+  // a stronger guarantee against drift than comparing two independently
+  // hardcoded numbers ever was. Verify the resolved constant is still
+  // exactly the physically-accepted 2 / 3.5 / 6 (not the old, too-thick
+  // 2.4 / 4 / 6.5), and that both files actually reference that same constant.
+  assert.equal(LEGACY_STYLE_PEN_WIDTHS.thin, 2, 'Thin must match Notebook (2, not the old 2.4)');
+  assert.equal(LEGACY_STYLE_PEN_WIDTHS.medium, 3.5, 'Medium (default) must match Notebook (3.5, not the old 4)');
+  assert.equal(LEGACY_STYLE_PEN_WIDTHS.thick, 6, 'Thick must match Notebook (6, not the old 6.5)');
 
+  const materialWidths = materialScreen.match(/const PEN_WIDTHS = \[[\s\S]*?\];/)[0];
   const notebookWidths = notebook.match(/const PEN_WIDTHS: \{[\s\S]*?\];/)[0];
-  const extractValues = (src) => [...src.matchAll(/value:\s*([\d.]+)/g)].map((m) => Number(m[1]));
-  assert.deepEqual(extractValues(materialWidths), extractValues(notebookWidths), 'pen width VALUES are identical between the two tools, tier for tier');
+  for (const tier of ['thin', 'medium', 'thick']) {
+    const needle = new RegExp(`LEGACY_STYLE_PEN_WIDTHS\\.${tier}`);
+    assert.match(materialWidths, needle, `Course Material's PEN_WIDTHS must source ${tier} from the shared constant`);
+    assert.match(notebookWidths, needle, `Notebook's PEN_WIDTHS must source ${tier} from the shared constant`);
+  }
 });
 
 check('the width fix is scoped to the pen only — highlighter/eraser sizes are untouched (not part of the reported complaint)', () => {
-  assert.match(materialScreen, /const HIGHLIGHTER_WIDTHS = \[\s*\{ key: 'Narrow', value: 12, dot: 8 \}/);
-  assert.match(materialScreen, /const ERASER_SIZES = \[\s*\{ key: 'Small', value: 16, dot: 8 \}/);
+  assert.match(materialScreen, /const HIGHLIGHTER_WIDTHS = \[\s*\{ key: 'Narrow', value: SHARED_HIGHLIGHTER_WIDTHS\.narrow, dot: 8 \}/);
+  assert.match(materialScreen, /const ERASER_SIZES = \[\s*\{ key: 'Small', value: COURSE_MATERIAL_ERASER_RADII\.small, dot: 8 \}/);
 });
 
 console.log('Live-ink render isolation (the actual fix)');
@@ -69,9 +80,11 @@ check('the gesture handlers drive the live-ink ref, never a parent state setter,
   assert.doesNotMatch(addPointFn, /setCurrentPoints/, 'addPoint must never call a parent state setter (that is the re-render-per-point regression)');
 });
 
-check('committed strokes are memoized on the strokes prop alone — never recomputed while only the live stroke changes', () => {
-  assert.match(overlay, /const highlighterStrokes = useMemo\(\(\) => strokes\.filter\(.*\), \[strokes\]\)/, 'highlighterStrokes recomputes only when strokes actually changes');
-  assert.match(overlay, /const penStrokes = useMemo\(\(\) => strokes\.filter\(.*\), \[strokes\]\)/, 'penStrokes recomputes only when strokes actually changes');
+check('committed strokes are memoized, with only a local erased-id suppression layer during an erase gesture', () => {
+  assert.match(overlay, /const visibleStrokes = useMemo\(/, 'visual suppression is derived once per erase acknowledgement, not per Pencil point');
+  assert.match(overlay, /strokes\.filter\(\(stroke\) => !suppressedEraseIds\.has\(stroke\.id\)\)/);
+  assert.match(overlay, /const highlighterStrokes = useMemo\(\(\) => visibleStrokes\.filter/, 'highlighter partition remains memoized');
+  assert.match(overlay, /const penStrokes = useMemo\(\(\) => visibleStrokes\.filter/, 'pen partition remains memoized');
 });
 
 console.log('\nSaved-stroke compatibility (must not change persisted shape)');

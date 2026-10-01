@@ -12,6 +12,7 @@ import {
   shouldShowAudioPlayer,
   shouldShowLocalAudioPlayer,
 } from './lectureLocalAudio.mjs';
+import { persistLegacyAudioSources } from '@/modules/expo-durable-recorder';
 
 export {
   classifyLectureAudioPlayback,
@@ -107,6 +108,49 @@ function isAlreadyDurableUri(uri: string): boolean {
   return uri.includes(`/${LECTURE_RECORDINGS_SUBDIR}/`);
 }
 
+/** A durable recording must be under Documents and contain actual media bytes. */
+export function isVerifiedDurableLectureAudio(uri: string | null | undefined): boolean {
+  if (!uri || !isAlreadyDurableUri(uri)) return false;
+  const FileSystemNS = loadFileSystem();
+  if (!FileSystemNS?.File) return false;
+  try {
+    const file = new FileSystemNS.File(uri);
+    return Boolean(file.exists) && typeof file.size === 'number' && file.size > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Proves that a lecture-owned Documents M4A is a finalized, readable asset.
+ * File size alone is explicitly insufficient: a paused AVAudioRecorder has
+ * bytes but no M4A moov atom until it is stopped.  The native assembler uses
+ * AVAudioFile inspection and copies only after this exact validation; this
+ * call therefore validates the Documents target itself and adds an
+ * independent, non-destructive native recovery copy.
+ */
+async function verifyFinalizedLectureAudio(uri: string, lectureId: string): Promise<boolean> {
+  if (!isVerifiedDurableLectureAudio(uri)) return false;
+  try {
+    const result = await persistLegacyAudioSources(lectureId, [{ role: 'prior_canonical', uri }]);
+    return result.sourceCount === 1 && result.sources[0]?.durationMs > 0 && result.sources[0]?.byteLength > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** A final native-durable asset may live outside Documents, but must have bytes. */
+export function localAudioFileHasBytes(uri: string | null | undefined): boolean {
+  const FileSystemNS = loadFileSystem();
+  if (!uri || !FileSystemNS?.File) return false;
+  try {
+    const file = new FileSystemNS.File(uri);
+    return Boolean(file.exists) && typeof file.size === 'number' && file.size > 0;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Ensure the recordings directory exists under Documents.
  */
@@ -126,8 +170,11 @@ function ensureRecordingsDirectory(): import('expo-file-system').Directory | nul
 }
 
 /**
- * Copy a temporary recording into Documents/YoumiLens/Recordings/{lectureId}.ext.
- * Returns the durable file URI, or the original URI if copy is unnecessary/impossible.
+ * Copy a temporary recording into Documents/YoumiLens/Recordings.
+ *
+ * Each promotion has a unique name: a replacement must never delete an older
+ * durable candidate before the newer copy is proven readable. This is
+ * deliberately additive so recovery can retain every owned source.
  */
 export async function persistLectureLocalAudio(
   sourceUri: string | null | undefined,
@@ -135,44 +182,38 @@ export async function persistLectureLocalAudio(
 ): Promise<string | null> {
   const src = typeof sourceUri === 'string' ? sourceUri.trim() : '';
   if (!src) return null;
-  if (isAlreadyDurableUri(src) && localAudioFileExists(src)) {
-    return src;
+  if (isVerifiedDurableLectureAudio(src)) {
+    return (await verifyFinalizedLectureAudio(src, lectureId)) ? src : null;
   }
 
   const FileSystemNS = loadFileSystem();
-  if (!FileSystemNS?.File) {
-    return localAudioFileExists(src) ? src : null;
-  }
+  if (!FileSystemNS?.File) return null;
 
   if (!localAudioFileExists(src)) {
     // Source already gone — try resolving an alternate path before giving up.
     const resolved = resolvePlayableLocalAudioUri(src, lectureId);
-    return resolved;
+    return resolved && resolved !== src
+      ? persistLectureLocalAudio(resolved, lectureId)
+      : null;
   }
 
   const dir = ensureRecordingsDirectory();
-  if (!dir) return src;
+  if (!dir) return null;
 
   const ext = extensionForUri(src);
-  const targetName = `${lectureId}${ext.startsWith('.') ? ext : `.${ext}`}`;
+  const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const targetName = `${lectureId}-${nonce}${ext.startsWith('.') ? ext : `.${ext}`}`;
   try {
     const target = new FileSystemNS.File(dir, targetName);
-    if (target.exists) {
-      try {
-        target.delete();
-      } catch {
-        /* replace below */
-      }
-    }
     const sourceFile = new FileSystemNS.File(src);
     sourceFile.copy(target);
-    if (target.exists) {
+    if (await verifyFinalizedLectureAudio(target.uri, lectureId)) {
       return target.uri;
     }
   } catch (err) {
     if (__DEV__) console.warn('[lectureLocalAudio] persist copy failed', err);
   }
-  return src;
+  return null;
 }
 
 /**
@@ -205,10 +246,13 @@ export async function persistLectureResumeSegment(
     const target = new FileSystemNS.File(segmentsDir, `resume-${nonce}${extension.startsWith('.') ? extension : `.${extension}`}`);
     if (target.exists) return null;
     new FileSystemNS.File(src).copy(target);
-    return target.exists && typeof target.size === 'number' && target.size > 0 ? target.uri : null;
+    return (await verifyFinalizedLectureAudio(target.uri, lectureId)) ? target.uri : null;
   } catch (err) {
     if (__DEV__) console.warn('[lectureLocalAudio] resume segment preservation failed', err);
-    return localAudioFileExists(src) ? src : null;
+    // Do not fall back to the source URI here. A cache file can be non-empty
+    // yet still be an open/unfinalized M4A; returning it would recreate the
+    // exact assembly-required retry loop this helper is meant to prevent.
+    return null;
   }
 }
 
@@ -224,12 +268,20 @@ export function resolvePlayableLocalAudioUri(
   if (!raw) return null;
   if (localAudioFileExists(raw)) return raw;
 
-  const base = basenameFromUri(raw);
   const candidates: string[] = [];
+
+  // An old absolute sandbox URI may identify the same exact owned asset in a
+  // new container. Resolve that exact path first. Do not search Documents by
+  // a generic recorder basename: two lectures can legitimately have the same
+  // generated filename and adopting the other lecture's media is worse than a
+  // recoverable missing-audio failure.
+  const rewritten = rewriteSandboxUri(raw);
+  if (rewritten && localAudioFileExists(rewritten)) return rewritten;
+
+  const base = basenameFromUri(raw);
 
   const recordingsDir = documentRecordingsDirUri();
   if (recordingsDir) {
-    candidates.push(`${recordingsDir}/${base}`);
     if (lectureId) {
       const ext = extensionForUri(raw);
       candidates.push(`${recordingsDir}/${lectureId}${ext.startsWith('.') ? ext : `.${ext}`}`);
@@ -241,8 +293,6 @@ export function resolvePlayableLocalAudioUri(
     candidates.push(`${expoAudioDir}/${base}`);
   }
 
-  // Rewrite absolute Simulator/device container path to the live cache/document roots.
-  const rewritten = rewriteSandboxUri(raw);
   if (rewritten) candidates.push(rewritten);
 
   for (const candidate of candidates) {

@@ -18,6 +18,12 @@ module.exports = ({ config }) => {
   const isDev = process.env.APP_VARIANT === 'development';
   if (!isDev) return config;
 
+  // Physical Course Material text forensics only. This is deliberately an
+  // Info.plist build switch (not a product/runtime feature flag): it is absent
+  // from every production variant and only enables bounded native diagnostic
+  // output in the explicitly named internal QA profile.
+  const materialTextTrace = process.env.YOUMI_MATERIAL_TEXT_TRACE === '1';
+
   return {
     ...config,
     name: 'Youmi Lens Dev',
@@ -28,6 +34,10 @@ module.exports = ({ config }) => {
     ios: {
       ...config.ios,
       bundleIdentifier: `${config.ios.bundleIdentifier}.dev`,
+      infoPlist: {
+        ...config.ios?.infoPlist,
+        YoumiMaterialTextTrace: materialTextTrace,
+      },
     },
   };
 };
