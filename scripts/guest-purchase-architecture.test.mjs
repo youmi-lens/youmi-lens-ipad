@@ -162,11 +162,11 @@ check('no JWS/receipt payload is echoed back to the client (unchanged security p
 });
 
 console.log('\nBackend contract provenance (pinned, machine-independent)');
-const PINNED_BACKEND_REVISION = 'b87f0dcab370b96cbddbd05dcd55803551ac71fa';
-const PINNED_MIGRATION = 'supabase/migrations/20261003011254_billing_atomic_subscription_persistence.sql';
-check('the backend contract is pinned to the billing permanent-hardening revision and its atomic-persistence migration', () => {
+const PINNED_BACKEND_REVISION = 'a1af8f42e980523437495af36bd3d997fbdd4bb1';
+const PINNED_MIGRATION = 'supabase/migrations/20261003190154_payment_delivery_recovery.sql';
+check('the backend contract is pinned to the payment delivery-recovery revision and its persistence migration', () => {
   assert.equal(backend.provenance.revision, PINNED_BACKEND_REVISION);
-  assert.ok(Object.hasOwn(backend.provenance.files, PINNED_MIGRATION), 'the atomic persistence migration is part of the pinned contract');
+  assert.ok(Object.hasOwn(backend.provenance.files, PINNED_MIGRATION), 'the delivery-recovery persistence migration is part of the pinned contract');
   for (const blob of Object.values(backend.provenance.files)) assert.match(blob, /^[0-9a-f]{40}$/);
 });
 check('every pinned fragment is non-empty and nothing machine-specific is embedded in the fixture', () => {

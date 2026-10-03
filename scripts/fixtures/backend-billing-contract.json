@@ -1,13 +1,13 @@
 {
   "provenance": {
     "backendRepository": "https://github.com/youmi-lens/youmi-lens",
-    "revision": "b87f0dcab370b96cbddbd05dcd55803551ac71fa",
-    "revisionSubject": "fix: atomically authorize subscription ownership and monotonic state",
-    "note": "Billing permanent-hardening revision; pull request youmi-lens/youmi-lens#47. Ownership behaviour is enforced by the backend subscriptionAtomic.test.mjs (real PostgreSQL).",
+    "revision": "a1af8f42e980523437495af36bd3d997fbdd4bb1",
+    "revisionSubject": "Harden subscription delivery: sales gate only controls purchase start, durable notification retry, server reconciliation",
+    "note": "Payment delivery-recovery revision (branch codex/payment-engineering-closure); its migration replaces the persist_verified_subscription of the earlier atomic-persistence migration. Ownership behaviour is enforced by the backend subscriptionAtomic.test.mjs (real PostgreSQL). The pinned commit is a pull-request head: after a squash merge its tree, not its SHA, is on main.",
     "files": {
-      "server/iapSubscriptions.mjs": "9cf87c3641b3989cadc7de951e03767522acd0b0",
-      "server/iapRoutes.mjs": "be207edefb560abbfd2da35c5d3b1e1617c35796",
-      "supabase/migrations/20261003011254_billing_atomic_subscription_persistence.sql": "3b22c2030b088bbc43b80df98427f63b3de630c2"
+      "server/iapSubscriptions.mjs": "8384af1765a6b3990d6b1de6dda3a87e776074a2",
+      "server/iapRoutes.mjs": "4f13d9b2e861a6baca8d6afd37b9f6567bd6adb0",
+      "supabase/migrations/20261003190154_payment_delivery_recovery.sql": "1bc6d658fa13b0d4d46cee4eaaa9524fe4b92bae"
     }
   },
   "subscriptions": {
@@ -16,11 +16,11 @@
   "routes": {
     "fragments": {
       "already-linked-class": {
-        "line": 83,
+        "line": 82,
         "text": "class AlreadyLinkedError extends Error {}"
       },
       "already-linked-code": {
-        "line": 247,
+        "line": 246,
         "text": "return { status: 409, error: 'iap_already_linked', message: 'This App Store purchase is already linked to another account.' }"
       }
     },
@@ -29,27 +29,27 @@
   "migration": {
     "fragments": {
       "token-must-match-user": {
-        "line": 196,
+        "line": 78,
         "text": "if v_token<>p_user_id then raise exception 'subscription_token_mismatch' using errcode='P0001'; end if;"
       },
       "owner-conflict-guard": {
-        "line": 221,
+        "line": 87,
         "text": "if v_notification or v_caller_anonymous or not v_owner_anonymous then"
       },
       "owner-conflict-raise": {
-        "line": 118,
+        "line": 76,
         "text": "raise exception 'subscription_owner_conflict' using errcode='P0001';"
       },
       "promotion-checks-anonymous-owner": {
-        "line": 220,
+        "line": 86,
         "text": "v_owner_anonymous=billing_private.lock_auth_identity(b.user_id);"
       },
       "promotion-retires-guest-state": {
-        "line": 227,
+        "line": 93,
         "text": "update public.app_store_subscription_states set status='expired',apple_event_at=greatest(apple_event_at,v_event)"
       },
       "promotion-scoped-to-old-owner": {
-        "line": 230,
+        "line": 96,
         "text": "where original_transaction_id=v_original and user_id=b.user_id and owner_state='active' returning * into b;"
       }
     }
