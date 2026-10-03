@@ -55,7 +55,7 @@ test('REPRODUCTION: an older matching transaction rejected for ownership ends th
   assert.equal(attempt.value.message, LINKED_MESSAGE);
   assert.equal(attempt.value.ok, false);
   assert.equal(h.state.active, false, 'no entitlement is granted');
-  assert.equal(h.state.finishes.length, 1, 'finish policy unchanged: a definitive rejection finishes once');
+  assert.equal(h.state.finishes.length, 0, 'ownership rejection must stay unfinished');
   assert.equal(verifyCalls(h), 1, 'the backend is asked exactly once');
 });
 

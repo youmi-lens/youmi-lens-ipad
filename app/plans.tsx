@@ -29,6 +29,8 @@ import {
   SUBSCRIPTION_PRIVACY_URL,
   SUBSCRIPTION_TERMS_URL,
 } from '@/lib/subscriptionProducts';
+import { BillingRequestIdentity } from '@/lib/billingRequestIdentity';
+import { fetchSubscriptionAvailability, canPurchaseSubscription, type SubscriptionAvailability } from '@/lib/subscriptionAvailability';
 import { subscriptionService } from '@/lib/subscriptions';
 
 type BusyAction = 'purchase' | 'refresh' | null;
@@ -54,6 +56,21 @@ export default function PlansScreen() {
   const { session, user, isGuest, exitGuest } = useAuth();
   const accessToken = session?.access_token ?? null;
   const accountId = user?.id ?? null;
+  const screenIdentity = isGuest ? 'guest' : accountId;
+  const signedRequestIdentity = useRef(new BillingRequestIdentity()).current;
+  const productRequestIdentity = useRef(new BillingRequestIdentity()).current;
+  const introRequestIdentity = useRef(new BillingRequestIdentity()).current;
+  const actionIdentity = useRef(new BillingRequestIdentity()).current;
+  const guestRequestIdentity = useRef(new BillingRequestIdentity()).current;
+  const availabilityIdentity = useRef(new BillingRequestIdentity()).current;
+  signedRequestIdentity.setIdentity(screenIdentity);
+  productRequestIdentity.setIdentity(screenIdentity);
+  introRequestIdentity.setIdentity(screenIdentity);
+  actionIdentity.setIdentity(screenIdentity);
+  guestRequestIdentity.setIdentity(screenIdentity);
+  availabilityIdentity.setIdentity(screenIdentity);
+  const [availability, setAvailability] = useState<SubscriptionAvailability[] | null>(null);
+  const [availabilityAccount, setAvailabilityAccount] = useState<string | null>(null);
   const [planStatus, setPlanStatus] = useState<PlanStatus | null>(null);
   const [planStatusAccountId, setPlanStatusAccountId] = useState<string | null>(null);
   // App Review 5.1.1(v): the guest-IAP identity/status are ENTIRELY separate
@@ -83,6 +100,7 @@ export default function PlansScreen() {
   activeAccountRef.current = accountId;
 
   const loadStatus = useCallback(async () => {
+    const identityTicket = signedRequestIdentity.begin();
     const requestId = ++statusRequestRef.current;
     const requestedAccountId = accountId;
     if (!accessToken || !requestedAccountId) {
@@ -95,7 +113,7 @@ export default function PlansScreen() {
     setError(null);
     try {
       const nextStatus = await boundedPaymentTask(() => fetchPlanStatus(accessToken), PAYMENT_UI_WAIT_TIMEOUT_MS, 'plan_status');
-      if (requestId !== statusRequestRef.current || activeAccountRef.current !== requestedAccountId) {
+      if (!signedRequestIdentity.owns(identityTicket) || requestId !== statusRequestRef.current || activeAccountRef.current !== requestedAccountId) {
         return null;
       }
       setPlanStatus(nextStatus);
@@ -104,16 +122,16 @@ export default function PlansScreen() {
     } catch (nextError) {
       // Raw technical detail stays in logs; the user sees a localized generic message.
       console.warn('[plans] plan status load failed', nextError);
-      if (requestId === statusRequestRef.current && activeAccountRef.current === requestedAccountId) {
+      if (signedRequestIdentity.owns(identityTicket) && requestId === statusRequestRef.current && activeAccountRef.current === requestedAccountId) {
         setError(t('plans.statusUnavailable'));
       }
       return null;
     } finally {
-      if (requestId === statusRequestRef.current && activeAccountRef.current === requestedAccountId) {
+      if (signedRequestIdentity.owns(identityTicket) && requestId === statusRequestRef.current && activeAccountRef.current === requestedAccountId) {
         setStatusLoading(false);
       }
     }
-  }, [accessToken, accountId, t]);
+  }, [accessToken, accountId, t, signedRequestIdentity]);
 
   /**
    * Read-only guest status refresh: reuses an EXISTING guest-IAP identity if
@@ -123,13 +141,17 @@ export default function PlansScreen() {
    * plan (G5) without ever touching the main account's session or status.
    */
   const loadGuestStatus = useCallback(async () => {
-    if (!(await hasGuestIapIdentity())) {
+    const ticket = guestRequestIdentity.begin();
+    const hasIdentity = await hasGuestIapIdentity();
+    if (!guestRequestIdentity.owns(ticket)) return null;
+    if (!hasIdentity) {
       setGuestPlanStatus(null);
       setGuestPlanStatusAccountId(null);
       setGuestStatusLoading(false);
       return null;
     }
     const identity = await ensureGuestIapIdentity();
+    if (!guestRequestIdentity.owns(ticket)) return null;
     if (!identity) {
       setGuestPlanStatus(null);
       setGuestPlanStatusAccountId(null);
@@ -140,6 +162,7 @@ export default function PlansScreen() {
     setGuestStatusLoading(true);
     try {
       const nextStatus = await boundedPaymentTask(() => fetchPlanStatus(identity.accessToken), PAYMENT_UI_WAIT_TIMEOUT_MS, 'plan_status');
+      if (!guestRequestIdentity.owns(ticket)) return null;
       setGuestPlanStatus(nextStatus);
       setGuestPlanStatusAccountId(identity.accountId);
       return nextStatus;
@@ -147,11 +170,26 @@ export default function PlansScreen() {
       console.warn('[plans] guest plan status load failed', nextError);
       return null;
     } finally {
-      setGuestStatusLoading(false);
+      if (guestRequestIdentity.owns(ticket)) setGuestStatusLoading(false);
     }
-  }, []);
+  }, [guestRequestIdentity]);
+
+  const loadAvailability = useCallback(async () => {
+    const ticket = availabilityIdentity.begin();
+    setAvailability(null);
+    try {
+      const next = await fetchSubscriptionAvailability();
+      if (!availabilityIdentity.owns(ticket)) return;
+      setAvailability(next);
+      setAvailabilityAccount(ticket.identity);
+    } catch {
+      if (availabilityIdentity.owns(ticket)) { setAvailability(null); setAvailabilityAccount(null); }
+    }
+  }, [availabilityIdentity]);
+  useEffect(() => { void loadAvailability(); }, [screenIdentity, loadAvailability]);
 
   const loadProducts = useCallback(async (force = false) => {
+    const productTicket = productRequestIdentity.begin();
     if (!SUBSCRIPTIONS_LIVE) {
       setProductLoading(false);
       return;
@@ -160,6 +198,7 @@ export default function PlansScreen() {
     setProductError(false);
     try {
       const nextProducts = await subscriptionService.loadProducts(force);
+      if (!productRequestIdentity.owns(productTicket)) return;
       setProducts(nextProducts);
       setSelectedPlan((current) => {
         if (nextProducts[current]) return current;
@@ -168,12 +207,13 @@ export default function PlansScreen() {
         return current;
       });
     } catch {
+      if (!productRequestIdentity.owns(productTicket)) return;
       setProducts({ monthly: null, annual: null });
       setProductError(true);
     } finally {
-      setProductLoading(false);
+      if (productRequestIdentity.owns(productTicket)) setProductLoading(false);
     }
-  }, []);
+  }, [productRequestIdentity]);
 
   useEffect(() => {
     void loadProducts();
@@ -181,18 +221,25 @@ export default function PlansScreen() {
     // fails closed internally, and its failure must never affect whether
     // products load or purchase remains available.
     if (SUBSCRIPTIONS_LIVE) {
-      void subscriptionService.getIntroOfferEligibility().then(setIntroEligible);
+      const ticket = introRequestIdentity.begin();
+      void subscriptionService.getIntroOfferEligibility().then((eligible) => { if (introRequestIdentity.owns(ticket)) setIntroEligible(eligible); });
     }
     return () => subscriptionService.cleanup();
-  }, [loadProducts]);
+  }, [loadProducts, introRequestIdentity, screenIdentity]);
   useEffect(() => {
     statusRequestRef.current += 1;
     setPlanStatus(null);
     setPlanStatusAccountId(null);
+    setAvailability(null);
+    setGuestPlanStatus(null);
+    setGuestPlanStatusAccountId(null);
+    setIntroEligible(false);
     setAccessRefreshMessage(null);
     setError(null);
     setStatusLoading(Boolean(accessToken && accountId));
-  }, [accessToken, accountId]);
+    setBusy(null);
+    purchaseLockRef.current = false;
+  }, [accessToken, accountId, screenIdentity]);
   useFocusEffect(useCallback(() => { void loadStatus(); if (isGuest) void loadGuestStatus(); }, [loadStatus, loadGuestStatus, isGuest]));
   useEffect(() => {
     const appStateListener = AppState.addEventListener('change', (nextState) => {
@@ -231,7 +278,8 @@ export default function PlansScreen() {
       : shouldShowPurchaseEntry(currentStatus);
   const purchaseUnavailable = !SUBSCRIPTIONS_LIVE && currentStatus?.studentPass?.isPurchasable === false;
   const selectedProduct = products[selectedPlan];
-  const purchaseDisabled = !purchaseVisible || productLoading || !selectedProduct || busy !== null;
+  const backendAvailability = availabilityAccount === screenIdentity ? availability : null;
+  const purchaseDisabled = !purchaseVisible || productLoading || !selectedProduct || busy !== null || !canPurchaseSubscription(selectedPlan, products, backendAvailability, SUBSCRIPTIONS_LIVE);
   const studentBasicStatus = getStudentBasicStatus(currentStatus, isGuest ? guestStatusLoading : statusLoading);
   // Necessary AND sufficient: the product's own offer mode, AND live Apple-ID
   // eligibility (fails closed to false — see getIntroOfferEligibility).
@@ -273,13 +321,16 @@ export default function PlansScreen() {
     purchaseLockRef.current = true;
     setBusy('purchase');
     setAccessRefreshMessage(null);
+    const actionTicket = actionIdentity.begin();
     try {
       const identity = await boundedPaymentTask(resolvePurchaseIdentity, PAYMENT_UI_WAIT_TIMEOUT_MS, 'purchase_identity');
+      if (!actionIdentity.owns(actionTicket)) return;
       if (!identity) {
         Alert.alert(t('plans.purchaseUnavailableTitle'), t('plans.guestPurchaseUnavailable'));
         return;
       }
       const result = await subscriptionService.purchase(selectedPlan, identity.token, identity.account);
+      if (!actionIdentity.owns(actionTicket)) return;
       if (result.code === 'cancelled') return;
       if (result.code === 'pending') {
         Alert.alert(t('plans.purchasePending'), result.message);
@@ -295,7 +346,9 @@ export default function PlansScreen() {
         return;
       }
 
+      if (!actionIdentity.owns(actionTicket)) return;
       const refreshedStatus = await refreshPaymentStatus();
+      if (!actionIdentity.owns(actionTicket)) return;
       if (refreshedStatus && confirmsStudentBasicGrant(refreshedStatus)) {
         Alert.alert(t('plans.activeTitle'), t('plans.activeBody'));
       } else {
@@ -305,24 +358,31 @@ export default function PlansScreen() {
         );
       }
     } catch {
+      if (!actionIdentity.owns(actionTicket)) return;
       Alert.alert(t('plans.purchaseUnavailableTitle'), t('plans.guestPurchaseUnavailable'));
     } finally {
-      purchaseLockRef.current = false;
-      setBusy(null);
-      logDiag('purchase_busy_cleared', { plan: selectedPlan });
+      if (actionIdentity.owns(actionTicket)) {
+        purchaseLockRef.current = false;
+        setBusy(null);
+        logDiag('purchase_busy_cleared', { plan: selectedPlan });
+      }
     }
   };
   const handleRefreshAccess = async () => {
     if (busy !== null) return;
     setBusy('refresh');
+    const actionTicket = actionIdentity.begin();
     try {
       const identity = await boundedPaymentTask(resolvePurchaseIdentity, PAYMENT_UI_WAIT_TIMEOUT_MS, 'restore_identity');
+      if (!actionIdentity.owns(actionTicket)) return;
       if (!identity) {
         Alert.alert(t('plans.purchaseUnavailableTitle'), t('plans.guestPurchaseUnavailable'));
         return;
       }
-      const result = await subscriptionService.restore(identity.token);
+      const result = await subscriptionService.restore(identity.token, identity.account);
+      if (!actionIdentity.owns(actionTicket)) return;
       const refreshedStatus = await refreshPaymentStatus();
+      if (!actionIdentity.owns(actionTicket)) return;
       if (!result.ok && !['no_purchase', 'expired', 'revoked'].includes(result.code)) {
         setAccessRefreshMessage(result.message);
         Alert.alert(t('plans.refreshFailed'), result.message);
@@ -337,10 +397,13 @@ export default function PlansScreen() {
       setAccessRefreshMessage(message);
       Alert.alert(t('plans.refreshed'), message);
     } catch {
+      if (!actionIdentity.owns(actionTicket)) return;
       Alert.alert(t('plans.refreshFailed'), t('plans.refreshFailedBody'));
     } finally {
-      setBusy(null);
-      logDiag('restore_busy_cleared');
+      if (actionIdentity.owns(actionTicket)) {
+        setBusy(null);
+        logDiag('restore_busy_cleared');
+      }
     }
   };
   const handleManageSubscription = async () => {
@@ -495,7 +558,9 @@ export default function PlansScreen() {
                   disabled={!SUBSCRIPTIONS_LIVE || purchaseDisabled}
                   loading={busy === 'purchase'}
                 />
-                {!SUBSCRIPTIONS_LIVE ? (
+                {!canPurchaseSubscription(selectedPlan, products, backendAvailability, SUBSCRIPTIONS_LIVE) ? (
+                  <Text style={styles.unavailableNote}>{t('plans.subscriptionsUnavailable')}</Text>
+                ) : !SUBSCRIPTIONS_LIVE ? (
                   <Text style={styles.unavailableNote}>{t('plans.comingSoonNote')}</Text>
                 ) : productError ? (
                   <Pressable onPress={() => void loadProducts(true)}>

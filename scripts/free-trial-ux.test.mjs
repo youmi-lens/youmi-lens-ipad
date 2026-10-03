@@ -53,7 +53,7 @@ check('FT5: the eligibility query fails closed and can never block/alter purchas
   // The eligibility query in Plans is fired independently of loadProducts —
   // a rejected eligibility promise cannot fail the product-load effect.
   const effect = plans.slice(plans.indexOf('useEffect(() => {\n    void loadProducts();'), plans.indexOf('return () => subscriptionService.cleanup();') + 40);
-  assert.match(effect, /void subscriptionService\.getIntroOfferEligibility\(\)\.then\(setIntroEligible\);/);
+  assert.match(effect, /getIntroOfferEligibility\(\)\.then\([\s\S]*introRequestIdentity\.owns\(ticket\)[\s\S]*setIntroEligible\(eligible\)/);
 });
 
 // =====================================================================

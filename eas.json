@@ -87,6 +87,16 @@
         "EXPO_PUBLIC_NATIVE_RECORDER_DOGFOOD": "1",
         "EXPO_PUBLIC_RECORDING_ENGINE_DIAGNOSTIC": "1"
       }
+    },
+    "billing-hardening-rc": {
+      "extends": "production",
+      "environment": "production",
+      "distribution": "store",
+      "env": {
+        "EXPO_PUBLIC_SUBSCRIPTIONS_LIVE": "true",
+        "EXPO_PUBLIC_USE_REAL_IAP": "true",
+        "EXPO_PUBLIC_RECORDING_DEFAULT_ENGINE": "nativeDurable"
+      }
     }
   },
   "submit": {

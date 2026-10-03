@@ -75,12 +75,8 @@ export type BackendVerificationLike = {
   error?: string | null;
 };
 
-export function shouldFinishSubscriptionTransaction(payload: BackendVerificationLike): boolean {
-  if (payload.ok && payload.granted) return true;
-  if (payload.ok && ['expired', 'revoked', 'refunded', 'duplicate'].includes(payload.reason ?? '')) return true;
-  if (payload.reason === 'transaction_already_processed' || payload.error === 'iap_transaction_already_processed') return true;
-  if (payload.error === 'iap_already_linked' || payload.error === 'iap_deleted_account_binding') return true;
-  return false;
+export function shouldFinishSubscriptionTransaction(payload: BackendVerificationLike & { safeToFinish?: boolean }): boolean {
+  return payload.ok === true && payload.safeToFinish === true;
 }
 
 export function chooseAvailablePlan(

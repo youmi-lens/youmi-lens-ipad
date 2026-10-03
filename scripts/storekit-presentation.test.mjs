@@ -81,9 +81,9 @@ check('E: presentation_not_active is mapped to a normal, recoverable Subscriptio
 console.log('F/G — busy clears, and the 120s bound is untouched');
 // =====================================================================
 
-check('F: plans.tsx still clears `busy` unconditionally in handlePurchase\'s finally, now alongside a diagnostic (not instead of clearing it)', () => {
+check('F: plans.tsx still clears `busy` for the current account in handlePurchase\'s finally, now alongside a diagnostic (not instead of clearing it)', () => {
   const handlePurchaseFn = plans.slice(plans.indexOf('const handlePurchase = async'), plans.indexOf('const handleRefreshAccess'));
-  assert.match(handlePurchaseFn, /finally \{\s*purchaseLockRef\.current = false;\s*setBusy\(null\);\s*logDiag\('purchase_busy_cleared', \{ plan: selectedPlan \}\);\s*\}/);
+  assert.match(handlePurchaseFn, /finally \{\s*if \(actionIdentity\.owns\(actionTicket\)\) \{\s*purchaseLockRef\.current = false;\s*setBusy\(null\);\s*logDiag\('purchase_busy_cleared', \{ plan: selectedPlan \}\);\s*\}/);
 });
 
 check('G: the 120s purchase timeout constant and setTimeout wiring are unchanged', () => {

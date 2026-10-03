@@ -94,7 +94,7 @@ test('P6: verify maps a bounded-fetch timeout to verify_timeout (never hangs)', 
 
 test('P7: verify network/HTTP failure clears loading via a terminal result', () => {
   assert.match(verifyFn, /return isBoundedFetchTimeout\(error\) \? result\('verify_timeout'\) : result\('offline'\)/);
-  assert.match(handlePurchaseFn, /finally \{\s*purchaseLockRef\.current = false;\s*setBusy\(null\);[\s\S]*?\}/);
+  assert.match(handlePurchaseFn, /finally \{\s*if \(actionIdentity\.owns\(actionTicket\)\) \{\s*purchaseLockRef\.current = false;\s*setBusy\(null\);[\s\S]*?\}/);
 });
 
 test('P6: fetchJson is bounded (mutation A: removing the timeout would fail)', () => {
@@ -105,7 +105,7 @@ test('P6: fetchJson is bounded (mutation A: removing the timeout would fail)', (
 // ── P3/P4/P5: loading invariant ─────────────────────────────────────────────
 
 test('P3/P4/P5: every purchase path reaches setBusy(null) in finally', () => {
-  assert.match(handlePurchaseFn, /finally \{\s*purchaseLockRef\.current = false;\s*setBusy\(null\);[\s\S]*?\}/);
+  assert.match(handlePurchaseFn, /finally \{\s*if \(actionIdentity\.owns\(actionTicket\)\) \{\s*purchaseLockRef\.current = false;\s*setBusy\(null\);[\s\S]*?\}/);
 });
 
 test('P5: cancel is a terminal, loading-clearing path', () => {
@@ -134,7 +134,7 @@ test('P15: a refresh timeout does not wipe a previously known active entitlement
 
 test('P9: restore maps timeout through mapError and is bounded', () => {
   assert.match(subs, /if \(isBoundedFetchTimeout\(error\)\) return result\('verify_timeout'\)/);
-  assert.match(plans, /finally \{\s*setBusy\(null\);\s*logDiag\('restore_busy_cleared'\);\s*\}/); // handleRefreshAccess
+  assert.match(plans, /finally \{\s*if \(actionIdentity\.owns\(actionTicket\)\) \{\s*setBusy\(null\);\s*logDiag\('restore_busy_cleared'\);\s*\}/); // handleRefreshAccess
 });
 
 // ── P11/P13: transaction safety ─────────────────────────────────────────────

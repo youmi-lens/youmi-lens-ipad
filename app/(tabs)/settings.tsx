@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import Constants from 'expo-constants';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { ComponentProps, useCallback, useEffect, useState } from 'react';
+import { ComponentProps, useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -20,6 +20,7 @@ import { formatDate } from '@/lib/format';
 import { ensureGuestIapIdentity, hasGuestIapIdentity } from '@/lib/guestIap';
 import { useI18n } from '@/lib/i18n';
 import { fetchPlanStatus, PlanStatus, safeAccessLabel } from '@/lib/planStatus';
+import { BillingRequestIdentity } from '@/lib/billingRequestIdentity';
 import { subscriptionService } from '@/lib/subscriptions';
 import { boundedPaymentTask, PAYMENT_UI_WAIT_TIMEOUT_MS } from '@/lib/boundedPaymentTask';
 import { logDiag } from '@/lib/iapDiag';
@@ -118,7 +119,7 @@ export default function SettingsScreen() {
     'Student Access': 'settings.plan.access.studentAccess',
   };
   const localizedAccessLabel = (raw: string) => (accessLabelKey[raw] ? t(accessLabelKey[raw]) : raw);
-  const [planStatus, setPlanStatus] = useState<PlanStatus | null>(null);
+  const [storedPlanStatus, setPlanStatus] = useState<PlanStatus | null>(null);
   const [planLoading, setPlanLoading] = useState(true);
   const [planError, setPlanError] = useState<string | null>(null);
   // App Review 5.1.1(v): a Guest's Student Basic row must not read "Explore"
@@ -126,13 +127,26 @@ export default function SettingsScreen() {
   // guest status check (lib/guestIap.ts), reusing an EXISTING guest-IAP
   // identity if one is already on this device and never minting a new one
   // just from viewing Settings.
-  const [guestPlanStatus, setGuestPlanStatus] = useState<PlanStatus | null>(null);
+  const [storedGuestPlanStatus, setGuestPlanStatus] = useState<PlanStatus | null>(null);
   const [usernameModalVisible, setUsernameModalVisible] = useState(false);
   const [usernameSaving, setUsernameSaving] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
   const [restoringPurchases, setRestoringPurchases] = useState(false);
 
+  const screenIdentity = isGuest ? 'guest' : user?.id ?? null;
+  const statusIdentity = useRef(new BillingRequestIdentity()).current;
+  const restoreIdentity = useRef(new BillingRequestIdentity()).current;
+  statusIdentity.setIdentity(screenIdentity);
+  restoreIdentity.setIdentity(screenIdentity);
+  const [statusAccountId, setStatusAccountId] = useState<string | null>(null);
+  const planStatus = statusAccountId === screenIdentity && !isGuest ? storedPlanStatus : null;
+  const guestPlanStatus = statusAccountId === screenIdentity && isGuest ? storedGuestPlanStatus : null;
+  useEffect(() => {
+    setPlanStatus(null); setGuestPlanStatus(null); setStatusAccountId(null); setPlanError(null); setRestoringPurchases(false);
+  }, [screenIdentity]);
+
   const loadPlan = useCallback(async () => {
+    const ticket = statusIdentity.begin();
     if (!session?.access_token) {
       setPlanStatus(null);
       setPlanLoading(false);
@@ -142,32 +156,41 @@ export default function SettingsScreen() {
     setPlanError(null);
     try {
       const status = await boundedPaymentTask(() => fetchPlanStatus(session.access_token), PAYMENT_UI_WAIT_TIMEOUT_MS, 'plan_status');
+      if (!statusIdentity.owns(ticket)) return null;
       setPlanStatus(status);
+      setStatusAccountId(ticket.identity);
       return status;
     } catch {
-      setPlanError(t('settings.plan.statusUnavailable'));
+      if (statusIdentity.owns(ticket)) setPlanError(t('settings.plan.statusUnavailable'));
       return null;
     } finally {
-      setPlanLoading(false);
+      if (statusIdentity.owns(ticket)) setPlanLoading(false);
     }
-  }, [session?.access_token, t]);
+  }, [session?.access_token, t, statusIdentity]);
   const loadGuestPlan = useCallback(async () => {
-    if (!(await hasGuestIapIdentity())) {
+    const ticket = statusIdentity.begin();
+    const hasIdentity = await hasGuestIapIdentity();
+    if (!statusIdentity.owns(ticket)) return;
+    if (!hasIdentity) {
       setGuestPlanStatus(null);
       return;
     }
     const identity = await ensureGuestIapIdentity();
+    if (!statusIdentity.owns(ticket)) return;
     if (!identity) {
       setGuestPlanStatus(null);
       return;
     }
     try {
-      setGuestPlanStatus(await fetchPlanStatus(identity.accessToken));
+      const status = await fetchPlanStatus(identity.accessToken);
+      if (!statusIdentity.owns(ticket)) return;
+      setGuestPlanStatus(status);
+      setStatusAccountId(ticket.identity);
     } catch {
       // Silent: this row falls back to "Explore" on failure, same as a
       // never-purchased guest — never a blocking error for a read-only check.
     }
-  }, []);
+  }, [statusIdentity]);
   // Bumped once per tab focus, never by plan/account data — the page
   // heading's entrance below keys on this alone.
   const [focusKey, setFocusKey] = useState(0);
@@ -204,10 +227,14 @@ export default function SettingsScreen() {
     }
     if (restoringPurchases) return;
     setRestoringPurchases(true);
+    const ticket = restoreIdentity.begin();
     try {
-      const result = await subscriptionService.restore(session.access_token);
+      if (!restoreIdentity.owns(ticket)) return;
+      const result = await subscriptionService.restore(session.access_token, user?.id);
+      if (!restoreIdentity.owns(ticket)) return;
       logDiag('entitlement_refresh_started');
       const refreshedStatus = await boundedPaymentTask(loadPlan, PAYMENT_UI_WAIT_TIMEOUT_MS, 'entitlement_refresh');
+      if (!restoreIdentity.owns(ticket)) return;
       logDiag(refreshedStatus ? 'entitlement_refresh_succeeded' : 'entitlement_refresh_failed');
       if (!refreshedStatus && result.ok) {
         Alert.alert(t('settings.alerts.accessRefreshFailTitle'), t('settings.alerts.accessRefreshFailBody'));
@@ -215,6 +242,7 @@ export default function SettingsScreen() {
       }
       Alert.alert(result.ok ? t('settings.alerts.accessRefreshedTitle') : t('settings.alerts.accessStatusTitle'), result.message);
     } catch (error) {
+      if (!restoreIdentity.owns(ticket)) return;
       logDiag('entitlement_refresh_failed');
       // Raw technical detail stays in logs; the user sees a localized generic message.
       console.warn('[settings] refresh access failed', error);
@@ -223,8 +251,10 @@ export default function SettingsScreen() {
         t('settings.alerts.accessRefreshFailBody'),
       );
     } finally {
-      setRestoringPurchases(false);
-      logDiag('restore_busy_cleared');
+      if (restoreIdentity.owns(ticket)) {
+        setRestoringPurchases(false);
+        logDiag('restore_busy_cleared');
+      }
     }
   };
   const handleClearData = () => Alert.alert(t('settings.alerts.clearTitle'), t('settings.alerts.clearBody'), [

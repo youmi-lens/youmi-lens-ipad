@@ -165,7 +165,7 @@ for (const shape of ['native-listener', 'canonical-error', 'canonical-object', '
     if (shape === 'native-listener') h.error({ code: 'user-cancelled', message: 'User cancelled the purchase flow', productId: MONTHLY });
     await action;
     assert.equal(h.state.alerts.length, 0);
-    assert.equal(h.state.http.length, 0);
+    assert.equal(h.state.http.filter(x=>!x.url.endsWith('/availability')&&!x.url.endsWith('/authorize')).length, 0);
     assert.equal(h.state.refreshes, 0);
     assert.equal(h.state.active, false);
     assert.equal(h.state.busy, null);
@@ -330,7 +330,7 @@ test('P4 wrong account and unsigned callbacks never grant or finish', async () =
   h.emit({ ...h.transaction(MONTHLY, 'other-account'), appAccountToken: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' });
   await flush();
   assert.equal(attempt.settled, false);
-  assert.equal(h.state.http.length, 0);
+  assert.equal(h.state.http.filter(x=>!x.url.endsWith('/availability')&&!x.url.endsWith('/authorize')).length, 0);
   h.emit({ ...h.transaction(MONTHLY, 'unsigned'), purchaseToken: null });
   await flush();
   assert.equal(attempt.value.code, 'backend_verification_failed');
@@ -343,7 +343,7 @@ test('P4 callback without known identity stays unfinished until safe reconciliat
   await h.service.loadProducts();
   const old = h.transaction(ANNUAL, 'deferred-paid');
   h.emit(old); await flush();
-  assert.equal(h.state.http.length, 0);
+  assert.equal(h.state.http.filter(x=>!x.url.endsWith('/availability')&&!x.url.endsWith('/authorize')).length, 0);
   assert.equal(h.state.finishes.length, 0);
   const current = track(h.service.purchase('monthly', 'external-test-token', ACCOUNT));
   await flush();
@@ -429,7 +429,7 @@ for (const mode of ['storekit-error', 'pending', 'unavailable', 'inactive']) {
     assert.equal(h.state.busy, null);
     assert.equal(h.state.active, false);
     assert.equal(h.state.refreshes, 0);
-    assert.equal(h.state.http.length, 0);
+    assert.equal(h.state.http.filter(x=>!x.url.endsWith('/availability')&&!x.url.endsWith('/authorize')).length, 0);
     if (mode === 'inactive') assert.equal(h.state.requests.length, 0);
   });
 }

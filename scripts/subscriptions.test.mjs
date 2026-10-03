@@ -97,21 +97,17 @@ test('selection: monthly and annual switches preserve product identity', () => {
   assert.equal(catalog[chooseAvailablePlan('annual', catalog)]?.productId, annual.id);
 });
 
-test('transaction finish: verified grants and definitive inactive states finish', () => {
-  assert.equal(shouldFinishSubscriptionTransaction({ ok: true, granted: true }), true);
-  for (const reason of ['expired', 'revoked', 'refunded', 'duplicate']) {
-    assert.equal(shouldFinishSubscriptionTransaction({ ok: true, granted: false, reason }), true);
+test('transaction finish requires explicit authorized persistence success', () => {
+  assert.equal(shouldFinishSubscriptionTransaction({ ok: true, granted: true, safeToFinish: true }), true);
+  assert.equal(shouldFinishSubscriptionTransaction({ ok: true, granted: true }), false);
+  for (const reason of ['expired', 'revoked', 'refunded', 'duplicate', 'sales_closed']) {
+    assert.equal(shouldFinishSubscriptionTransaction({ ok: true, granted: false, reason }), false);
   }
 });
-
-test('transaction finish: retryable backend and network failures stay unfinished', () => {
-  assert.equal(shouldFinishSubscriptionTransaction({ ok: false, error: 'network' }), false);
-  assert.equal(shouldFinishSubscriptionTransaction({ ok: false, error: 'iap_verification_failed' }), false);
-});
-
-test('transaction finish: ownership conflicts are definitive', () => {
-  assert.equal(shouldFinishSubscriptionTransaction({ error: 'iap_already_linked' }), true);
-  assert.equal(shouldFinishSubscriptionTransaction({ error: 'iap_deleted_account_binding' }), true);
+test('transaction finish: retryable, verification, and ownership failures stay unfinished', () => {
+  for (const error of ['network', 'iap_verification_failed', 'iap_already_linked', 'iap_deleted_account_binding']) {
+    assert.equal(shouldFinishSubscriptionTransaction({ ok: false, error }), false);
+  }
 });
 
 test('appAccountToken: accepts Supabase UUIDs and rejects arbitrary IDs', () => {

@@ -3,7 +3,7 @@
  * account" and the NEXT tap on Subscribe then sat at "In Progress".
  *
  * Forensics established that the backend rejection is correct ownership protection (409 `iap_already_linked`, a
- * definitive outcome, so the client also finishes the transaction) and that no service/UI guard stays set. The defect
+ * definitive outcome, so the client preserves the unfinished transaction) and that no service/UI guard stays set. The defect
  * was on the second attempt: when StoreKit re-delivers the already-processed transaction the listener dropped it as a
  * duplicate and nothing could settle the attempt until the 120 s purchase timeout.
  *
@@ -54,7 +54,7 @@ test('1-2. first ownership rejection returns the linked-account error and clears
   await first;
   assert.equal(h.state.busy, null, 'the Plans busy state is cleared');
   assert.equal(h.state.active, false, 'no entitlement is granted');
-  assert.equal(h.state.finishes.length, 1, 'a definitive ownership rejection finishes the transaction');
+  assert.equal(h.state.finishes.length, 0, 'an unauthorized transaction remains unfinished');
   assert.equal(h.state.alerts.at(-1)[0], 'plans.purchaseIncomplete');
   assert.equal(h.state.alerts.at(-1)[1], LINKED_MESSAGE);
 });
@@ -87,7 +87,7 @@ test('REPRODUCTION 4-6. StoreKit re-delivers the same transaction: the second at
   assert.equal(second.value.ok, false);
   assert.equal(h.state.active, false, 'no entitlement is granted');
   assert.equal(verifyCalls(h), 1, 'the remembered verdict is reused; the backend is not asked again');
-  assert.equal(h.state.finishes.length, 1, 'no second finish');
+  assert.equal(h.state.finishes.length, 0, 'repeated unauthorized transaction remains unfinished');
   const events = h.state.diagnostics.map(([event]) => event);
   assert.ok(events.includes('ownership_rejection_remembered') && events.includes('ownership_rejection_reused'));
   assert.doesNotMatch(JSON.stringify(h.state.diagnostics), new RegExp(`${ACCOUNT}|external-test-token|external-test-payload|${REJECTED}`));

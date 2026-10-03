@@ -166,7 +166,7 @@ test('duplicate restore tap is blocked: guarded before dispatch and the row is d
 });
 
 test('restoringPurchases (the Restore Purchase spinner/busy flag) always clears via finally', () => {
-  assert.match(handleRestoreFn, /finally \{\s*setRestoringPurchases\(false\);\s*logDiag\('restore_busy_cleared'\);\s*\}/);
+  assert.match(handleRestoreFn, /finally \{\s*if \(restoreIdentity\.owns\(ticket\)\) \{\s*setRestoringPurchases\(false\);\s*logDiag\('restore_busy_cleared'\);\s*\}/);
 });
 
 test('a restore failure never throws out of handleRestorePurchases uncaught (caught and shown, loading still clears)', () => {
