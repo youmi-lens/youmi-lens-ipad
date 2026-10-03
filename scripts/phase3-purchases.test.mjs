@@ -97,11 +97,11 @@ const cancelBranch = plans.indexOf("if (result.code === 'cancelled') return;");
 const failureAlert = plans.indexOf("Alert.alert(t('plans.purchaseIncomplete')");
 assert.ok(cancelBranch > 0 && cancelBranch < failureAlert);
 assert.match(subscriptions, /name === ErrorCode\.UserCancelled/);
-assert.match(plans, /finally \{\s*purchaseLockRef\.current = false;\s*setBusy\(null\);/);
+assert.match(plans, /finally \{\s*if \(actionIdentity\.owns\(actionTicket\)\) \{\s*purchaseLockRef\.current = false;\s*setBusy\(null\);/);
 
 // 8-10. StoreKit success is verified first; only a verified grant refreshes and confirms active quotas.
 const requestIndex = subscriptions.indexOf('await this.requestWithTimeout(plan, accountId)');
-const verifyIndex = subscriptions.indexOf('return await this.verify(purchase, accessToken)');
+const verifyIndex = subscriptions.indexOf('return await this.verify(purchase, accessToken, accountId, authorizationId)');
 const backendGrantIndex = subscriptions.indexOf('payload.ok && payload.granted');
 const serviceSuccessIndex = subscriptions.indexOf("result('success')", backendGrantIndex);
 assert.ok(requestIndex > 0 && requestIndex < verifyIndex);
@@ -122,8 +122,15 @@ assert.doesNotMatch(plans, /Student Basic active'[^]*result\.ok/);
 // 11. Refresh Access is backend-first and refreshes quota/status before reporting success.
 assert.match(subscriptions, /\/api\/iap\/entitlement/);
 assert.match(subscriptions, /\/api\/iap\/restore/);
-assert.match(subscriptions, /await boundedPaymentTask\(\(\) => syncIOS\(\)/);
-assert.match(plans, /const result = await subscriptionService\.restore\(identity\.token\);[\s\S]*const refreshedStatus = await refreshPaymentStatus\(\);/);
+// Restore is query-first: the local StoreKit history is read before the sign-in-forcing sync, which is only a
+// best-effort, active-time-bounded fallback (Build 65).
+assert.match(subscriptions, /await boundedActiveTimeTask\(\(\) => syncIOS\(\)/);
+assert.doesNotMatch(subscriptions, /boundedPaymentTask\(\(\) => syncIOS\(\)/);
+assert.ok(
+  subscriptions.indexOf('let eligible = await queryEligible()') < subscriptions.indexOf('boundedActiveTimeTask(() => syncIOS()'),
+  'restore must query StoreKit history before falling back to syncIOS',
+);
+assert.match(plans, /const result = await subscriptionService\.restore\(identity\.token, identity\.account\);[\s\S]*const refreshedStatus = await refreshPaymentStatus\(\);/);
 assert.match(plans, /plans\.refreshAccess/);
 
 // 12. Status is keyed to Supabase user.id and stale requests are discarded.
@@ -227,7 +234,7 @@ assert.equal(storekit.products.length, 2);
 assert.equal(storekit.products[0].displayPrice, '4.99');
 assert.equal(storekit.products[1].productID, legacyProductId);
 assert.equal(storekit.products[1].type, 'NonConsumable');
-assert.equal(appConfig.expo.version, '0.2.1');
-assert.equal(appConfig.expo.ios.buildNumber, '57');
+assert.equal(appConfig.expo.version, '0.2.2');
+assert.equal(appConfig.expo.ios.buildNumber, '65');
 
 console.log('Phase 3 purchase hardening tests passed.');

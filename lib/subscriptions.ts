@@ -15,12 +15,14 @@ import {
   type ProductSubscription,
   type Purchase,
 } from 'expo-iap';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppState, Platform } from 'react-native';
 
+import { fetchSubscriptionAvailability, canPurchaseSubscription } from './subscriptionAvailability';
 import { API_BASE_URL } from './config';
 import { boundedFetch, BoundedFetchTimeoutError, isBoundedFetchTimeout, SUBSCRIPTION_FETCH_TIMEOUT_MS } from './boundedFetch';
 import { boundedVoidTask } from './boundedTask';
-import { boundedPaymentTask, PaymentTaskTimeoutError } from './boundedPaymentTask';
+import { boundedActiveTimeTask, boundedPaymentTask, PaymentTaskTimeoutError } from './boundedPaymentTask';
 import { logDiag } from './iapDiag';
 import { logIap } from './iapLog';
 import type { BackendEntitlement, EntitlementResponse } from './purchases';
@@ -42,6 +44,9 @@ import {
 } from './subscriptionProducts';
 
 export type SubscriptionResultCode =
+  | 'sales_closed'
+  | 'apple_already_owned'
+  | 'account_changed'
   | 'success'
   | 'cancelled'
   | 'pending'
@@ -68,9 +73,13 @@ export type SubscriptionResult = {
 
 export type SubscriptionRestoreResult = SubscriptionResult & {
   restoredCount?: number;
+  outcomes?: RestoreItemOutcome[];
 };
 
+type RestoreItemOutcome = { transactionId: string | null; code: string; granted: boolean; safeToFinish: boolean; retryable: boolean };
 type VerifyResponse = {
+  safeToFinish?: boolean;
+  outcomes?: RestoreItemOutcome[];
   ok?: boolean;
   granted?: boolean;
   reason?: string | null;
@@ -84,7 +93,10 @@ type VerifyResponse = {
 
 const PURCHASE_TIMEOUT_MS = 120_000;
 const STOREKIT_OPERATION_TIMEOUT_MS = 15_000;
-const STOREKIT_SYNC_TIMEOUT_MS = 30_000;
+// syncIOS (AppStore.sync) forces Apple Account sign-in, so it can wait on the person. Only foreground-active time counts
+// against the budget; the wall-clock backstop guarantees Restore can never hang forever.
+const STOREKIT_SYNC_ACTIVE_BUDGET_MS = 60_000;
+const STOREKIT_SYNC_BACKSTOP_MS = 180_000;
 // finishTransaction is a native StoreKit bridge call with no bound of its own
 // (ExpoIapModule.finishTransaction). By the time it's called here the backend
 // has ALREADY granted (or definitively rejected) the entitlement, so nothing
@@ -162,6 +174,9 @@ function normalizeStoreKitError(error: unknown): Error {
 
 function result(code: SubscriptionResultCode, message?: string): SubscriptionResult {
   const defaults: Record<SubscriptionResultCode, string> = {
+    sales_closed: 'Subscriptions currently unavailable. Existing access can still be restored.',
+    apple_already_owned: 'Apple reports an existing subscription. Restore to check which Youmi account owns it.',
+    account_changed: 'Your account changed. Refresh access for the account used to start this purchase.',
     success: 'Student Access is active.',
     cancelled: 'Purchase cancelled.',
     pending: 'Purchase is pending. Access will update after Apple completes it.',
@@ -218,7 +233,7 @@ class SubscriptionService {
   private loadPromise: Promise<SubscriptionCatalog> | null = null;
   private purchaseInFlight = false;
   private restoreInFlight = false;
-  private verificationContext: { accessToken: string; accountId: string } | null = null;
+  private verificationContext: { accessToken: string; accountId: string; authorizationId?: string } | null = null;
   private seenTransactions = new Set<string>();
   private ownershipRejections = new Map<string, { result: SubscriptionResult; at: number }>();
   private deferredTransactions = new Map<string, Purchase>();
@@ -366,7 +381,7 @@ class SubscriptionService {
     this.seenTransactions.add(id);
     this.deferredTransactions.delete(id);
     const verification = (async () => {
-      const verified = await this.verify(purchase, context.accessToken);
+      const verified = await this.verify(purchase, context.accessToken, context.accountId, context.authorizationId);
       // Reconcile account state independently. This never resolves, rejects,
       // or shows success for an unrelated active UI purchase attempt.
       if (verified.ok) await this.getEntitlement(context.accessToken);
@@ -446,13 +461,27 @@ class SubscriptionService {
     for (const purchase of this.deferredTransactions.values()) this.reconcileLateTransaction(purchase);
     logIap('IAP_PURCHASE_START', productIdForPlan(plan));
     try {
+      // Recheck live policy immediately before StoreKit. A cached enabled UI
+      // can never bypass a closed gate or a failed availability request.
+      const availability = await fetchSubscriptionAvailability();
+      if (!availability.some((item) => item.productId === productIdForPlan(plan) && item.purchasable === true && item.environment === 'Production')) return result('sales_closed');
       const catalog = await this.loadProducts();
+      if (!canPurchaseSubscription(plan, catalog, availability)) return result('product_unavailable');
       const availablePlan = chooseAvailablePlan(plan, catalog);
       if (availablePlan !== plan || !catalog[plan]) return result('product_unavailable');
+      const admission = await fetchJson<{ ok?: boolean; authorizationId?: string; expiresAt?: string; error?: string }>(`${API_BASE_URL}/api/iap/subscriptions/authorize`, accessToken,
+        { method: 'POST', body: JSON.stringify({ productId: productIdForPlan(plan) }) });
+      if (!admission.payload.ok || !admission.payload.authorizationId) return result(admission.payload.error === 'sales_closed' ? 'sales_closed' : 'backend_verification_failed');
+      const authorizationId = admission.payload.authorizationId;
+      this.verificationContext = { accessToken, accountId, authorizationId };
+      // Keep generic admission evidence across app restarts/network failures;
+      // it carries no Apple credentials and is scoped again by the backend.
+      await AsyncStorage.setItem(`youmi.subscription.admission:${accountId}:${productIdForPlan(plan)}`, authorizationId);
+      if (!admission.payload.expiresAt || Date.parse(admission.payload.expiresAt) <= Date.now()) return result('operation_timeout');
       const purchase = await this.requestWithTimeout(plan, accountId);
       if (purchase.purchaseState === 'pending') return result('pending');
       logIap('IAP_VERIFY_START');
-      return await this.verify(purchase, accessToken);
+      return await this.verify(purchase, accessToken, accountId, authorizationId);
     } catch (error) {
       return this.mapError(error);
     } finally {
@@ -525,7 +554,7 @@ class SubscriptionService {
     });
   }
 
-  private async verify(purchase: Purchase, accessToken: string): Promise<SubscriptionResult> {
+  private async verify(purchase: Purchase, accessToken: string, accountId: string | null = null, authorizationId?: string): Promise<SubscriptionResult> {
     logDiag('verify_started');
     const signedTransactionInfo = purchaseToken(purchase);
     if (!signedTransactionInfo) {
@@ -538,6 +567,7 @@ class SubscriptionService {
         method: 'POST',
         body: JSON.stringify({
           platform: 'ios',
+          purchaseAuthorizationId: authorizationId,
           signedTransactionInfo,
           transactionId: transactionId(purchase),
           originalTransactionId: originalTransactionId(purchase),
@@ -551,14 +581,15 @@ class SubscriptionService {
     const payload = response.payload ?? {};
     const httpOk = response.status >= 200 && response.status < 300;
     logDiag(httpOk && payload.ok && payload.granted ? 'verify_succeeded' : 'verify_failed');
-    if ((httpOk || response.status === 403 || response.status === 409) && shouldFinishSubscriptionTransaction(payload)) {
+    if (httpOk && shouldFinishSubscriptionTransaction(payload)) {
       await finishTransactionBounded(purchase, false);
     }
     if (response.status >= 200 && response.status < 300 && payload.ok && payload.granted) {
       return { ...result('success'), entitlement: payload.entitlement ?? null };
     }
     // The account this verification belongs to (set when the purchase attempt started, or captured for late reconciliation).
-    const verifyingAccountId = this.verificationContext?.accountId ?? null;
+    const verifyingAccountId = accountId;
+    if (payload.reason === 'sales_closed' || payload.error === 'sales_closed') return result('sales_closed');
     if (payload.error === 'iap_already_linked') {
       const rejection = result('already_linked');
       if (verifyingAccountId) this.rememberOwnershipRejection(purchase, verifyingAccountId, rejection);
@@ -575,7 +606,7 @@ class SubscriptionService {
     return result('backend_verification_failed');
   }
 
-  async restore(accessToken: string | null): Promise<SubscriptionRestoreResult> {
+  async restore(accessToken: string | null, accountId?: string | null): Promise<SubscriptionRestoreResult> {
     if (!accessToken) return result('sign_in_required');
     if (!API_BASE_URL) return result('offline');
     if (this.purchaseInFlight || this.restoreInFlight) return result('purchase_in_progress');
@@ -586,19 +617,37 @@ class SubscriptionService {
       // Do not verify the same callback concurrently with an explicit restore.
       await Promise.all(this.lateVerifications.values());
       await this.connect();
-      await boundedPaymentTask(() => syncIOS(), STOREKIT_SYNC_TIMEOUT_MS, 'restore_sync');
-      const purchases = ((await boundedPaymentTask(
+      const queryEligible = async () => (((await boundedPaymentTask(
         () => getAvailablePurchases({ onlyIncludeActiveItemsIOS: false }),
         STOREKIT_OPERATION_TIMEOUT_MS, 'restore_query',
-      )) as Purchase[] | null) ?? [];
-      const eligible = purchases.filter((purchase) => ALL_RESTORABLE_IDS.has(purchase.productId) && purchaseToken(purchase));
+      )) as Purchase[] | null) ?? []).filter((purchase) => ALL_RESTORABLE_IDS.has(purchase.productId) && purchaseToken(purchase));
+      // Query first: it is a local read that never prompts. Only when it finds nothing is Apple's explicit sync worth
+      // its sign-in prompt, and then it is best-effort: whatever it does, the local history is read exactly once more.
+      let eligible = await queryEligible();
+      if (eligible.length === 0) {
+        let syncFailed = false;
+        try {
+          await boundedActiveTimeTask(() => syncIOS(), STOREKIT_SYNC_ACTIVE_BUDGET_MS, STOREKIT_SYNC_BACKSTOP_MS, 'restore_sync', AppState);
+        } catch {
+          syncFailed = true;
+        }
+        eligible = await queryEligible();
+        if (eligible.length === 0 && syncFailed) {
+          logDiag('restore_query_failed', { reason: 'sync_incomplete' });
+          return result('storekit_error', 'Apple Account sign-in was not completed. Restore again and sign in when prompted.');
+        }
+      }
       querying = false;
       logDiag('verify_started', { source: 'restore' });
+      const admissions = new Map<string, string | null>();
+      if (accountId) for (const p of eligible) admissions.set(p.productId,
+        await AsyncStorage.getItem(`youmi.subscription.admission:${accountId}:${p.productId}`));
       const response = await fetchJson<VerifyResponse>(`${API_BASE_URL}/api/iap/restore`, accessToken, {
         method: 'POST',
         body: JSON.stringify({
           platform: 'ios',
           purchases: eligible.map((purchase) => ({
+            purchaseAuthorizationId: admissions.get(purchase.productId) ?? undefined,
             signedTransactionInfo: purchaseToken(purchase),
             transactionId: transactionId(purchase),
             originalTransactionId: originalTransactionId(purchase),
@@ -611,7 +660,9 @@ class SubscriptionService {
         return result('backend_verification_failed');
       }
       logDiag('restore_verified');
-      const verifiedIds = new Set(payload.verifiedTransactionIds ?? []);
+      const verifiedIds = new Set(payload.outcomes
+        ? payload.outcomes.filter((item) => item.safeToFinish === true && !['revoked', 'refunded'].includes(item.code)).map((item) => item.transactionId)
+        : []);
       for (const purchase of eligible) {
         const id = transactionId(purchase);
         if (id && verifiedIds.has(id)) {
@@ -619,9 +670,13 @@ class SubscriptionService {
           await finishTransactionBounded(purchase, purchase.productId === LEGACY_STUDENT_ACCESS_PRODUCT_IDS[0]);
         }
       }
+      const denied = payload.outcomes?.find((item) => !item.safeToFinish && !item.granted);
+      if (denied?.code === 'sales_closed') return { ...result('sales_closed'), outcomes: payload.outcomes };
+      if (payload.outcomes?.some((item) => item.retryable)) return { ...result('backend_verification_failed'), outcomes: payload.outcomes };
+      if (denied && !['expired', 'revoked', 'refunded', 'iap_already_linked', 'iap_deleted_account_binding'].includes(denied.code)) return { ...result('backend_verification_failed'), outcomes: payload.outcomes };
       if (payload.alreadyLinked) return { ...result('already_linked'), restoredCount: payload.restoredCount ?? 0 };
       if (payload.entitlement?.active) {
-        return { ...result('success'), entitlement: payload.entitlement, restoredCount: payload.restoredCount ?? 0 };
+        return { ...result('success'), entitlement: payload.entitlement, restoredCount: payload.restoredCount ?? 0, outcomes: payload.outcomes };
       }
       if (payload.entitlement?.status === 'expired') return { ...result('expired'), restoredCount: payload.restoredCount ?? 0 };
       if (payload.entitlement?.status === 'revoked' || payload.entitlement?.status === 'refunded') {
@@ -660,6 +715,8 @@ class SubscriptionService {
   }
 
   private mapError(error: unknown): SubscriptionResult {
+    if (error instanceof Error && /Subscription availability/i.test(error.message)) return result('backend_verification_failed', 'Subscription availability could not be checked. Please try again.');
+    if (error instanceof TypeError) return result('offline');
     if (error instanceof RememberedOwnershipRejection) return error.rejection;
     if (error instanceof PaymentTaskTimeoutError) return result('operation_timeout');
     if (isBoundedFetchTimeout(error)) return result('verify_timeout');
@@ -675,6 +732,7 @@ class SubscriptionService {
       logDiag('purchase_cancelled');
       return result('cancelled');
     }
+    if ([nativeCode, platformCode, name].some((code) => typeof code === 'string' && /already.?owned|already.?purchased/i.test(code))) return result('apple_already_owned');
     if (name === 'presentation_not_active') return result('presentation_unavailable');
     if ([name, nativeCode].some((code) => code === ErrorCode.Pending || code === ErrorCode.DeferredPayment)) return result('pending');
     if ([ErrorCode.NetworkError, ErrorCode.RemoteError, ErrorCode.ServiceError, ErrorCode.ServiceDisconnected, ErrorCode.ServiceTimeout].includes((nativeCode ?? name) as ErrorCode)) return result('offline');

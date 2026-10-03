@@ -165,7 +165,7 @@ for (const shape of ['native-listener', 'canonical-error', 'canonical-object', '
     if (shape === 'native-listener') h.error({ code: 'user-cancelled', message: 'User cancelled the purchase flow', productId: MONTHLY });
     await action;
     assert.equal(h.state.alerts.length, 0);
-    assert.equal(h.state.http.length, 0);
+    assert.equal(h.state.http.filter(x=>!x.url.endsWith('/availability')&&!x.url.endsWith('/authorize')).length, 0);
     assert.equal(h.state.refreshes, 0);
     assert.equal(h.state.active, false);
     assert.equal(h.state.busy, null);
@@ -330,7 +330,7 @@ test('P4 wrong account and unsigned callbacks never grant or finish', async () =
   h.emit({ ...h.transaction(MONTHLY, 'other-account'), appAccountToken: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' });
   await flush();
   assert.equal(attempt.settled, false);
-  assert.equal(h.state.http.length, 0);
+  assert.equal(h.state.http.filter(x=>!x.url.endsWith('/availability')&&!x.url.endsWith('/authorize')).length, 0);
   h.emit({ ...h.transaction(MONTHLY, 'unsigned'), purchaseToken: null });
   await flush();
   assert.equal(attempt.value.code, 'backend_verification_failed');
@@ -343,7 +343,7 @@ test('P4 callback without known identity stays unfinished until safe reconciliat
   await h.service.loadProducts();
   const old = h.transaction(ANNUAL, 'deferred-paid');
   h.emit(old); await flush();
-  assert.equal(h.state.http.length, 0);
+  assert.equal(h.state.http.filter(x=>!x.url.endsWith('/availability')&&!x.url.endsWith('/authorize')).length, 0);
   assert.equal(h.state.finishes.length, 0);
   const current = track(h.service.purchase('monthly', 'external-test-token', ACCOUNT));
   await flush();
@@ -429,7 +429,245 @@ for (const mode of ['storekit-error', 'pending', 'unavailable', 'inactive']) {
     assert.equal(h.state.busy, null);
     assert.equal(h.state.active, false);
     assert.equal(h.state.refreshes, 0);
-    assert.equal(h.state.http.length, 0);
+    assert.equal(h.state.http.filter(x=>!x.url.endsWith('/availability')&&!x.url.endsWith('/authorize')).length, 0);
     if (mode === 'inactive') assert.equal(h.state.requests.length, 0);
   });
 }
+
+// ---- Build 65: query-first Restore, best-effort active-time-bounded sync fallback ----
+const RESTORE_TOKEN = 'external-test-token';
+const restorePosts = (h) => h.state.http.filter(({ url }) => url.endsWith('/api/iap/restore'));
+const SIGN_IN_FAILURE = /sign-in was not completed/;
+/** Counts native calls and lets a test decide what each StoreKit stage does. */
+function restoreProbe(h) {
+  const calls = { sync: 0, query: 0 };
+  h.iap.getAvailablePurchases = async () => { calls.query += 1; return h.state.purchases; };
+  h.iap.syncIOS = async () => { calls.sync += 1; return true; };
+  return calls;
+}
+
+test('B65-1 query-first: local history skips syncIOS and posts /restore exactly once', async () => {
+  const h = paymentHarness();
+  const calls = restoreProbe(h);
+  h.state.purchases = [transaction()];
+  const result = await h.service.restore(RESTORE_TOKEN, ACCOUNT);
+  assert.equal(result.ok, true);
+  assert.equal(result.code, 'success');
+  assert.equal(calls.sync, 0);
+  assert.equal(calls.query, 1);
+  assert.equal(restorePosts(h).length, 1);
+  assert.equal(h.state.finishes.length, 1);
+});
+
+test('B65-2 empty first query: syncIOS runs once, the second query finds it, one POST', async () => {
+  const h = paymentHarness();
+  const calls = restoreProbe(h);
+  h.iap.syncIOS = async () => { calls.sync += 1; h.state.purchases = [transaction()]; return true; };
+  const result = await h.service.restore(RESTORE_TOKEN, ACCOUNT);
+  assert.equal(result.ok, true);
+  assert.equal(calls.sync, 1);
+  assert.equal(calls.query, 2);
+  assert.equal(restorePosts(h).length, 1);
+});
+
+test('B65-3 syncIOS hangs: the active-time budget clears busy, re-queries once, no POST, sign-in failure', async () => {
+  const h = paymentHarness();
+  const calls = restoreProbe(h);
+  h.iap.syncIOS = () => { calls.sync += 1; return never(); };
+  const attempt = track(h.service.restore(RESTORE_TOKEN, ACCOUNT));
+  await h.advance(59_999);
+  assert.equal(attempt.settled, false);
+  await h.advance(1);
+  assert.equal(attempt.settled, true);
+  assert.equal(attempt.value.code, 'storekit_error');
+  assert.match(attempt.value.message, SIGN_IN_FAILURE);
+  assert.notEqual(attempt.value.code, 'offline');
+  assert.notEqual(attempt.value.code, 'no_purchase');
+  assert.equal(calls.sync, 1);
+  assert.equal(calls.query, 2);
+  assert.equal(restorePosts(h).length, 0);
+  assert.equal(h.appState.listenerCount(), 0, 'the AppState subscription is released');
+  h.iap.syncIOS = async () => true; // restoreInFlight was cleared: a new Restore is accepted
+  assert.equal((await h.service.restore(RESTORE_TOKEN, ACCOUNT)).code, 'no_purchase');
+});
+
+test('B65-3b the wall-clock backstop ends a sync that never becomes active (finite worst case)', async () => {
+  const h = paymentHarness();
+  restoreProbe(h);
+  h.iap.syncIOS = never;
+  h.appState.currentState = 'background';
+  const attempt = track(h.service.restore(RESTORE_TOKEN, ACCOUNT));
+  await h.advance(179_999);
+  assert.equal(attempt.settled, false);
+  await h.advance(1);
+  assert.equal(attempt.settled, true);
+  assert.equal(attempt.value.code, 'storekit_error');
+  assert.equal(restorePosts(h).length, 0);
+});
+
+for (const [name, reject] of [
+  ['accountMissing', () => new Error('accountMissing')],
+  ['serviceError', () => Object.assign(new Error('Service error'), { code: 'service-error' })],
+]) {
+  test(`B65-4 syncIOS rejects ${name}: still re-queries; succeeds if the transaction appears`, async () => {
+    const h = paymentHarness();
+    const calls = restoreProbe(h);
+    h.iap.syncIOS = async () => { calls.sync += 1; h.state.purchases = [transaction()]; throw reject(); };
+    const result = await h.service.restore(RESTORE_TOKEN, ACCOUNT);
+    assert.equal(result.ok, true);
+    assert.equal(calls.query, 2);
+    assert.equal(restorePosts(h).length, 1);
+  });
+  test(`B65-4 syncIOS rejects ${name}: otherwise a specific sign-in error, never offline or no_purchase`, async () => {
+    const h = paymentHarness();
+    const calls = restoreProbe(h);
+    h.iap.syncIOS = async () => { calls.sync += 1; throw reject(); };
+    const result = await h.service.restore(RESTORE_TOKEN, ACCOUNT);
+    assert.equal(result.code, 'storekit_error');
+    assert.match(result.message, SIGN_IN_FAILURE);
+    assert.equal(calls.query, 2);
+    assert.equal(restorePosts(h).length, 0);
+  });
+}
+
+test('B65-5 inactive/background time does not consume the active budget; active time still does', async () => {
+  const h = paymentHarness();
+  restoreProbe(h);
+  let completeSync;
+  h.iap.syncIOS = () => new Promise((resolve) => { completeSync = () => { h.state.purchases = [transaction()]; resolve(true); }; });
+  const attempt = track(h.service.restore(RESTORE_TOKEN, ACCOUNT));
+  await h.advance(40_000); // 40 s active
+  h.appState.setState('inactive'); // the system sign-in alert
+  await h.advance(50_000);
+  h.appState.setState('background'); // gone to Settings
+  await h.advance(40_000); // 130 s wall clock, still under the 180 s backstop
+  assert.equal(attempt.settled, false);
+  h.appState.setState('active');
+  await h.advance(19_000); // 59 s active in total
+  assert.equal(attempt.settled, false);
+  completeSync();
+  await h.advance(0);
+  assert.equal(attempt.settled, true);
+  assert.equal(attempt.value.ok, true);
+  assert.equal(restorePosts(h).length, 1);
+
+  const spent = paymentHarness();
+  restoreProbe(spent);
+  spent.iap.syncIOS = never;
+  const exhausted = track(spent.service.restore(RESTORE_TOKEN, ACCOUNT));
+  await spent.advance(40_000);
+  spent.appState.setState('inactive');
+  await spent.advance(50_000);
+  spent.appState.setState('active');
+  await spent.advance(19_999);
+  assert.equal(exhausted.settled, false);
+  await spent.advance(1); // 60 s of active time in total
+  assert.equal(exhausted.settled, true);
+  assert.equal(exhausted.value.code, 'storekit_error');
+});
+
+for (const late of ['resolves', 'rejects']) {
+  test(`B65-6 a sync that ${late} after the timeout cannot change the result or POST again`, async () => {
+    const h = paymentHarness();
+    restoreProbe(h);
+    let settleSync;
+    h.iap.syncIOS = () => new Promise((resolve, reject) => { settleSync = late === 'resolves' ? () => resolve(true) : () => reject(new Error('accountMissing')); });
+    const attempt = track(h.service.restore(RESTORE_TOKEN, ACCOUNT));
+    await h.advance(60_000);
+    assert.equal(attempt.settled, true);
+    const first = attempt.value;
+    h.state.purchases = [transaction()]; // the transaction shows up only after Restore has already ended
+    settleSync();
+    await h.advance(5_000);
+    assert.equal(attempt.value, first);
+    assert.equal(first.code, 'storekit_error');
+    assert.equal(restorePosts(h).length, 0);
+    assert.equal(h.state.finishes.length, 0);
+  });
+}
+
+test('B65-7 duplicate Restore and purchase taps while the fallback waits keep the overlap protection', async () => {
+  const h = paymentHarness();
+  restoreProbe(h);
+  let completeSync;
+  h.iap.syncIOS = () => new Promise((resolve) => { completeSync = () => { h.state.purchases = [transaction()]; resolve(true); }; });
+  const restore = h.service.restore(RESTORE_TOKEN, ACCOUNT);
+  await flush();
+  assert.equal((await h.service.restore(RESTORE_TOKEN, ACCOUNT)).code, 'purchase_in_progress');
+  assert.equal((await h.service.purchase('monthly', RESTORE_TOKEN, ACCOUNT)).code, 'purchase_in_progress');
+  completeSync();
+  assert.equal((await restore).ok, true);
+  assert.equal(restorePosts(h).length, 1);
+});
+
+test('B65-8 account switch during the fallback discards the stale result in Settings and Plans', async () => {
+  const OTHER = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const settings = paymentHarness();
+  restoreProbe(settings);
+  let finishSettingsSync;
+  settings.iap.syncIOS = () => new Promise((resolve) => { finishSettingsSync = () => { settings.state.purchases = [transaction()]; resolve(true); }; });
+  const settingsAction = track(settings.settingsRestore());
+  await flush();
+  settings.restoreIdentity.setIdentity(OTHER);
+  finishSettingsSync();
+  await settings.advance(1_000);
+  assert.equal(settingsAction.settled, true);
+  assert.equal(settings.state.alerts.length, 0, 'Settings shows nothing for the superseded account');
+
+  const plans = paymentHarness();
+  restoreProbe(plans);
+  let finishPlansSync;
+  plans.iap.syncIOS = () => new Promise((resolve) => { finishPlansSync = () => { plans.state.purchases = [transaction()]; resolve(true); }; });
+  const plansAction = track(plans.plansAction('handleRefreshAccess'));
+  await flush();
+  plans.actionIdentity.setIdentity(OTHER);
+  finishPlansSync();
+  await plans.advance(1_000);
+  assert.equal(plansAction.settled, true);
+  assert.equal(plans.state.alerts.length, 0, 'Plans shows nothing for the superseded account');
+});
+
+test('B65-9 sync succeeds and the second query is still empty: existing no_purchase behaviour', async () => {
+  const h = paymentHarness();
+  const calls = restoreProbe(h);
+  const result = await h.service.restore(RESTORE_TOKEN, ACCOUNT);
+  assert.equal(result.code, 'no_purchase');
+  assert.equal(calls.sync, 1);
+  assert.equal(calls.query, 2);
+  assert.equal(restorePosts(h).length, 1);
+  assert.equal(h.state.finishes.length, 0);
+});
+
+for (const path of ['query-first', 'sync-fallback']) {
+  test(`B65-10 backend iap_already_linked (${path}): ownership rejection is preserved and nothing is finished`, async () => {
+    const h = paymentHarness();
+    const calls = restoreProbe(h);
+    if (path === 'sync-fallback') h.iap.syncIOS = async () => { calls.sync += 1; h.state.purchases = [transaction()]; return true; };
+    else h.state.purchases = [transaction()];
+    h.state.fetch = async (url) => (url.endsWith('/restore')
+      ? h.response({ ok: true, alreadyLinked: true, restoredCount: 0, entitlement: { active: false, status: 'none' },
+        outcomes: [{ transactionId: 'test-transaction', code: 'iap_already_linked', granted: false, safeToFinish: false, retryable: false }] })
+      : h.response({ ok: true, entitlement: { active: false, status: 'none' } }));
+    const result = await h.service.restore(RESTORE_TOKEN, ACCOUNT);
+    assert.equal(result.code, 'already_linked');
+    assert.equal(h.state.finishes.length, 0);
+    assert.equal(h.state.active, false);
+    assert.equal(restorePosts(h).length, 1);
+    assert.equal(calls.sync, path === 'sync-fallback' ? 1 : 0);
+  });
+}
+
+test('B65-11 nothing is finished unless the backend marks it safeToFinish', async () => {
+  const h = paymentHarness();
+  restoreProbe(h);
+  h.state.purchases = [transaction(MONTHLY, 'tx-safe'), transaction(MONTHLY, 'tx-unsafe')];
+  h.state.fetch = async (url) => (url.endsWith('/restore')
+    ? h.response({ ok: true, entitlement: { active: true, status: 'active', productId: MONTHLY }, restoredCount: 2,
+      outcomes: [
+        { transactionId: 'tx-safe', code: 'active', granted: true, safeToFinish: true, retryable: false },
+        { transactionId: 'tx-unsafe', code: 'iap_temporarily_unavailable', granted: false, safeToFinish: false, retryable: true },
+      ] })
+    : h.response({ ok: true }));
+  await h.service.restore(RESTORE_TOKEN, ACCOUNT);
+  assert.deepEqual(h.state.finishes.map(({ purchase }) => purchase.transactionId), ['tx-safe']);
+});

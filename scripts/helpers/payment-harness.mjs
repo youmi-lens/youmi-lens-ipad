@@ -37,7 +37,11 @@ export function paymentHarness() {
     setTimeout(fn, ms) { timers.set(++nextTimer, { fn, due: time + ms }); return nextTimer; },
     clearTimeout(id) { timers.delete(id); },
   };
-  const appState = { currentState: 'active' };
+  const appStateListeners = new Set();
+  const appState = { currentState: 'active',
+    addEventListener: (_type, fn) => { appStateListeners.add(fn); return { remove: () => appStateListeners.delete(fn) }; },
+    setState(next) { appState.currentState = next; [...appStateListeners].forEach((fn) => fn(next)); },
+    listenerCount: () => appStateListeners.size };
   const iap = {
     initConnection: async () => { state.initCalls += 1; return true; },
     endConnection: async () => true,
@@ -56,12 +60,12 @@ export function paymentHarness() {
     productId: state.active ? MONTHLY : null, expiresAt: state.active ? '2099-01-01T00:00:00Z' : null });
   const response = (payload, status = 200) => ({ status, ok: status >= 200 && status < 300, json: async () => payload });
   state.fetch = async (url, init) => {
-    if (url.endsWith('/verify')) { state.active = true; return response({ ok: true, granted: true, entitlement: entitlement() }); }
+    if (url.endsWith('/verify')) { state.active = true; return response({ ok: true, granted: true, safeToFinish: true, entitlement: entitlement() }); }
     if (url.endsWith('/restore')) {
       const purchases = JSON.parse(init.body).purchases;
       if (purchases.length) state.active = true;
       return response({ ok: true, entitlement: entitlement(), restoredCount: purchases.length,
-        verifiedTransactionIds: purchases.map((p) => p.transactionId) });
+        outcomes: purchases.map((p) => ({transactionId:p.transactionId,code:'active',granted:true,safeToFinish:true,retryable:false})), verifiedTransactionIds: purchases.map((p) => p.transactionId) });
     }
     if (url.endsWith('/quota/status')) return response({ ok: true, plan: { planType: state.active ? 'student_pass' : 'public_trial',
       displayName: 'Student Access', entitlement: entitlement(), monthlyMinutesLimit: 600,
@@ -73,6 +77,7 @@ export function paymentHarness() {
   const auth = { getSession: async () => ({ data: { session: { access_token: 'external-test-token', user: { id: ACCOUNT } } } }) };
   const log = { log(...args) { if (args[0] === '[iap-diag]') state.diagnostics.push(args.slice(1)); }, warn() {} };
   const mocks = new Map([
+    ['@react-native-async-storage/async-storage', { default: { setItem: async()=>{},getItem:async()=>null } }],
     ['expo-iap', iap], ['react-native', { Platform: { OS: 'ios' }, AppState: appState }],
     [resolve(root, 'lib/config.ts'), { API_BASE_URL: 'https://payment-test.invalid' }],
     [nativeErrorModule, { NATIVE_ERROR_CODES: {} }],
@@ -92,6 +97,8 @@ export function paymentHarness() {
       requireModule, module, module.exports, clock.setTimeout, clock.clearTimeout,
       async (url, init) => {
         state.http.push({ url, init });
+        if (url.endsWith('/authorize')) return response({ok:true,authorizationId:'test-admission',expiresAt:'2099-01-01T00:00:00Z'});
+        if (url.endsWith('/availability')) return response({ok:true,products:state.availability ?? [MONTHLY, ANNUAL].map(productId=>({productId,purchasable:true,tier:'student_pass',environment:'Production'}))});
         if (url.endsWith('/quota/status')) state.refreshes += 1;
         return state.fetch(url, init);
       },
@@ -119,14 +126,17 @@ export function paymentHarness() {
     } }).outputText;
     return new Function(...Object.keys(scope), `${js}\nreturn actualHandler;`)(...Object.values(scope));
   }
-  const common = { t: (key) => key, Alert: { alert: (...args) => state.alerts.push(args) }, console: log,
+  const Guard = load('lib/billingRequestIdentity.ts').BillingRequestIdentity;
+  const actionIdentity=new Guard(), restoreIdentity=new Guard(), statusIdentity=new Guard(), signedRequestIdentity=new Guard();
+  for(const guard of [actionIdentity,restoreIdentity,statusIdentity,signedRequestIdentity])guard.setIdentity(ACCOUNT);
+  const common = { actionIdentity,restoreIdentity,statusIdentity,signedRequestIdentity,setStatusAccountId() {}, t: (key) => key, Alert: { alert: (...args) => state.alerts.push(args) }, console: log,
     logDiag: load('lib/iapDiag.ts').logDiag, subscriptionService: service,
     session: { access_token: 'external-test-token' }, isGuest: false, restoringPurchases: false,
     setRestoringPurchases: (value) => { state.restoring = value; },
     router: { push() {} }, fetchPlanStatus: load('lib/planStatus.ts').fetchPlanStatus,
     setPlanStatus() {}, setPlanLoading(value) { state.planLoading = value; }, setPlanError() {},
     setPlanStatusAccountId() {}, setStatusLoading(value) { state.statusLoading = value; }, setError() {},
-    accessToken: 'external-test-token', accountId: ACCOUNT,
+    accessToken: 'external-test-token', accountId: ACCOUNT, user:{id:ACCOUNT},
     activeAccountRef: { current: ACCOUNT }, statusRequestRef: { current: 0 },
     ensureGuestIapIdentity: load('lib/guestIap.ts').ensureGuestIapIdentity, setGuestAccountId() {},
     boundedPaymentTask: load('lib/boundedPaymentTask.ts').boundedPaymentTask,
@@ -153,7 +163,7 @@ export function paymentHarness() {
       accessMessageForStatus: handler('app/plans.tsx', 'accessMessageForStatus', common), ...overrides,
     })();
   }
-  return { service, iap, state, load, handler, response, settingsRestore, plansAction, appState, timers, auth,
+  return { actionIdentity, restoreIdentity, statusIdentity, signedRequestIdentity, common, service, iap, state, load, handler, response, settingsRestore, plansAction, appState, timers, auth,
     transaction: (product = MONTHLY, id = 'test-transaction') => ({ ...transaction(product, id), transactionDate: ClockDate.now() }),
     emit: (purchase) => [...updates].forEach((fn) => fn(purchase)),
     error: (error) => [...errors].forEach((fn) => fn(error)),
