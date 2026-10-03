@@ -76,6 +76,8 @@ export type SubscriptionResult = {
 export type SubscriptionRestoreResult = SubscriptionResult & {
   restoredCount?: number;
   outcomes?: RestoreItemOutcome[];
+  retryable?: boolean;
+  finishPending?: boolean;
 };
 
 type RestoreItemOutcome = { transactionId: string | null; code: string; granted: boolean; safeToFinish: boolean; retryable: boolean };
@@ -136,10 +138,11 @@ const ALL_RESTORABLE_IDS = new Set<string>([
  * purchase failure (the purchase itself already succeeded or failed via the
  * backend verify result before this is ever called).
  */
-function finishTransactionBounded(purchase: Purchase, isConsumable: boolean): Promise<void> {
+async function finishTransactionBounded(purchase: Purchase, isConsumable: boolean): Promise<boolean> {
+  let finished = false;
   logDiag('finish_started');
-  return boundedVoidTask(
-    () => finishTransaction({ purchase, isConsumable }).then(() => logDiag('finish_succeeded')),
+  await boundedVoidTask(
+    () => finishTransaction({ purchase, isConsumable }).then(() => { finished = true; logDiag('finish_succeeded'); }),
     FINISH_TRANSACTION_TIMEOUT_MS,
     () => {
       logDiag('finish_timeout');
@@ -147,6 +150,7 @@ function finishTransactionBounded(purchase: Purchase, isConsumable: boolean): Pr
     },
     () => logDiag('finish_failed'),
   );
+  return finished;
 }
 
 function purchaseToken(purchase: Purchase): string | null {
@@ -249,6 +253,17 @@ class SubscriptionService {
   private errorSubscription: { remove: () => void } | null = null;
   private pending: PendingPurchase | null = null;
   private idleWaiters = new Set<() => void>();
+  private activationListeners = new Set<() => void>();
+
+  subscribeActivationPending(listener: () => void) {
+    this.activationListeners.add(listener);
+    return () => { this.activationListeners.delete(listener); };
+  }
+
+  private pendingActivation(code: SubscriptionResultCode) {
+    for (const listener of this.activationListeners) listener();
+    return activationPending(code);
+  }
 
   private notifyIdle() {
     for (const wake of this.idleWaiters) wake();
@@ -396,6 +411,7 @@ class SubscriptionService {
       // in StoreKit for explicit restore; also retry when a matching identity
       // next becomes available in this connection.
       this.deferredTransactions.set(id, purchase);
+      if (!this.restoreInFlight) for (const listener of this.activationListeners) listener();
       if (this.deferredTransactions.size > 256) {
         this.deferredTransactions.delete(this.deferredTransactions.keys().next().value!);
       }
@@ -601,17 +617,18 @@ class SubscriptionService {
     } catch (error) {
       logDiag('verify_failed', { reason: isBoundedFetchTimeout(error) ? 'timeout' : 'network' });
       logIap('IAP_VERIFY_RESULT', isBoundedFetchTimeout(error) ? 'timeout' : 'network');
-      return activationPending(isBoundedFetchTimeout(error) ? 'verify_timeout' : 'offline');
+      return this.pendingActivation(isBoundedFetchTimeout(error) ? 'verify_timeout' : 'offline');
     }
     const payload = response.payload ?? {};
     if (response.status >= 500) {
       logDiag('verify_failed', { reason: 'retryable_backend' });
-      return activationPending('backend_verification_failed');
+      return this.pendingActivation('backend_verification_failed');
     }
     const httpOk = response.status >= 200 && response.status < 300;
     logDiag(httpOk && payload.ok && payload.granted ? 'verify_succeeded' : 'verify_failed');
     if (httpOk && shouldFinishSubscriptionTransaction(payload)) {
-      await finishTransactionBounded(purchase, false);
+      const finished = await finishTransactionBounded(purchase, false);
+      if (!finished) for (const listener of this.activationListeners) listener();
     }
     if (response.status >= 200 && response.status < 300 && payload.ok && payload.granted) {
       return { ...result('success'), entitlement: payload.entitlement ?? null };
@@ -694,34 +711,36 @@ class SubscriptionService {
       if (!isCurrent()) return result('account_changed');
       if (response.status < 200 || response.status >= 300 || !payload.ok) {
         logDiag('verify_failed', { source: 'restore' });
-        return result('backend_verification_failed');
+        return { ...result('backend_verification_failed'), retryable: response.status >= 500 || response.status === 401 };
       }
       logDiag('restore_verified');
       const verifiedIds = new Set(payload.outcomes
         ? payload.outcomes.filter((item) => item.safeToFinish === true && !['revoked', 'refunded'].includes(item.code)).map((item) => item.transactionId)
         : []);
+      let finishPending = false;
       for (const purchase of eligible) {
         if (!isCurrent()) return result('account_changed');
         const id = transactionId(purchase);
         if (id && verifiedIds.has(id)) {
           this.deferredTransactions.delete(id);
-          await finishTransactionBounded(purchase, purchase.productId === LEGACY_STUDENT_ACCESS_PRODUCT_IDS[0]);
+          const finished = await finishTransactionBounded(purchase, purchase.productId === LEGACY_STUDENT_ACCESS_PRODUCT_IDS[0]);
+          finishPending ||= !finished;
         }
       }
       const denied = payload.outcomes?.find((item) => !item.safeToFinish && !item.granted);
       if (denied?.code === 'sales_closed') return { ...result('sales_closed'), outcomes: payload.outcomes };
       if (payload.outcomes?.some((item) => item.retryable)) return { ...result('backend_verification_failed'), outcomes: payload.outcomes };
-      if (denied && !['expired', 'revoked', 'refunded', 'iap_already_linked', 'iap_deleted_account_binding'].includes(denied.code)) return { ...result('backend_verification_failed'), outcomes: payload.outcomes };
-      if (payload.alreadyLinked) return { ...result('already_linked'), restoredCount: payload.restoredCount ?? 0, outcomes: payload.outcomes };
+      if (denied && !['expired', 'revoked', 'refunded', 'iap_already_linked', 'iap_deleted_account_binding'].includes(denied.code)) return { ...result('backend_verification_failed'), outcomes: payload.outcomes, retryable: false };
       if (payload.entitlement?.active) {
-        return { ...result('success'), entitlement: payload.entitlement, restoredCount: payload.restoredCount ?? 0, outcomes: payload.outcomes };
+        return { ...result('success'), entitlement: payload.entitlement, restoredCount: payload.restoredCount ?? 0, outcomes: payload.outcomes, finishPending };
       }
-      if (payload.entitlement?.status === 'expired') return { ...result('expired'), restoredCount: payload.restoredCount ?? 0 };
+      if (payload.alreadyLinked) return { ...result('already_linked'), restoredCount: payload.restoredCount ?? 0, outcomes: payload.outcomes };
+      if (payload.entitlement?.status === 'expired') return { ...result('expired'), restoredCount: payload.restoredCount ?? 0, finishPending };
       if (payload.entitlement?.status === 'revoked' || payload.entitlement?.status === 'refunded') {
         return { ...result('revoked'), restoredCount: payload.restoredCount ?? 0 };
       }
       logDiag('restore_no_purchase');
-      return { ...result('no_purchase'), restoredCount: payload.restoredCount ?? 0 };
+      return { ...result('no_purchase'), restoredCount: payload.restoredCount ?? 0, finishPending };
     } catch (error) {
       logDiag(querying ? 'restore_query_failed' : 'verify_failed', {
         reason: error instanceof PaymentTaskTimeoutError || isBoundedFetchTimeout(error) ? 'timeout' : 'error',

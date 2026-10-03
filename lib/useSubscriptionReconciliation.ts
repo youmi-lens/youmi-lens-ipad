@@ -21,9 +21,11 @@ export function useSubscriptionReconciliation() {
   useEffect(() => {
     if (Platform.OS !== 'ios') return;
     let previous = AppState.currentState;
+    subscriptionReconciliation.setForeground(previous === 'active');
     const listener = AppState.addEventListener('change', (next) => {
       const returning = previous !== 'active' && next === 'active';
       previous = next;
+      subscriptionReconciliation.setForeground(next === 'active');
       if (returning) void subscriptionReconciliation.request('foreground');
     });
     return () => {

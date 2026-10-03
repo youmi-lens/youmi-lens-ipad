@@ -230,12 +230,13 @@ test('silent recovery waits behind manual Restore and never overlaps its POST', 
   assert.equal(posts(h).length, 1); reply(activeReply(h)); await manual; await silent; assert.equal(posts(h).length, 2);
 });
 
-test('retryable item failure stays unfinished, has no tight loop, and recovers on the next trigger', async () => {
+test('retryable item failure stays unfinished and retries with bounded backoff', async () => {
   const h = paymentHarness(); const c = ready(h); const normal = h.state.fetch;
   h.state.fetch = async () => h.response({ ok: true, outcomes: [{ transactionId: 'test-transaction',
     code: 'iap_temporarily_unavailable', granted: false, safeToFinish: false, retryable: true }] });
   assert.equal((await c.request('foreground')).ok, false); assert.equal(h.state.finishes.length, 0);
-  await h.advance(600_000); assert.equal(posts(h).length, 1); assert.equal(h.state.alerts.length, 0);
+  await h.advance(4999); assert.equal(posts(h).length, 1);
+  await h.advance(1); assert.equal(posts(h).length, 2); assert.equal(h.state.alerts.length, 0);
   h.state.fetch = normal; assert.equal((await c.request('plans_mount')).ok, true); assert.equal(h.state.finishes.length, 1);
 });
 
@@ -347,7 +348,7 @@ for (const other of ['foreign', 'retryable']) test(`mixed owned/${other} outcome
         granted: false, safeToFinish: false, retryable: other === 'retryable' },
     ] }) : h.response({ ok: true, entitlement: { active: true } });
   const result = await c.request('foreground');
-  assert.equal(result.ok, false); assert.equal(updates, 1);
+  assert.equal(result.ok, other === 'foreign'); assert.equal(updates, 1);
   assert.deepEqual(h.state.finishes.map(x => x.purchase.transactionId), ['test-transaction']);
   assert.equal(h.state.alerts.length, 0);
 });

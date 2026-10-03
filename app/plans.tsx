@@ -16,6 +16,7 @@ import { formatDate as formatAppDate } from '@/lib/format';
 import { ensureGuestIapIdentity, hasGuestIapIdentity } from '@/lib/guestIap';
 import { useI18n } from '@/lib/i18n';
 import { fetchPlanStatus, PlanStatus } from '@/lib/planStatus';
+import { usePaymentStatusExpiry } from '@/lib/usePaymentStatusExpiry';
 import {
   shouldShowPurchaseEntry,
 } from '@/lib/purchases';
@@ -266,9 +267,10 @@ export default function PlansScreen() {
   // guest-IAP identity, never from the main account — this single branch is
   // what makes every derived value below (active entitlement, purchase
   // visibility, the status pill) correct for guests with zero further changes.
-  const currentStatus = isGuest
+  const cachedStatus = isGuest
     ? (guestAccountId && guestPlanStatusAccountId === guestAccountId ? guestPlanStatus : null)
     : (planStatusAccountId === accountId ? planStatus : null);
+  const currentStatus = usePaymentStatusExpiry(cachedStatus, isGuest ? loadGuestStatus : loadStatus);
   const activeEntitlement = currentStatus?.entitlement?.active ? currentStatus.entitlement : null;
   const activeSubscriptionPlan = planForSubscriptionProductId(activeEntitlement?.productId);
   // The legacy Student Basic purchase flag only governs the retired

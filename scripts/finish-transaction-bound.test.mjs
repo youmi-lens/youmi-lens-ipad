@@ -80,7 +80,7 @@ test('boundedVoidTask leaves no unhandled rejection when the task rejects AFTER 
 // ── Static: every finishTransaction call site in subscriptions.ts is bounded ─
 
 test('finishTransactionBounded wraps the native finishTransaction call', () => {
-  assert.match(subs, /function finishTransactionBounded\(purchase: Purchase, isConsumable: boolean\): Promise<void> \{/);
+  assert.match(subs, /function finishTransactionBounded\(purchase: Purchase, isConsumable: boolean\): Promise<boolean> \{/);
   assert.match(subs, /finishTransaction\(\{ purchase, isConsumable \}\)/);
   assert.match(subs, /boundedVoidTask\(\s*\(\) => finishTransaction/);
 });
