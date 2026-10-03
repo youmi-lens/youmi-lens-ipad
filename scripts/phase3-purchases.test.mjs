@@ -122,7 +122,14 @@ assert.doesNotMatch(plans, /Student Basic active'[^]*result\.ok/);
 // 11. Refresh Access is backend-first and refreshes quota/status before reporting success.
 assert.match(subscriptions, /\/api\/iap\/entitlement/);
 assert.match(subscriptions, /\/api\/iap\/restore/);
-assert.match(subscriptions, /await boundedPaymentTask\(\(\) => syncIOS\(\)/);
+// Restore is query-first: the local StoreKit history is read before the sign-in-forcing sync, which is only a
+// best-effort, active-time-bounded fallback (Build 65).
+assert.match(subscriptions, /await boundedActiveTimeTask\(\(\) => syncIOS\(\)/);
+assert.doesNotMatch(subscriptions, /boundedPaymentTask\(\(\) => syncIOS\(\)/);
+assert.ok(
+  subscriptions.indexOf('let eligible = await queryEligible()') < subscriptions.indexOf('boundedActiveTimeTask(() => syncIOS()'),
+  'restore must query StoreKit history before falling back to syncIOS',
+);
 assert.match(plans, /const result = await subscriptionService\.restore\(identity\.token, identity\.account\);[\s\S]*const refreshedStatus = await refreshPaymentStatus\(\);/);
 assert.match(plans, /plans\.refreshAccess/);
 

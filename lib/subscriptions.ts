@@ -22,7 +22,7 @@ import { fetchSubscriptionAvailability, canPurchaseSubscription } from './subscr
 import { API_BASE_URL } from './config';
 import { boundedFetch, BoundedFetchTimeoutError, isBoundedFetchTimeout, SUBSCRIPTION_FETCH_TIMEOUT_MS } from './boundedFetch';
 import { boundedVoidTask } from './boundedTask';
-import { boundedPaymentTask, PaymentTaskTimeoutError } from './boundedPaymentTask';
+import { boundedActiveTimeTask, boundedPaymentTask, PaymentTaskTimeoutError } from './boundedPaymentTask';
 import { logDiag } from './iapDiag';
 import { logIap } from './iapLog';
 import type { BackendEntitlement, EntitlementResponse } from './purchases';
@@ -93,7 +93,10 @@ type VerifyResponse = {
 
 const PURCHASE_TIMEOUT_MS = 120_000;
 const STOREKIT_OPERATION_TIMEOUT_MS = 15_000;
-const STOREKIT_SYNC_TIMEOUT_MS = 30_000;
+// syncIOS (AppStore.sync) forces Apple Account sign-in, so it can wait on the person. Only foreground-active time counts
+// against the budget; the wall-clock backstop guarantees Restore can never hang forever.
+const STOREKIT_SYNC_ACTIVE_BUDGET_MS = 60_000;
+const STOREKIT_SYNC_BACKSTOP_MS = 180_000;
 // finishTransaction is a native StoreKit bridge call with no bound of its own
 // (ExpoIapModule.finishTransaction). By the time it's called here the backend
 // has ALREADY granted (or definitively rejected) the entitlement, so nothing
@@ -614,12 +617,26 @@ class SubscriptionService {
       // Do not verify the same callback concurrently with an explicit restore.
       await Promise.all(this.lateVerifications.values());
       await this.connect();
-      await boundedPaymentTask(() => syncIOS(), STOREKIT_SYNC_TIMEOUT_MS, 'restore_sync');
-      const purchases = ((await boundedPaymentTask(
+      const queryEligible = async () => (((await boundedPaymentTask(
         () => getAvailablePurchases({ onlyIncludeActiveItemsIOS: false }),
         STOREKIT_OPERATION_TIMEOUT_MS, 'restore_query',
-      )) as Purchase[] | null) ?? [];
-      const eligible = purchases.filter((purchase) => ALL_RESTORABLE_IDS.has(purchase.productId) && purchaseToken(purchase));
+      )) as Purchase[] | null) ?? []).filter((purchase) => ALL_RESTORABLE_IDS.has(purchase.productId) && purchaseToken(purchase));
+      // Query first: it is a local read that never prompts. Only when it finds nothing is Apple's explicit sync worth
+      // its sign-in prompt, and then it is best-effort: whatever it does, the local history is read exactly once more.
+      let eligible = await queryEligible();
+      if (eligible.length === 0) {
+        let syncFailed = false;
+        try {
+          await boundedActiveTimeTask(() => syncIOS(), STOREKIT_SYNC_ACTIVE_BUDGET_MS, STOREKIT_SYNC_BACKSTOP_MS, 'restore_sync', AppState);
+        } catch {
+          syncFailed = true;
+        }
+        eligible = await queryEligible();
+        if (eligible.length === 0 && syncFailed) {
+          logDiag('restore_query_failed', { reason: 'sync_incomplete' });
+          return result('storekit_error', 'Apple Account sign-in was not completed. Restore again and sign in when prompted.');
+        }
+      }
       querying = false;
       logDiag('verify_started', { source: 'restore' });
       const admissions = new Map<string, string | null>();

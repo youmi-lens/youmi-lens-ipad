@@ -37,7 +37,11 @@ export function paymentHarness() {
     setTimeout(fn, ms) { timers.set(++nextTimer, { fn, due: time + ms }); return nextTimer; },
     clearTimeout(id) { timers.delete(id); },
   };
-  const appState = { currentState: 'active' };
+  const appStateListeners = new Set();
+  const appState = { currentState: 'active',
+    addEventListener: (_type, fn) => { appStateListeners.add(fn); return { remove: () => appStateListeners.delete(fn) }; },
+    setState(next) { appState.currentState = next; [...appStateListeners].forEach((fn) => fn(next)); },
+    listenerCount: () => appStateListeners.size };
   const iap = {
     initConnection: async () => { state.initCalls += 1; return true; },
     endConnection: async () => true,
