@@ -1,132 +1,153 @@
-# Youmi Lens for iPad — V1
+# Youmi Lens for iPad
 
-An iPad-first **AI lecture companion for international students**. Youmi Lens
-helps students create courses, record lectures locally, and later generate
-transcripts and bilingual summaries after class.
+An iPad-first **AI lecture companion for international students**.
 
-> **Current scope:** local course/lecture persistence, local microphone
-> recording, and Supabase hybrid auth are wired. Upload, transcription,
-> summaries, live captions, and backend processing are not connected yet.
+> **This is the canonical Youmi Lens iPad / iOS client repository.**  
+> The Desktop / Web / Backend side of Youmi Lens lives in
+> **[youmi-lens/youmi-lens](https://github.com/youmi-lens/youmi-lens)**. It
+> contains the macOS/Windows app, the website, the API server and the Supabase
+> schema that this app talks to.
 
-This is a **separate client project** from the existing Youmi Lens macOS/Tauri app.
+Youmi Lens helps students record lectures, follow live captions, keep their
+notes and course materials together, and review AI-generated transcripts and
+bilingual (EN + ZH) summaries after class.
 
-## Getting started
+## Platforms
 
-Create a local `.env` file from the example before launching Expo:
+| Platform | Repository | Stack |
+| --- | --- | --- |
+| iPad / iOS | **[youmi-lens/youmi-lens-ipad](https://github.com/youmi-lens/youmi-lens-ipad)** (this repo) | Expo (SDK 54) / React Native / TypeScript, Expo Router |
+| Desktop (macOS, Windows) / Web / Backend | [youmi-lens/youmi-lens](https://github.com/youmi-lens/youmi-lens) | React + Vite, Tauri 2, Node API server |
 
-```bash
-cp .env.example .env
-```
+The two repositories use **different tooling**; follow the instructions in each
+repo. They share one account system and one backend, so a change to an API,
+entitlement rule or database contract in either repository may affect the other.
+Check the sibling repo before changing a shared contract (see
+`docs/cloud-library-contract.md`).
 
-Fill in the public Supabase project values:
+## What the app does
 
-```bash
-EXPO_PUBLIC_SUPABASE_URL=your_supabase_project_url
-EXPO_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_public_key
-```
+- Courses and lectures, kept locally and synced to the cloud library
+- Lecture recording, including a native durable recorder module, with live captions
+- Post-class processing: transcripts and bilingual summaries (via the shared backend)
+- Course materials with PDF and Apple Pencil annotation, plus lecture notebooks
+- Recently Deleted (soft delete, synced across devices)
+- Accounts via Supabase Auth: email + password, Sign in with Apple, Google
+- Subscriptions via Apple StoreKit / IAP, with entitlements decided by the backend
 
-Use only the **anon public key** in the app. Never place a Supabase service role
-key, Brevo SMTP credential, or any server-only secret in this client project.
+## Repository structure
+
+| Path | What lives here |
+| --- | --- |
+| `app/` | Expo Router routes: tabs (Record, Courses, Settings), recording, lecture, course, material, plans, auth |
+| `components/` | Reusable UI |
+| `lib/` | App logic: auth, sync, recording, billing/purchases, i18n, API client (`config.ts`) |
+| `modules/` | Local native Expo modules (durable recorder, PDF annotation, Pencil interaction, word lookup, …) |
+| `plugins/` | Expo config plugins |
+| `constants/`, `data/` | Theme and responsive constants, mock data |
+| `storekit/` | Local StoreKit configuration for testing |
+| `supabase/` | SQL migrations and rollbacks owned by this app |
+| `scripts/` | Test suites (`*.test.mjs`) and verification tooling |
+| `docs/` | Contracts, billing notes and `docs/verification/` (native recording verification) |
+
+## Development setup
+
+### Prerequisites
+
+- **Node.js 22+** and npm (the test scripts use `node --experimental-strip-types`)
+- **macOS with Xcode** for simulator or device builds
+- An **Apple Developer** setup for running on a physical iPad (ask the project lead)
+
+### Install
 
 ```bash
 npm install
-npx expo start
+cp .env.example .env   # then fill in your own values
 ```
 
-Then press `i` to open the iOS Simulator (use an **iPad** device for the
-intended layout), or scan the QR code with Expo Go.
+Environment variables (names only; `.env` is git-ignored):
 
-## Auth model
-
-The iPad app uses a hybrid flow:
-
-### Create Profile
-
-1. The user enters username, email, password, and password confirmation.
-2. The app sends a signup verification code with `signInWithOtp({ email, options: { shouldCreateUser: true } })`.
-3. The user enters the numeric verification code from email.
-4. The app verifies the code with `verifyOtp({ email, token, type: 'email' })`.
-5. After verification creates a session, the app sets the chosen password and username with `updateUser({ password, data: { username } })`.
-
-### Sign In
-
-Returning users sign in with email + password through `signInWithPassword`. Normal sign-in does not require a code.
-
-The callback route remains in the codebase for possible future magic-link support, but it is not the main iPad auth path.
-
-## Email template for create-profile verification
-
-The iPad **Create Profile** flow needs a verification code in the email template. In Supabase Email Templates, include:
-
-```text
-{{ .Token }}
-```
-
-Normal sign-in uses email + password and does not send a code. Supabase documents `{{ .Token }}` as the OTP variable and `{{ .ConfirmationURL }}` as a link variable.
-
-Supabase/Brevo SMTP remains configured in the Supabase dashboard. No SMTP credentials belong in the Expo app.
-
-## Username persistence
-
-During Create Profile, username is first kept as pending local state; the password is kept only in React component state and is never written to AsyncStorage.
-After verification succeeds, the username is stored in auth user metadata and the app attempts a best-effort upsert into:
-
-```text
-profiles(id, username, updated_at)
-```
-
-If the `profiles` table or row-level policy is missing, login still succeeds. Settings falls back from profile username to auth metadata username, then to **No username set**.
-
-## Testing auth in Expo Go
-
-1. Create `.env` with the shared Supabase project URL and anon public key.
-2. In Supabase, configure the create-profile verification email template to include `{{ .Token }}`.
-3. Start the app with `npx expo start`, then open it in Expo Go on an iPad.
-4. Under **Create Profile**, enter username, email, password, and matching confirmation, then tap **Send verification code**.
-5. Open the email, copy the verification code, enter it in the app, and tap **Verify and create account**.
-6. Open **Settings** to confirm the signed-in email and username display.
-7. Tap **Sign Out** and verify the app returns to auth while local courses and lectures remain intact.
-8. Under **Sign In**, use the same email and password; no code should be required.
-
-## Stack
-
-- Expo (SDK 54) + React Native + TypeScript
-- Expo Router (file-based navigation, bottom tabs)
-- Built-in React Native styling — no UI framework
-- `@expo/vector-icons` (Ionicons) for icons
-- Supabase JS auth client with AsyncStorage-backed session persistence
-
-## Screens
-
-| Route | Screen |
+| Variable | Purpose |
 | --- | --- |
-| `/` (Record tab) | Record Home — greeting, course selector, Start Recording, recent lectures, plan |
-| `/courses` (tab) | Courses list |
-| `/settings` (tab) | Account, plan, language, sync |
-| `/auth` | Hybrid create-profile / sign-in auth |
-| `/recording` | Focus Recording — timer, live captions, mark important, pause/finish |
-| `/mini-caption` | Mini Caption Mode — floating panel over a note-taking background |
-| `/processing` | Post-class processing steps |
-| `/lecture/[id]` | Lecture Detail — Transcript / Summary / Key Points / Notes tabs |
+| `EXPO_PUBLIC_SUPABASE_URL`, `EXPO_PUBLIC_SUPABASE_ANON_KEY` | Supabase project. **Anon key only.** |
+| `EXPO_PUBLIC_API_BASE_URL` | Backend API origin (from the desktop/backend repo's `server/`) |
+| `EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID`, `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID` | Google sign-in client IDs |
+| `EXPO_PUBLIC_NATIVE_RECORDER_DOGFOOD`, `EXPO_PUBLIC_RECORDING_ROLLOUT_REMOTE` | Recording rollout flags; leave at the defaults in `.env.example` unless told otherwise |
 
-## Project structure
+Everything prefixed `EXPO_PUBLIC_` is bundled into the app and therefore
+public. **Never** put a Supabase service-role key, Apple/App Store Connect
+credentials, signing material or any other server-only secret in this project.
+Development builds are guarded against silently pointing at the production
+Supabase project (`npm run test:envguard`); use a development or staging
+project.
+
+### Run
+
+This app uses custom native modules, so **Expo Go cannot run it**. Use a native
+development build:
+
+```bash
+npm run ios                                        # expo run:ios (simulator or device)
+APP_VARIANT=development npx expo run:ios --device "<device name>"
+                                                   # side-by-side "Youmi Lens Dev" build that
+                                                   # does not replace the real app on a device
+npx expo start                                     # Metro bundler for an installed dev build
+```
+
+EAS build profiles (`development`, `development-simulator`, `preview`,
+`production`, …) are defined in `eas.json`. Production and TestFlight builds are
+release work: do not trigger them without the project lead's go-ahead.
+
+### Checks
+
+```bash
+npx tsc --noEmit        # type-check
+npm run lint            # expo lint
+npm run test:recording  # any change touching recording (~7s, no device needed)
+npm run test:payment    # any change touching purchases / subscriptions
+npm run test:auth       # sign-up, account deletion, account client
+```
+
+Other suites are available as `npm run test:<name>` (see `package.json`, for
+example `test:deletion-sync`, `test:i18n`, `test:envguard`). Run the suites that
+cover the area you changed before opening a PR. Recording-specific verification
+steps and the release gate are documented in `docs/verification/`.
+
+## Development workflow
 
 ```
-app/                 Expo Router routes
-  (tabs)/            Bottom tab screens (Record, Courses, Settings)
-  recording.tsx      Focus Recording
-  mini-caption.tsx   Mini Caption Mode
-  processing.tsx     Processing
-  lecture/[id].tsx   Lecture Detail
-components/          Reusable UI (BrandHeader, GlassCard, PrimaryButton, …)
-constants/theme.ts   Colors, spacing, radius, shadows, type scale
-data/mockData.ts     Placeholder courses, lectures, captions
-lib/format.ts        Small formatting helpers
-lib/auth.tsx         Supabase auth state and actions
-lib/supabase.ts      Supabase client setup with Expo persistence
+Issue / task → dedicated branch → implementation → tests → Pull Request → review → Squash merge
 ```
 
-## Brand
+- `main` is protected by repository rules: changes go through a Pull Request and
+  are squash-merged. **Do not develop directly on `main`** and **never force-push
+  it**.
+- **One task, one clear owner.** Keep each PR scoped to its assigned task.
+- Create a branch per task (for example `feat/…`, `fix/…`, `docs/…`).
+- Run the relevant checks locally before opening the PR, and describe what you
+  tested in the PR.
+- Product and engineering direction is coordinated by the project lead.
+  High-risk changes (below) get additional review before merging.
 
-Deep navy (`#061B34`) on soft ice-white, frosted-glass cards, rounded corners,
-soft shadows, thin borders. Calm and professional — no purple, no gradients.
+## High-risk areas
+
+Take extra care, add or run the matching tests, and request extra review when
+touching:
+
+- **Recording and audio durability** (`modules/expo-durable-recorder`,
+  recording code in `lib/`, see `docs/verification/`)
+- **Payments**: StoreKit / IAP, subscriptions, restore purchases
+- **Entitlement and quota logic** (the backend is the entitlement authority)
+- **Authentication and account deletion**
+- **Database schema and migrations** (`supabase/`), shared with the backend repo
+- **Production configuration**: `app.json`, `eas.json`, bundle identifiers, entitlements
+- **Apple signing, provisioning and release configuration**
+
+Do not change bundle identifiers, product IDs, prices or quotas as part of
+unrelated work. Never commit credentials, signing keys or production data.
+
+## Contributing
+
+There is no separate `CONTRIBUTING.md` yet; the workflow above is the
+contributor guide. Open an issue or ask the project lead before starting
+anything large or touching a high-risk area.
