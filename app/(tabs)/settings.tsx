@@ -20,8 +20,10 @@ import { formatDate } from '@/lib/format';
 import { ensureGuestIapIdentity, hasGuestIapIdentity } from '@/lib/guestIap';
 import { useI18n } from '@/lib/i18n';
 import { fetchPlanStatus, PlanStatus, safeAccessLabel } from '@/lib/planStatus';
+import { usePaymentStatusExpiry } from '@/lib/usePaymentStatusExpiry';
 import { BillingRequestIdentity } from '@/lib/billingRequestIdentity';
 import { subscriptionService } from '@/lib/subscriptions';
+import { subscriptionReconciliation } from '@/lib/subscriptionReconciliation';
 import { boundedPaymentTask, PAYMENT_UI_WAIT_TIMEOUT_MS } from '@/lib/boundedPaymentTask';
 import { logDiag } from '@/lib/iapDiag';
 import { useData } from '@/lib/store';
@@ -139,8 +141,8 @@ export default function SettingsScreen() {
   statusIdentity.setIdentity(screenIdentity);
   restoreIdentity.setIdentity(screenIdentity);
   const [statusAccountId, setStatusAccountId] = useState<string | null>(null);
-  const planStatus = statusAccountId === screenIdentity && !isGuest ? storedPlanStatus : null;
-  const guestPlanStatus = statusAccountId === screenIdentity && isGuest ? storedGuestPlanStatus : null;
+  const cachedPlanStatus = statusAccountId === screenIdentity && !isGuest ? storedPlanStatus : null;
+  const cachedGuestPlanStatus = statusAccountId === screenIdentity && isGuest ? storedGuestPlanStatus : null;
   useEffect(() => {
     setPlanStatus(null); setGuestPlanStatus(null); setStatusAccountId(null); setPlanError(null); setRestoringPurchases(false);
   }, [screenIdentity]);
@@ -191,6 +193,12 @@ export default function SettingsScreen() {
       // never-purchased guest — never a blocking error for a read-only check.
     }
   }, [statusIdentity]);
+  const planStatus = usePaymentStatusExpiry(cachedPlanStatus, loadPlan);
+  const guestPlanStatus = usePaymentStatusExpiry(cachedGuestPlanStatus, loadGuestPlan);
+  useEffect(() => subscriptionReconciliation.subscribe((change) => {
+    if (change.subject !== screenIdentity) return;
+    if (isGuest) void loadGuestPlan(); else void loadPlan();
+  }), [screenIdentity, isGuest, loadGuestPlan, loadPlan]);
   // Bumped once per tab focus, never by plan/account data — the page
   // heading's entrance below keys on this alone.
   const [focusKey, setFocusKey] = useState(0);

@@ -107,7 +107,15 @@ export function isFreeTrialPaymentMode(product: LoadedSubscriptionProduct | null
  * text (e.g. "$0.00") or from the product name.
  */
 export function isTrialAvailable(product: LoadedSubscriptionProduct | null, eligible: boolean): boolean {
-  return eligible === true && isFreeTrialPaymentMode(product);
+  if (eligible !== true || !isFreeTrialPaymentMode(product) || !product) return false;
+  const period = product.introductoryPriceSubscriptionPeriodIOS;
+  const count = Number(product.introductoryPriceNumberOfPeriodsIOS);
+  // The UI promises one month. Fail closed when StoreKit reports a different or unknown offer duration.
+  if (typeof period === 'string') return period.toLowerCase() === 'month' && count === 1;
+  if (period && typeof period === 'object' && 'unit' in period && 'value' in period) {
+    return String(period.unit).toLowerCase() === 'month' && Number(period.value) === 1 && count === 1;
+  }
+  return false;
 }
 
 export function isUuid(value: string | null | undefined): value is string {

@@ -22,7 +22,7 @@ export async function flush() {
  * Handler functions are located by the TS AST and executed verbatim with their
  * closure dependencies, avoiding a second implementation of the UI workflow.
  */
-export function paymentHarness() {
+export function paymentHarness({ storage = new Map() } = {}) {
   const cache = new Map();
   const timers = new Map();
   const updates = new Set();
@@ -33,6 +33,23 @@ export function paymentHarness() {
   let nextTimer = 0;
   const state = { requests: [], http: [], finishes: [], diagnostics: [], alerts: [], busy: null,
     restoring: false, refreshes: 0, active: false, initCalls: 0, purchases: [], statusLoading: false, planLoading: false };
+  state.authValue = { session: { access_token: 'external-test-token' }, user: { id: ACCOUNT }, isGuest: false, loading: false };
+  let effectCursor = 0;
+  const effects = [];
+  const nextEffects = [];
+  const react = { useEffect(fn, deps) { nextEffects[effectCursor++] = { fn, deps }; } };
+  function renderHook(hook) {
+    effectCursor = 0;
+    hook();
+    for (let i = 0; i < effectCursor; i++) {
+      const next = nextEffects[i], old = effects[i];
+      if (!old || next.deps.some((dep, j) => dep !== old.deps[j])) {
+        old?.cleanup?.();
+        effects[i] = { deps: next.deps, cleanup: next.fn() };
+      }
+    }
+  }
+  function unmountHook() { for (const effect of effects) effect.cleanup?.(); effects.length = 0; }
   const clock = {
     setTimeout(fn, ms) { timers.set(++nextTimer, { fn, due: time + ms }); return nextTimer; },
     clearTimeout(id) { timers.delete(id); },
@@ -77,7 +94,9 @@ export function paymentHarness() {
   const auth = { getSession: async () => ({ data: { session: { access_token: 'external-test-token', user: { id: ACCOUNT } } } }) };
   const log = { log(...args) { if (args[0] === '[iap-diag]') state.diagnostics.push(args.slice(1)); }, warn() {} };
   const mocks = new Map([
-    ['@react-native-async-storage/async-storage', { default: { setItem: async()=>{},getItem:async()=>null } }],
+    ['@react-native-async-storage/async-storage', { default: { setItem: async(k,v)=>{storage.set(k,v);},getItem:async(k)=>storage.get(k)??null } }],
+    ['react', react],
+    [resolve(root, 'lib/auth.ts'), { useAuth: () => state.authValue }],
     ['expo-iap', iap], ['react-native', { Platform: { OS: 'ios' }, AppState: appState }],
     [resolve(root, 'lib/config.ts'), { API_BASE_URL: 'https://payment-test.invalid' }],
     [nativeErrorModule, { NATIVE_ERROR_CODES: {} }],
@@ -126,6 +145,18 @@ export function paymentHarness() {
     } }).outputText;
     return new Function(...Object.keys(scope), `${js}\nreturn actualHandler;`)(...Object.values(scope));
   }
+  function effect(file, fragment, scope) {
+    const source = ts.createSourceFile(file, readFileSync(resolve(root, file), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    let body;
+    const visit = (node) => {
+      if (ts.isCallExpression(node) && node.expression.getText(source) === 'useEffect' && node.arguments[0]?.getText(source).includes(fragment)) body = node.arguments[0];
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+    assert.ok(body, `Production effect containing ${fragment} exists`);
+    const js = ts.transpileModule(`const actualEffect = ${body.getText(source)};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+    return new Function(...Object.keys(scope), `${js}\nreturn actualEffect;`)(...Object.values(scope));
+  }
   const Guard = load('lib/billingRequestIdentity.ts').BillingRequestIdentity;
   const actionIdentity=new Guard(), restoreIdentity=new Guard(), statusIdentity=new Guard(), signedRequestIdentity=new Guard();
   for(const guard of [actionIdentity,restoreIdentity,statusIdentity,signedRequestIdentity])guard.setIdentity(ACCOUNT);
@@ -163,7 +194,7 @@ export function paymentHarness() {
       accessMessageForStatus: handler('app/plans.tsx', 'accessMessageForStatus', common), ...overrides,
     })();
   }
-  return { actionIdentity, restoreIdentity, statusIdentity, signedRequestIdentity, common, service, iap, state, load, handler, response, settingsRestore, plansAction, appState, timers, auth,
+  return { actionIdentity, restoreIdentity, statusIdentity, signedRequestIdentity, common, service, iap, state, load, handler, effect, renderHook, unmountHook, storage, response, settingsRestore, plansAction, appState, timers, auth,
     transaction: (product = MONTHLY, id = 'test-transaction') => ({ ...transaction(product, id), transactionDate: ClockDate.now() }),
     emit: (purchase) => [...updates].forEach((fn) => fn(purchase)),
     error: (error) => [...errors].forEach((fn) => fn(error)),

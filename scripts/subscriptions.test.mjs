@@ -169,3 +169,18 @@ test('isTrialAvailable requires BOTH eligibility AND free-trial payment mode', (
   assert.equal(isTrialAvailable(null, true), false);
 });
 
+
+// Do not advertise a one-month offer when Apple reports different terms.
+test('one-month trial copy requires the exact StoreKit duration', () => {
+  for (const override of [
+    { introductoryPriceSubscriptionPeriodIOS: 'week' },
+    { introductoryPriceSubscriptionPeriodIOS: null },
+    { introductoryPriceNumberOfPeriodsIOS: '2' },
+    { introductoryPriceSubscriptionPeriodIOS: { unit: 'month', value: 3 } },
+  ]) {
+    const catalog = normalizeSubscriptionCatalog([{ ...monthlyWithTrial, ...override }], SUBSCRIPTION_PRODUCTS);
+    assert.equal(isTrialAvailable(catalog.monthly, true), false);
+  }
+  const catalog = normalizeSubscriptionCatalog([{ ...monthlyWithTrial, introductoryPriceSubscriptionPeriodIOS: 'month' }], SUBSCRIPTION_PRODUCTS);
+  assert.equal(isTrialAvailable(catalog.monthly, true), true);
+});

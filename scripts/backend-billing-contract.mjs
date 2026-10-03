@@ -25,7 +25,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 export const FIXTURE_URL = new URL('./fixtures/backend-billing-contract.json', import.meta.url);
-const MIGRATION = 'supabase/migrations/20261003011254_billing_atomic_subscription_persistence.sql';
+const MIGRATION = 'supabase/migrations/20261003190154_payment_delivery_recovery.sql';
 const SUBSCRIPTIONS = 'server/iapSubscriptions.mjs';
 const ROUTES = 'server/iapRoutes.mjs';
 
@@ -73,7 +73,7 @@ export function extractContract(backend, revision) {
       backendRepository: 'https://github.com/youmi-lens/youmi-lens',
       revision: full,
       revisionSubject: git(backend, ['log', '-1', '--format=%s', full]).trim(),
-      note: 'Billing permanent-hardening revision; pull request youmi-lens/youmi-lens#47. Ownership behaviour is enforced by the backend subscriptionAtomic.test.mjs (real PostgreSQL).',
+      note: 'Payment delivery-recovery revision (branch codex/payment-engineering-closure); its migration replaces the persist_verified_subscription of the earlier atomic-persistence migration. Ownership behaviour is enforced by the backend subscriptionAtomic.test.mjs (real PostgreSQL). The pinned commit is a pull-request head: after a squash merge its tree, not its SHA, is on main.',
       files: {
         [SUBSCRIPTIONS]: blob(backend, full, SUBSCRIPTIONS),
         [ROUTES]: blob(backend, full, ROUTES),

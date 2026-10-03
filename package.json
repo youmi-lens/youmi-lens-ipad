@@ -11,7 +11,7 @@
     "lint": "expo lint",
     "test:phase3": "node scripts/phase3-purchases.test.mjs",
     "test:subscriptions": "node --experimental-strip-types --test scripts/subscriptions.test.mjs",
-    "test:payment": "node --experimental-strip-types --test scripts/payment-hardening.test.mjs scripts/subscriptions.test.mjs scripts/purchase-stall-fix.test.mjs scripts/finish-transaction-bound.test.mjs scripts/restore-purchase-bound.test.mjs scripts/phase3-purchases.test.mjs scripts/storekit-presentation.test.mjs scripts/guest-purchase-architecture.test.mjs scripts/subscription-live-gate.test.mjs scripts/free-trial-ux.test.mjs",
+    "test:payment": "node --experimental-strip-types --test scripts/subscription-auto-reconciliation.test.mjs scripts/payment-hardening.test.mjs scripts/subscriptions.test.mjs scripts/purchase-stall-fix.test.mjs scripts/finish-transaction-bound.test.mjs scripts/restore-purchase-bound.test.mjs scripts/phase3-purchases.test.mjs scripts/storekit-presentation.test.mjs scripts/guest-purchase-architecture.test.mjs scripts/subscription-live-gate.test.mjs scripts/free-trial-ux.test.mjs scripts/payment-lifecycle-closure.test.mjs scripts/subscription-permanent-hardening.test.mjs scripts/iap-linked-rejection-second-attempt.test.mjs scripts/iap-late-ownership-rejection-settles-attempt.test.mjs",
     "test:i18n": "node scripts/i18n.test.mjs",
     "test:auth": "node --experimental-strip-types scripts/auth-signup.test.mjs && node --experimental-strip-types scripts/account-deletion.test.mjs && node --experimental-strip-types scripts/account-client.test.mjs",
     "test:recording": "node scripts/verify-recording.mjs",

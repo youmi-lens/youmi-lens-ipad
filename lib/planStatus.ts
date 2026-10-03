@@ -89,10 +89,23 @@ type QuotaStatusResponse = {
 
 const STUDENT_PASS_PRODUCT_ID = 'com.aydenz.youmilensipad.studentbasic30d';
 
-export function normalizePlanStatus(plan: PlanStatus): PlanStatus {
-  if (plan.studentPassActive !== true) return plan;
-
+export function normalizePlanStatus(plan: PlanStatus, nowMs = Date.now()): PlanStatus {
   const expiry = plan.studentPassExpiry ?? plan.entitlement?.expiresAt ?? null;
+  const expired = expiry !== null && Number.isFinite(Date.parse(expiry)) && Date.parse(expiry) <= nowMs;
+  const revoked = plan.entitlement?.revoked || plan.entitlement?.revocationAt ||
+    ['revoked', 'refunded'].includes(plan.entitlement?.status ?? '');
+  if (expired || revoked) {
+    const subscriptionTier = plan.planType === 'student_pass';
+    return {
+      ...plan, studentPassActive: false,
+      ...(subscriptionTier ? { planType: 'public_trial', displayName: 'Student Access' } : {}),
+      ...(plan.entitlement ? { entitlement: { ...plan.entitlement, active: false,
+        status: revoked ? plan.entitlement.status || 'revoked' : 'expired' } } : {}),
+    };
+  }
+  // The backend has already applied admin precedence. Never relabel that plan.
+  if (plan.studentPassActive !== true || ['admin', 'developer'].includes(plan.planType)) return plan;
+
   const quota = plan.quota;
 
   return {
@@ -102,7 +115,7 @@ export function normalizePlanStatus(plan: PlanStatus): PlanStatus {
     entitlement: {
       ...plan.entitlement,
       active: true,
-      status: 'active',
+      status: plan.entitlement?.status || 'active',
       productId: plan.entitlement?.productId ?? STUDENT_PASS_PRODUCT_ID,
       planType: plan.entitlement?.planType ?? 'student_pass',
       expiresAt: expiry,

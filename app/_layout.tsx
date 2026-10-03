@@ -10,6 +10,7 @@ import { TutorialOverlay } from '@/components/TutorialOverlay';
 import { TutorialTourOverlay } from '@/components/TutorialTourOverlay';
 import { colors } from '@/constants/theme';
 import { AuthProvider, useAuth } from '@/lib/auth';
+import { useSubscriptionReconciliation } from '@/lib/useSubscriptionReconciliation';
 import { I18nProvider } from '@/lib/i18n';
 import { LiveCaptionsProvider } from '@/lib/liveCaptions';
 import { useProcessingOrchestrator } from '@/lib/useProcessingOrchestrator';
@@ -64,6 +65,7 @@ export default function RootLayout() {
       <SafeAreaProvider>
         <I18nProvider>
         <AuthProvider>
+          <SubscriptionReconciliationHost />
           <LiveCaptionsProvider>
             <DataProvider>
               <RecordingNotesProvider>
@@ -84,6 +86,11 @@ export default function RootLayout() {
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );
+}
+
+function SubscriptionReconciliationHost() {
+  useSubscriptionReconciliation();
+  return null;
 }
 
 /**
