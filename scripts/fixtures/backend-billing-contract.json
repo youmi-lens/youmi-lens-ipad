@@ -1,0 +1,57 @@
+{
+  "provenance": {
+    "backendRepository": "https://github.com/youmi-lens/youmi-lens",
+    "revision": "b87f0dcab370b96cbddbd05dcd55803551ac71fa",
+    "revisionSubject": "fix: atomically authorize subscription ownership and monotonic state",
+    "note": "Billing permanent-hardening revision; pull request youmi-lens/youmi-lens#47. Ownership behaviour is enforced by the backend subscriptionAtomic.test.mjs (real PostgreSQL).",
+    "files": {
+      "server/iapSubscriptions.mjs": "9cf87c3641b3989cadc7de951e03767522acd0b0",
+      "server/iapRoutes.mjs": "be207edefb560abbfd2da35c5d3b1e1617c35796",
+      "supabase/migrations/20261003011254_billing_atomic_subscription_persistence.sql": "3b22c2030b088bbc43b80df98427f63b3de630c2"
+    }
+  },
+  "subscriptions": {
+    "verifyAndPersistSubscription": "export async function verifyAndPersistSubscription(db, userId, verified, options = {}) {\n  return persistAtomic(db, userId, verified, options)\n}"
+  },
+  "routes": {
+    "fragments": {
+      "already-linked-class": {
+        "line": 83,
+        "text": "class AlreadyLinkedError extends Error {}"
+      },
+      "already-linked-code": {
+        "line": 247,
+        "text": "return { status: 409, error: 'iap_already_linked', message: 'This App Store purchase is already linked to another account.' }"
+      }
+    },
+    "echoesSignedPayloadInJson": false
+  },
+  "migration": {
+    "fragments": {
+      "token-must-match-user": {
+        "line": 196,
+        "text": "if v_token<>p_user_id then raise exception 'subscription_token_mismatch' using errcode='P0001'; end if;"
+      },
+      "owner-conflict-guard": {
+        "line": 221,
+        "text": "if v_notification or v_caller_anonymous or not v_owner_anonymous then"
+      },
+      "owner-conflict-raise": {
+        "line": 118,
+        "text": "raise exception 'subscription_owner_conflict' using errcode='P0001';"
+      },
+      "promotion-checks-anonymous-owner": {
+        "line": 220,
+        "text": "v_owner_anonymous=billing_private.lock_auth_identity(b.user_id);"
+      },
+      "promotion-retires-guest-state": {
+        "line": 227,
+        "text": "update public.app_store_subscription_states set status='expired',apple_event_at=greatest(apple_event_at,v_event)"
+      },
+      "promotion-scoped-to-old-owner": {
+        "line": 230,
+        "text": "where original_transaction_id=v_original and user_id=b.user_id and owner_state='active' returning * into b;"
+      }
+    }
+  }
+}

@@ -17,6 +17,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
+import { loadFixture } from './backend-billing-contract.mjs';
+
 let passed = 0;
 const check = (label, fn) => { fn(); passed += 1; console.log(`  ok  ${label}`); };
 const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
@@ -27,8 +29,12 @@ const guestIap = read('../lib/guestIap.ts');
 const guestIapClient = read('../lib/guestIapClient.ts');
 const authLib = read('../lib/auth.tsx');
 const storeLib = read('../lib/store.tsx');
-const iapSubscriptions = read('../../youmi-lens/server/iapSubscriptions.mjs');
-const iapRoutes = read('../../youmi-lens/server/iapRoutes.mjs');
+// The backend facts below come from a fixture pinned to one backend revision (scripts/fixtures/backend-billing-contract.json,
+// regenerated/verified by scripts/backend-billing-contract.mjs against an explicitly named backend checkout) — never
+// from a sibling checkout, so this test is identical on every machine and in CI.
+const backend = loadFixture();
+const iapSubscriptions = backend.subscriptions.verifyAndPersistSubscription;
+const iapRoutes = Object.values(backend.routes.fragments).map((fragment) => fragment.text).join('\n');
 
 console.log('B — isolated client design');
 check('a SECOND createClient exists, pointed at the same project, with its OWN distinct storage key', () => {
@@ -128,7 +134,7 @@ check('a genuine ownership conflict (different pre-existing account) is DETECTED
 
 console.log('\nG7/G8 — backend ownership: Guest cross-device restore fixed, permanent-account anti-theft intact');
 // Ownership now runs through a single database operation for guests and permanent users.
-const ownershipSql = read('../../youmi-lens/supabase/migrations/20261003011254_billing_atomic_subscription_persistence.sql');
+const ownershipSql = Object.values(backend.migration.fragments).map((fragment) => fragment.text).join('\n');
 check('G7: every guest/permanent claim uses atomic ownership and state persistence', () => {
   const fn = iapSubscriptions.slice(iapSubscriptions.indexOf('export async function verifyAndPersistSubscription'));
   assert.match(fn, /return persistAtomic\(db, userId, verified, options\)/);
@@ -151,6 +157,23 @@ check('AlreadyLinkedError / already-linked responses are still wired through the
 });
 check('no JWS/receipt payload is echoed back to the client (unchanged security posture)', () => {
   assert.doesNotMatch(iapRoutes, /res\.json\(\{[^}]*signedPayload/);
+  // Whole-file negative: computed from the full backend routes file at the pinned revision (see the verifier script).
+  assert.equal(backend.routes.echoesSignedPayloadInJson, false);
+});
+
+console.log('\nBackend contract provenance (pinned, machine-independent)');
+const PINNED_BACKEND_REVISION = 'b87f0dcab370b96cbddbd05dcd55803551ac71fa';
+const PINNED_MIGRATION = 'supabase/migrations/20261003011254_billing_atomic_subscription_persistence.sql';
+check('the backend contract is pinned to the billing permanent-hardening revision and its atomic-persistence migration', () => {
+  assert.equal(backend.provenance.revision, PINNED_BACKEND_REVISION);
+  assert.ok(Object.hasOwn(backend.provenance.files, PINNED_MIGRATION), 'the atomic persistence migration is part of the pinned contract');
+  for (const blob of Object.values(backend.provenance.files)) assert.match(blob, /^[0-9a-f]{40}$/);
+});
+check('every pinned fragment is non-empty and nothing machine-specific is embedded in the fixture', () => {
+  const fragments = [...Object.values(backend.migration.fragments), ...Object.values(backend.routes.fragments)];
+  assert.equal(fragments.length, 8);
+  for (const fragment of fragments) { assert.ok(fragment.text.length > 0); assert.ok(Number.isInteger(fragment.line) && fragment.line > 0); }
+  assert.doesNotMatch(JSON.stringify(backend), /\/Users\/|\/home\/|[A-Za-z]:\\/);
 });
 
 console.log('\nG9 — signed-in purchase path unchanged');
