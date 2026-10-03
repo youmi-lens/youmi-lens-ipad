@@ -87,13 +87,13 @@ test('P12: purchaseUpdatedListener is the authoritative resolve path', () => {
 // ── P6/P7: verify timeout / network error are bounded and recoverable ──────
 
 test('P6: verify maps a bounded-fetch timeout to verify_timeout (never hangs)', () => {
-  assert.match(verifyFn, /isBoundedFetchTimeout\(error\) \? result\('verify_timeout'\)/);
+  assert.match(verifyFn, /activationPending\(isBoundedFetchTimeout\(error\) \? 'verify_timeout'/);
   assert.match(subs, /'verify_timeout'/);
   assert.match(subs, /verify_timeout:[\s\S]*You will not be charged again/);
 });
 
 test('P7: verify network/HTTP failure clears loading via a terminal result', () => {
-  assert.match(verifyFn, /return isBoundedFetchTimeout\(error\) \? result\('verify_timeout'\) : result\('offline'\)/);
+  assert.match(verifyFn, /return activationPending\(isBoundedFetchTimeout\(error\) \? 'verify_timeout' : 'offline'\)/);
   assert.match(handlePurchaseFn, /finally \{\s*if \(actionIdentity\.owns\(actionTicket\)\) \{\s*purchaseLockRef\.current = false;\s*setBusy\(null\);[\s\S]*?\}/);
 });
 
@@ -140,7 +140,7 @@ test('P9: restore maps timeout through mapError and is bounded', () => {
 // ── P11/P13: transaction safety ─────────────────────────────────────────────
 
 test('P11: verify timeout returns BEFORE finishTransaction (transaction not consumed/repurchased)', () => {
-  const timeoutReturnIdx = verifyFn.indexOf("return isBoundedFetchTimeout(error) ? result('verify_timeout')");
+  const timeoutReturnIdx = verifyFn.indexOf("return activationPending(isBoundedFetchTimeout(error) ? 'verify_timeout'");
   const finishIdx = verifyFn.indexOf('finishTransaction');
   assert.ok(timeoutReturnIdx > -1 && finishIdx > -1 && timeoutReturnIdx < finishIdx);
   assert.doesNotMatch(purchaseFn, /requestWithTimeout\(.*\)[\s\S]*requestWithTimeout\(/);

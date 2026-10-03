@@ -11,6 +11,7 @@ import { SecondaryButton } from '@/components/SecondaryButton';
 import { GlassIconButton } from '@/components/WorkspaceUI';
 import { colors, radius } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
+import { subscriptionReconciliation } from '@/lib/subscriptionReconciliation';
 import { formatDate as formatAppDate } from '@/lib/format';
 import { ensureGuestIapIdentity, hasGuestIapIdentity } from '@/lib/guestIap';
 import { useI18n } from '@/lib/i18n';
@@ -224,7 +225,7 @@ export default function PlansScreen() {
       const ticket = introRequestIdentity.begin();
       void subscriptionService.getIntroOfferEligibility().then((eligible) => { if (introRequestIdentity.owns(ticket)) setIntroEligible(eligible); });
     }
-    return () => subscriptionService.cleanup();
+    // The root owns the StoreKit connection; leaving Plans must not erase recovery work.
   }, [loadProducts, introRequestIdentity, screenIdentity]);
   useEffect(() => {
     statusRequestRef.current += 1;
@@ -241,6 +242,14 @@ export default function PlansScreen() {
     purchaseLockRef.current = false;
   }, [accessToken, accountId, screenIdentity]);
   useFocusEffect(useCallback(() => { void loadStatus(); if (isGuest) void loadGuestStatus(); }, [loadStatus, loadGuestStatus, isGuest]));
+  useEffect(() => {
+    const unsubscribe = subscriptionReconciliation.subscribe((change) => {
+      if (change.subject !== screenIdentity) return;
+      if (isGuest) void loadGuestStatus(); else void loadStatus();
+    });
+    if (SUBSCRIPTIONS_LIVE) void subscriptionReconciliation.request('plans_mount');
+    return unsubscribe;
+  }, [screenIdentity, isGuest, loadStatus, loadGuestStatus]);
   useEffect(() => {
     const appStateListener = AppState.addEventListener('change', (nextState) => {
       const wasBackgrounded = appStateRef.current === 'background' || appStateRef.current === 'inactive';
@@ -332,6 +341,10 @@ export default function PlansScreen() {
       const result = await subscriptionService.purchase(selectedPlan, identity.token, identity.account);
       if (!actionIdentity.owns(actionTicket)) return;
       if (result.code === 'cancelled') return;
+      if (result.activationPending) {
+        Alert.alert(t('plans.activationPendingTitle'), t('plans.activationPendingBody'));
+        return;
+      }
       if (result.code === 'pending') {
         Alert.alert(t('plans.purchasePending'), result.message);
         return;

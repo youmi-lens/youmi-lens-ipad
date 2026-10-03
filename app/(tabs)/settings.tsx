@@ -22,6 +22,7 @@ import { useI18n } from '@/lib/i18n';
 import { fetchPlanStatus, PlanStatus, safeAccessLabel } from '@/lib/planStatus';
 import { BillingRequestIdentity } from '@/lib/billingRequestIdentity';
 import { subscriptionService } from '@/lib/subscriptions';
+import { subscriptionReconciliation } from '@/lib/subscriptionReconciliation';
 import { boundedPaymentTask, PAYMENT_UI_WAIT_TIMEOUT_MS } from '@/lib/boundedPaymentTask';
 import { logDiag } from '@/lib/iapDiag';
 import { useData } from '@/lib/store';
@@ -191,6 +192,10 @@ export default function SettingsScreen() {
       // never-purchased guest — never a blocking error for a read-only check.
     }
   }, [statusIdentity]);
+  useEffect(() => subscriptionReconciliation.subscribe((change) => {
+    if (change.subject !== screenIdentity) return;
+    if (isGuest) void loadGuestPlan(); else void loadPlan();
+  }), [screenIdentity, isGuest, loadGuestPlan, loadPlan]);
   // Bumped once per tab focus, never by plan/account data — the page
   // heading's entrance below keys on this alone.
   const [focusKey, setFocusKey] = useState(0);

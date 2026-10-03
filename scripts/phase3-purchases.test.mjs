@@ -144,7 +144,7 @@ assert.doesNotMatch(purchases, /AsyncStorage/);
 // restore path synchronizes StoreKit and sends signed transactions to the backend.
 assert.doesNotMatch(purchases, /getActiveSubscriptions|discoverStudentPassTransactions/);
 assert.match(purchases, /Consumable purchases are not restored from App Store history\./);
-assert.match(subscriptions, /getAvailablePurchases\(\{ onlyIncludeActiveItemsIOS: false \}\)/);
+assert.match(subscriptions, /getAvailablePurchases\(\{ onlyIncludeActiveItemsIOS: false, alsoPublishToEventListenerIOS: false \}\)/);
 
 // 15. Stuck-before-Apple-sheet hardening: bounded StoreKit wait, queue recovery,
 //     and a guaranteed loading/guard reset so the UI can never spin forever.
@@ -235,6 +235,6 @@ assert.equal(storekit.products[0].displayPrice, '4.99');
 assert.equal(storekit.products[1].productID, legacyProductId);
 assert.equal(storekit.products[1].type, 'NonConsumable');
 assert.equal(appConfig.expo.version, '0.2.2');
-assert.equal(appConfig.expo.ios.buildNumber, '65');
+assert.equal(appConfig.expo.ios.buildNumber, '66');
 
 console.log('Phase 3 purchase hardening tests passed.');
