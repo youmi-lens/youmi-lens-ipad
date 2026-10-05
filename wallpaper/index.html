@@ -12,12 +12,12 @@
 
   .word {
     position: fixed; left: 50%; top: 80%; transform: translate(-50%, -50%);
-    font-weight: 200; font-size: 2.6vh; letter-spacing: 1.2em; padding-left: 1.2em; white-space: nowrap;
-    color: rgba(235, 242, 255, .85);
+    font-weight: 300; font-size: 2.8vh; letter-spacing: 1.2em; padding-left: 1.2em; white-space: nowrap;
+    color: #fff; text-shadow: 0 0 2vh rgba(80,150,255,.7);
   }
   .clock {
     position: fixed; right: 3.2vw; bottom: 4.5vh; text-align: right;
-    font-weight: 200; font-size: 2.2vh; letter-spacing: .3em; color: rgba(200, 215, 240, .35);
+    font-weight: 200; font-size: 2.2vh; letter-spacing: .3em; color: rgba(220, 230, 250, .7);
     font-variant-numeric: tabular-nums;
   }
   .fade { position: fixed; inset: 0; background: #000; pointer-events: none; animation: out 3s ease-out forwards; }
@@ -57,14 +57,14 @@ const MARK = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABa8AAAe8CAYAAAC6IGyM
     const glow = document.createElement('canvas'), pad = Math.round(60 * U);
     glow.width = sw + pad * 2; glow.height = sh + pad * 2;
     const g = glow.getContext('2d'); g.filter = `blur(${24 * U}px)`; g.drawImage(markImg, pad, pad, sw, sh);
-    g.filter = 'none'; g.globalCompositeOperation = 'source-in'; g.fillStyle = '#1f5fd6'; g.fillRect(0, 0, glow.width, glow.height);
+    g.filter = 'none'; g.globalCompositeOperation = 'source-in'; g.fillStyle = '#3d86ff'; g.fillRect(0, 0, glow.width, glow.height);
     logo.glow = glow; logo.pad = pad;
 
     const step = Math.max(2, Math.sqrt(sw * sh * .3 / 18000)), homes = [];
     for (let fy = 0; fy < sh; fy += step) for (let fx = 0; fx < sw; fx += step) {
       if (data[((fy | 0) * sw + (fx | 0)) * 4 + 3] > 120) homes.push([logo.x + fx + rand(-step / 2, step / 2), logo.y + fy + rand(-step / 2, step / 2)]);
     }
-    pts = homes.map(([hx, hy]) => ({ hx, hy, x: hx + rand(-W, W) * .4, y: hy + rand(-H, H) * .4, vx: 0, vy: 0, s: rand(.5, 1.5), ph: rand(0, 6.28), b: rand(.55, 1) }));
+    pts = homes.map(([hx, hy]) => ({ hx, hy, x: hx + rand(-W, W) * .4, y: hy + rand(-H, H) * .4, vx: 0, vy: 0, s: rand(.5, 1.5), ph: rand(0, 6.28), b: rand(.8, 1) }));
     dust = Array.from({ length: 90 }, () => ({ x: rand(0, W), y: rand(0, H), z: rand(.3, 1), ph: rand(0, 6.28) }));
   }
   function resize() {
@@ -82,24 +82,27 @@ const MARK = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABa8AAAe8CAYAAAC6IGyM
 
     ctx.globalCompositeOperation = 'source-over';
     ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+    const bgG = ctx.createRadialGradient(W / 2, H * .45, 0, W / 2, H * .45, H * .8);
+    bgG.addColorStop(0, 'rgba(20,45,110,.35)'); bgG.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = bgG; ctx.fillRect(0, 0, W, H);
     ctx.globalCompositeOperation = 'lighter';
 
     // faint breathing glow behind the mark
-    ctx.globalAlpha = .22 + .08 * Math.sin(t * .8);
+    ctx.globalAlpha = .6 + .15 * Math.sin(t * .8);
     ctx.drawImage(logo.glow, logo.x - logo.pad, logo.y - logo.pad);
     ctx.globalAlpha = 1;
 
     // sparse slow dust
     for (const d of dust) {
       d.y -= d.z * 6 * U * dt; if (d.y < 0) { d.y = H; d.x = rand(0, W); }
-      ctx.fillStyle = `rgba(150,180,230,${(.08 + .12 * Math.sin(t * .7 + d.ph)) * d.z})`;
+      ctx.fillStyle = `rgba(150,180,230,${(.2 + .2 * Math.sin(t * .7 + d.ph)) * d.z})`;
       ctx.fillRect(d.x, d.y, 1.4 * U, 1.4 * U);
     }
 
     // particles: spring home + gentle drift + mouse nudge
     const cx = W / 2, cy = H * .42, R = 110 * U, drift = 1.2 * U;
     const sweep = ((t % 9) / 9) * 1.6 - .3; // slow light pass, top-left to bottom-right
-    const size = 1.3 * U;
+    const size = 1.9 * U;
     for (const p of pts) {
       const hx = p.hx + Math.sin(t * p.s + p.ph) * drift, hy = p.hy + Math.cos(t * p.s * 1.2 + p.ph) * drift;
       let ax = (hx - p.x) * 6, ay = (hy - p.y) * 6;
@@ -110,8 +113,8 @@ const MARK = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABa8AAAe8CAYAAAC6IGyM
 
       const u = ((p.hx - logo.x) / logo.w + (p.hy - logo.y) / logo.h) / 2;
       const hl = Math.max(0, 1 - Math.abs(u - sweep) / .08);
-      const a = p.b * (.55 + .2 * Math.sin(t * 1.5 * p.s + p.ph)) + hl * .6;
-      ctx.fillStyle = `rgba(${215 + 40 * hl | 0},${228 + 27 * hl | 0},255,${Math.min(1, a)})`;
+      const a = p.b * (.85 + .15 * Math.sin(t * 1.5 * p.s + p.ph)) + hl * .6;
+      ctx.fillStyle = `rgba(${225 + 30 * hl | 0},${236 + 19 * hl | 0},255,${Math.min(1, a)})`;
       ctx.fillRect(p.x - size / 2, p.y - size / 2, size, size);
     }
     requestAnimationFrame(frame);
