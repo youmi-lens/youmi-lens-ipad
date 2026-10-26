@@ -35,6 +35,12 @@ import { loadContentLanguagePreferences } from '@/lib/contentLanguagePreferences
 import { resolveLectureLanguagePair } from '@/lib/contentLanguages.mjs';
 import { useLiveCaptions } from '@/lib/liveCaptions';
 import { getLiveMicStreamStatus, startMicStream, stopMicStream } from '@/lib/liveMicStream';
+import { isUnifiedAudioAsrSpikeEnabled } from '@/lib/recording/unifiedAudioAsrSpikeGate';
+import {
+  getUnifiedAudioAsrSpikeStatus,
+  startUnifiedAudioAsrSpike,
+  stopUnifiedAudioAsrSpike,
+} from '@/lib/unifiedAudioAsrSpike';
 import { useRecordingNotes } from '@/lib/recordingNotes';
 import { useData } from '@/lib/store';
 import { resolveFinalLectureDurationMillis } from '@/lib/recording/policy.mjs';
@@ -547,17 +553,54 @@ export default function RecordingScreen() {
     setMicStreamError(null);
     firstPcmFrameLoggedRef.current = false;
     await startLiveCaptions(48_000, sourceLanguage, translationLanguage);
-    const micStatus = await startMicStream({
-      sampleRate: 48_000,
-      onPcm16Frame: (frame) => {
-        if (__DEV__ && !firstPcmFrameLoggedRef.current) {
-          firstPcmFrameLoggedRef.current = true;
-          console.info('[recording] first live PCM frame produced', {
-            byteLength: frame.byteLength,
+
+    const onPcm16Frame = (frame: ArrayBuffer) => {
+      if (__DEV__ && !firstPcmFrameLoggedRef.current) {
+        firstPcmFrameLoggedRef.current = true;
+        console.info('[recording] first live PCM frame produced', {
+          byteLength: frame.byteLength,
+          source: isUnifiedAudioAsrSpikeEnabled() ? 'unified_audio_asr_spike' : 'live_mic_stream',
+        });
+      }
+      sendAudioChunk(frame);
+    };
+
+    // SPIKE (flag default OFF): one AVAudioEngine graph feeds captions so live
+    // ASR tracks the same mic path as durable-ish AAC. Production dual-mic
+    // liveMicStream is skipped only when the explicit env gate is '1'.
+    if (isUnifiedAudioAsrSpikeEnabled()) {
+      stopMicStream();
+      const spikeStatus = await startUnifiedAudioAsrSpike({
+        onPcm16Frame,
+        onUnavailable: () => {
+          stopLiveCaptions();
+          setMicStreamError(t('recording.captionsUnavailable'));
+          const spike = getUnifiedAudioAsrSpikeStatus();
+          logLiveCaptionUnavailable('unified_spike_unavailable', {
+            micFramesReceived: spike.framesReceived,
+            localRecordingActive: isRecordingRef.current,
+            lastEvent: spike.lastEvent ?? null,
+          });
+        },
+      });
+      if (spikeStatus.error) {
+        stopLiveCaptions();
+        setMicStreamError(
+          spikeStatus.isSupported ? t('recording.captionsUnavailable') : spikeStatus.error,
+        );
+        if (__DEV__) {
+          console.warn('[recording] unified audio ASR spike unavailable', {
+            supported: spikeStatus.isSupported,
+            event: spikeStatus.lastEvent ?? null,
           });
         }
-        sendAudioChunk(frame);
-      },
+      }
+      return;
+    }
+
+    const micStatus = await startMicStream({
+      sampleRate: 48_000,
+      onPcm16Frame,
       onUnavailable: () => {
         stopLiveCaptions();
         setMicStreamError(t('recording.captionsUnavailable'));
@@ -591,6 +634,7 @@ export default function RecordingScreen() {
   // the recording screen is left. Pushing Mini does not unmount this screen.
   useEffect(() => () => {
     stopMicStream();
+    void stopUnifiedAudioAsrSpike();
     stopLiveCaptions();
   }, [stopLiveCaptions]);
 
@@ -748,6 +792,7 @@ export default function RecordingScreen() {
       const paused = await pauseRecording();
       if (!paused) return;
       stopMicStream();
+      void stopUnifiedAudioAsrSpike();
       stopLiveCaptions();
       // The current capture is now finalized by the legacy hook.  A resumed
       // legacy lecture already owns a first canonical segment, so preserve
@@ -846,6 +891,7 @@ export default function RecordingScreen() {
     if (finishing) return;
     if (!isGuest && !finishedRef.current) {
       stopMicStream();
+      void stopUnifiedAudioAsrSpike();
       stopLiveCaptions();
       // A nativeDurable recording is owned by the persistent native module,
       // so returning to Course must not be translated into Pause. Persist the
@@ -942,6 +988,7 @@ export default function RecordingScreen() {
     finishedRef.current = true;
     const finalDuration = sessionDurationMillis;
     stopMicStream();
+    void stopUnifiedAudioAsrSpike();
     stopLiveCaptions();
     const uri = options?.recoverable
       ? await finishRecoverableRecording()
