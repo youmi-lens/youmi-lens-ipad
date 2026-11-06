@@ -132,3 +132,35 @@ export function synthesizeStrokePoints(
   }
   return points;
 }
+
+/**
+ * Whether a stroke's axis-aligned bounds overlap a vertical canvas window.
+ * Used to cull completed SVG strokes that are far off-screen so dense pages
+ * do not rebuild/reconcile every path on each commit or scroll.
+ */
+export function strokeIntersectsYRange(
+  bounds: { minY: number; maxY: number },
+  rangeTop: number,
+  rangeBottom: number,
+): boolean {
+  if (!Number.isFinite(bounds.minY) || !Number.isFinite(bounds.maxY)) return true;
+  if (!Number.isFinite(rangeTop) || !Number.isFinite(rangeBottom)) return true;
+  if (rangeBottom < rangeTop) return true;
+  return bounds.maxY >= rangeTop && bounds.minY <= rangeBottom;
+}
+
+/**
+ * Structural cost of rebuilding completed-stroke React elements.
+ * Without viewport culling every commit remaps all strokes; with culling only
+ * the on-screen subset is remapped (plus a margin).
+ */
+export function completedStrokeRebuildCount(args: {
+  totalStrokeCount: number;
+  visibleStrokeCount: number;
+  viewportCulled: boolean;
+}): number {
+  const total = Math.max(0, args.totalStrokeCount);
+  const visible = Math.max(0, args.visibleStrokeCount);
+  return args.viewportCulled ? Math.min(total, visible) : total;
+}
+

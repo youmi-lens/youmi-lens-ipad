@@ -65,6 +65,8 @@ const RECONNECT_BACKOFF_MS = [800, 1800];
 const WS_OPEN_TIMEOUT_MS = 6_000;
 /** After stream_start, the backend must send stream_ready within this window. */
 const STREAM_READY_TIMEOUT_MS = 10_000;
+/** Bound PCM queued while WS is connecting / awaiting stream_ready (~2s @ 100ms). */
+const PENDING_PCM_MAX_FRAMES = 20;
 
 function toWsUrl(apiBaseUrl: string): string {
   const trimmed = apiBaseUrl.replace(/\/$/, '');
@@ -158,6 +160,7 @@ export function LiveCaptionsProvider({ children }: { children: ReactNode }) {
   const tokenPresentRef = useRef(false);
   const pcmFramesSentRef = useRef(0);
   const lastPcmAtRef = useRef<string | null>(null);
+  const pendingPcmRef = useRef<ArrayBuffer[]>([]);
 
   const [status, setStatus] = useState<LiveCaptionStatus>('idle');
   const [error, setError] = useState<string | null>(null);
@@ -180,6 +183,25 @@ export function LiveCaptionsProvider({ children }: { children: ReactNode }) {
       if (ref.current) {
         clearTimeout(ref.current);
         ref.current = null;
+      }
+    }
+  }, []);
+
+  /** Drain PCM that arrived before stream_ready (or during a brief reconnect gap). */
+  const flushPendingPcm = useCallback(() => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN || !streamReadyRef.current) return;
+    const queued = pendingPcmRef.current;
+    if (queued.length === 0) return;
+    pendingPcmRef.current = [];
+    for (const chunk of queued) {
+      try {
+        socket.send(chunk);
+        pcmFramesSentRef.current += 1;
+        lastPcmAtRef.current = new Date().toISOString();
+      } catch {
+        // Socket closed mid-flush — onclose handles recovery.
+        break;
       }
     }
   }, []);
@@ -210,6 +232,7 @@ export function LiveCaptionsProvider({ children }: { children: ReactNode }) {
     (reason: LiveCaptionUnavailableReason) => {
       intentionalCloseRef.current = true;
       clearTimers();
+      pendingPcmRef.current = [];
       const socket = socketRef.current;
       socketRef.current = null;
       if (socket) {
@@ -393,6 +416,7 @@ export function LiveCaptionsProvider({ children }: { children: ReactNode }) {
           logLiveCaptionEvent('stream_ready');
           setStatus('listening');
           setError(null);
+          flushPendingPcm();
         } else if (message.type === 'stream_interim' && rawCaptionText) {
           reconnectAttemptsRef.current = 0; // real caption output — the pipeline is proven working
           lastWsEventRef.current = 'stream_interim';
@@ -507,7 +531,7 @@ export function LiveCaptionsProvider({ children }: { children: ReactNode }) {
         scheduleReconnect(reason);
       };
     },
-    [clearTimers, giveUp, scheduleReconnect],
+    [clearTimers, flushPendingPcm, giveUp, scheduleReconnect],
   );
 
   connectRef.current = connect;
@@ -518,6 +542,7 @@ export function LiveCaptionsProvider({ children }: { children: ReactNode }) {
     reconnectAttemptsRef.current = 0;
     pendingReasonRef.current = null;
     streamReadyRef.current = false;
+    pendingPcmRef.current = [];
     const socket = socketRef.current;
     socketRef.current = null;
     if (socket) {
@@ -561,6 +586,7 @@ export function LiveCaptionsProvider({ children }: { children: ReactNode }) {
       streamReadyRef.current = false;
       pcmFramesSentRef.current = 0;
       lastPcmAtRef.current = null;
+      pendingPcmRef.current = [];
       lastCloseCodeRef.current = null;
       lastCloseReasonRef.current = null;
       sampleRateRef.current = sampleRate;
@@ -584,15 +610,30 @@ export function LiveCaptionsProvider({ children }: { children: ReactNode }) {
 
   const sendAudioChunk = useCallback((chunk: ArrayBuffer) => {
     const socket = socketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    const ready =
+      Boolean(socket) &&
+      socket!.readyState === WebSocket.OPEN &&
+      streamReadyRef.current;
+    if (!ready) {
+      // Hold a short window of PCM so speech during connect / reconnect is not
+      // dropped before the backend acknowledges stream_ready. Bound the queue so
+      // a long outage cannot grow without limit.
+      const queue = pendingPcmRef.current;
+      queue.push(chunk);
+      if (queue.length > PENDING_PCM_MAX_FRAMES) {
+        queue.splice(0, queue.length - PENDING_PCM_MAX_FRAMES);
+      }
+      return;
+    }
+    if (pendingPcmRef.current.length > 0) flushPendingPcm();
     try {
-      socket.send(chunk);
+      socket!.send(chunk);
       pcmFramesSentRef.current += 1;
       lastPcmAtRef.current = new Date().toISOString();
     } catch {
       // Socket closed mid-send — onclose handles recovery.
     }
-  }, []);
+  }, [flushPendingPcm]);
 
   // Recording-time performance: finalCaptions/latestFinalLine must depend
   // ONLY on captionLines. Every live token updates partialCaption (often

@@ -11,10 +11,12 @@ import { fileURLToPath } from 'node:url';
 import {
   NOTEBOOK_MIN_POINT_DISTANCE,
   appendStrokePoint,
+  completedStrokeRebuildCount,
   pathBuildsPerActivePoint,
   reduceLiveInkAction,
   shouldAcceptStrokePoint,
   snapshotLiveInkPoints,
+  strokeIntersectsYRange,
   strokeToPath,
   synthesizeStrokePoints,
 } from '../lib/notebookStroke.ts';
@@ -186,3 +188,21 @@ const densityRows = [0, 100, 500].map((n) => ({
 console.log('density path-build model:', JSON.stringify(densityRows));
 
 console.log(`\nnotebook-stroke: ${passed} checks passed`);
+
+check('viewport cull intersection', () => {
+  assert.equal(strokeIntersectsYRange({ minY: 10, maxY: 40 }, 0, 100), true);
+  assert.equal(strokeIntersectsYRange({ minY: 500, maxY: 600 }, 0, 100), false);
+  assert.equal(strokeIntersectsYRange({ minY: 90, maxY: 110 }, 0, 100), true);
+});
+
+check('viewport cull rebuild cost model', () => {
+  assert.equal(
+    completedStrokeRebuildCount({ totalStrokeCount: 500, visibleStrokeCount: 80, viewportCulled: true }),
+    80,
+  );
+  assert.equal(
+    completedStrokeRebuildCount({ totalStrokeCount: 500, visibleStrokeCount: 80, viewportCulled: false }),
+    500,
+  );
+});
+

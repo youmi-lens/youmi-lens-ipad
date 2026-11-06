@@ -87,11 +87,20 @@ Xcode build. After a rebuild with the flag ON:
 - **Mic contention:** Production lecture capture still uses `AVAudioRecorder`
   when the selected engine is legacy/`nativeDurable`. Running that alongside
   the spike’s `AVAudioEngine` may contend for the shared `AVAudioSession`
-  input. Flag-OFF path is unaffected; flag-ON needs device confirmation.
-- **Background / interrupt:** Spike does not reimplement durable checkpoint
-  rollover, interruption recovery, or Finish background assertions.
+  input. The spike no longer renegotiates preferred sample rate / IO buffer
+  (converters resample instead) to reduce mid-recording glitches. Flag-OFF
+  path is unaffected; flag-ON still needs device confirmation.
+- **Background / interrupt:** Spike now observes session interruption, route
+  change, and engine configuration-change notifications and attempts a
+  bounded resume. JS also arms a no-frame + mid-stream stall watchdog with
+  one retry (mirroring `liveMicStream`). Full durable checkpoint rollover
+  and Finish background assertions remain production-recorder concerns.
+- **Spike file retention:** AAC proof files under Documents/
+  `unified-audio-asr-spike/` are pruned to the newest 2 on each start.
 - **Translation / Deepgram:** Unchanged WebSocket path; only the PCM source
-  switches. Language pair and reconnect budget are untouched.
+  switches. Language pair and reconnect budget are untouched. Client now
+  buffers ≤2 s of PCM until `stream_ready` so connect/reconnect speech is
+  not dropped.
 - **Native rebuild required:** Without embedding the new module, the flag ON
   path reports unavailable and falls back to the calm “captions unavailable”
   UX (lecture recording still works).

@@ -579,7 +579,7 @@ export default function RecordingScreen() {
           logLiveCaptionUnavailable('unified_spike_unavailable', {
             micFramesReceived: spike.framesReceived,
             localRecordingActive: isRecordingRef.current,
-            lastEvent: spike.lastEvent ?? null,
+            lastWsEvent: spike.lastEvent ?? null,
           });
         },
       });

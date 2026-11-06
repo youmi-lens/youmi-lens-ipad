@@ -114,4 +114,45 @@ check('docs note exists and states production default unchanged', () => {
   assert.match(docs, /Production defaults are unchanged/i);
 });
 
+
+console.log('Structural: spike bridge has start/stop race guard + PCM watchdog');
+
+const spikeBridge = read('../lib/unifiedAudioAsrSpike.ts');
+check('bridge invalidates in-flight start via runToken before awaiting stop', () => {
+  assert.match(spikeBridge, /const token = \+\+runToken/);
+  assert.match(spikeBridge, /preserveRunToken/);
+  assert.match(spikeBridge, /if \(token !== runToken\)/);
+});
+check('bridge arms no-frame + stall watchdogs', () => {
+  assert.match(spikeBridge, /NO_FRAME_TIMEOUT_MS/);
+  assert.match(spikeBridge, /STALL_TIMEOUT_MS/);
+  assert.match(spikeBridge, /armWatchdog/);
+  assert.match(spikeBridge, /armStallTimer/);
+});
+check('bridge flushes trailing PCM from native stop before removing listener', () => {
+  assert.match(spikeBridge, /trailingPcmBase64/);
+  assert.match(spikeBridge, /trailing_pcm_flushed/);
+});
+
+check('diagnostics include unified_spike_unavailable', () => {
+  const diag = read('../lib/liveCaptionDiagnostics.ts');
+  assert.match(diag, /unified_spike_unavailable/);
+});
+
+check('live captions buffer PCM until stream_ready', () => {
+  const captions = read('../lib/liveCaptions.tsx');
+  assert.match(captions, /PENDING_PCM_MAX_FRAMES/);
+  assert.match(captions, /flushPendingPcm/);
+  assert.match(captions, /streamReadyRef\.current/);
+});
+
+check('spike engine observes interruption/route/config and prunes old files', () => {
+  assert.match(spikeSwift, /interruptionNotification/);
+  assert.match(spikeSwift, /routeChangeNotification/);
+  assert.match(spikeSwift, /AVAudioEngineConfigurationChange/);
+  assert.match(spikeSwift, /pruneOldSpikeFiles/);
+  assert.match(spikeSwift, /trailingPcmBase64/);
+  assert.match(spikeSwift, /wantsRunning/);
+});
+
 console.log(`\n${passed} checks passed`);

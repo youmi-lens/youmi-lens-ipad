@@ -24,6 +24,9 @@ export type SpikeStatus = {
   channelCount: number;
   encoding: string;
   implementation: string;
+  /** Final partial PCM frame flushed on stop (base64 PCM16 LE), if any. */
+  trailingPcmBase64?: string;
+  trailingSampleCount?: number;
 };
 
 type EventSubscription = { remove: () => void };
