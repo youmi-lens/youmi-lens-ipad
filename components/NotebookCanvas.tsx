@@ -118,6 +118,7 @@ import { appendFreeform, boxFromCorners, selectedInkIds, selectionAcceptsPointer
 import {
   appendStrokePoint,
   NOTEBOOK_MIN_POINT_DISTANCE,
+  strokeIntersectsYRange,
   strokeToPath,
 } from '@/lib/notebookStroke';
 import {
@@ -134,6 +135,11 @@ import {
 
 /** Re-export for callers/tests that historically imported path helpers from this module. */
 export { strokeToPath } from '@/lib/notebookStroke';
+
+/** Extra canvas-Y padding around the visible viewport when culling completed strokes. */
+const NOTEBOOK_STROKE_CULL_MARGIN = 900;
+/** Ignore cull-window updates smaller than this (canvas px) to avoid scroll thrash. */
+const NOTEBOOK_STROKE_CULL_STEP = 140;
 
 /**
  * PK1 — isolated Apple PencilKit physical spike (see project notes). Gates
@@ -1501,6 +1507,10 @@ export const NotebookCanvas = memo(function NotebookCanvas({
     DEFAULT_TOOL_PREFERENCES.eraserSize,
   );
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
+  /** Vertical canvas window used to cull off-screen completed SVG strokes. */
+  const [strokeCullWindow, setStrokeCullWindow] = useState({ top: -NOTEBOOK_STROKE_CULL_MARGIN, bottom: NOTEBOOK_STROKE_CULL_MARGIN * 3 });
+  const strokeCullWindowRef = useRef(strokeCullWindow);
+  strokeCullWindowRef.current = strokeCullWindow;
   const [toolPreferencesLoaded, setToolPreferencesLoaded] = useState(false);
   const eraserRadius = ERASER_SIZES.find((option) => option.key === eraserSizeKey)?.radius ?? 26;
   /** SharedAnnotationToolbar's generic SizeOption shape ({key,value,dot}) —
@@ -3574,9 +3584,21 @@ export const NotebookCanvas = memo(function NotebookCanvas({
   }, [editable, selectedImageForActions, selectionMoveOffset, containerSize.width]);
 
   // Committed strokes split into unselected (stable) and selected (rendered in a transform group).
+  // Off-screen strokes are culled against the current scroll window so dense pages do not
+  // rebuild every SVG path on each commit. Selected strokes skip culling so a partially
+  // off-screen selection still renders its chrome.
   const { unselectedShapes, selectedShapes } = useMemo(
     () => {
-      const visible = strokes.filter((s) => !erasedIds.has(s.id) && s.id !== editingShapeId && !(scalingActive && selectedIds.has(s.id)));
+      const cullTop = strokeCullWindow.top;
+      const cullBottom = strokeCullWindow.bottom;
+      const visible = strokes.filter((s) => {
+        if (erasedIds.has(s.id) || s.id === editingShapeId || (scalingActive && selectedIds.has(s.id))) {
+          return false;
+        }
+        if (selectedIds.has(s.id)) return true;
+        const bounds = strokeBounds(s.points);
+        return strokeIntersectsYRange(bounds, cullTop, cullBottom);
+      });
       const unsel = [
         ...visible.filter((s) => s.tool === 'highlighter' && !selectedIds.has(s.id)).map((s) => <StrokeShape key={s.id} stroke={s} />),
         ...visible.filter((s) => s.tool !== 'highlighter' && !selectedIds.has(s.id)).map((s) => <StrokeShape key={s.id} stroke={s} />),
@@ -3589,7 +3611,7 @@ export const NotebookCanvas = memo(function NotebookCanvas({
         ]);
       return { unselectedShapes: unsel, selectedShapes: sel };
     },
-    [strokes, erasedIds, selectedIds, editingShapeId, scalingActive],
+    [strokes, erasedIds, selectedIds, editingShapeId, scalingActive, strokeCullWindow],
   );
 
   // ---- Page geometry (continuous canvas divided into A4-like sheets) ----
@@ -3685,6 +3707,23 @@ export const NotebookCanvas = memo(function NotebookCanvas({
     );
   };
 
+  const updateStrokeCullWindow = useCallback((scrollY: number) => {
+    const scale = canvasScaleRef.current > 0 ? canvasScaleRef.current : 1;
+    const viewH = containerSizeRef.current.height > 0 ? containerSizeRef.current.height : PAGE_HEIGHT;
+    const top = scrollY / scale - NOTEBOOK_STROKE_CULL_MARGIN;
+    const bottom = (scrollY + viewH) / scale + NOTEBOOK_STROKE_CULL_MARGIN;
+    const prev = strokeCullWindowRef.current;
+    if (
+      Math.abs(prev.top - top) < NOTEBOOK_STROKE_CULL_STEP &&
+      Math.abs(prev.bottom - bottom) < NOTEBOOK_STROKE_CULL_STEP
+    ) {
+      return;
+    }
+    const next = { top, bottom };
+    strokeCullWindowRef.current = next;
+    setStrokeCullWindow(next);
+  }, []);
+
   const reportNotebookScroll = useCallback((y: number) => {
     // Smoking-gun check for the palm/double-tap viewport-jump investigation:
     // scrollEnabled is set false via setNativeProps the moment a stylus
@@ -3724,8 +3763,9 @@ export const NotebookCanvas = memo(function NotebookCanvas({
       }
     }
     scrollOffsetYRef.current = y;
+    updateStrokeCullWindow(y);
     showPageBadge(pageForScroll(y));
-  }, [pageForScroll, showPageBadge]);
+  }, [pageForScroll, showPageBadge, updateStrokeCullWindow]);
   const notebookScrollHandler = useAnimatedScrollHandler({
     onScroll: (event) => {
       const y = event.contentOffset.y;

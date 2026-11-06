@@ -1,0 +1,7 @@
+{
+  "name": "expo-unified-audio-asr-spike",
+  "version": "1.0.0",
+  "description": "SPIKE: AVAudioEngine capture that writes durable-ish AAC and emits PCM16 for live captions. Opt-in only; production default is unchanged.",
+  "main": "index.ts",
+  "private": true
+}

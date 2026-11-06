@@ -17,6 +17,7 @@ export type LiveCaptionUnavailableReason =
   | 'token_missing'
   | 'token_expired'
   | 'audio_session_conflict'
+  | 'unified_spike_unavailable'
   | 'unknown';
 
 /** Lightweight, secret-free snapshot logged when Live Caption degrades. */
