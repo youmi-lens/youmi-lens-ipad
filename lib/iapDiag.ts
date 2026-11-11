@@ -43,6 +43,8 @@ const DIAG_EVENTS = [
   'entitlement_refresh_started',
   'entitlement_refresh_succeeded',
   'entitlement_refresh_failed',
+  'offer_code_sheet_requested',
+  'offer_code_sheet_result',
 ] as const;
 
 type DiagEvent = (typeof DIAG_EVENTS)[number];

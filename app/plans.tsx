@@ -34,8 +34,9 @@ import {
 import { BillingRequestIdentity } from '@/lib/billingRequestIdentity';
 import { fetchSubscriptionAvailability, canPurchaseSubscription, type SubscriptionAvailability } from '@/lib/subscriptionAvailability';
 import { subscriptionService } from '@/lib/subscriptions';
+import { isOfferCodeRedemptionAvailable } from '@/lib/offerCodes';
 
-type BusyAction = 'purchase' | 'refresh' | null;
+type BusyAction = 'purchase' | 'refresh' | 'redeem' | null;
 type StudentBasicStatus = 'Active' | 'Not active' | 'Expired' | 'Checking';
 type PlanChoice = SubscriptionPlan;
 
@@ -421,6 +422,40 @@ export default function PlansScreen() {
       }
     }
   };
+  /**
+   * "Have an offer code?" — opens Apple's own redemption sheet. Apple validates and charges; the redeemed transaction
+   * comes back through the existing StoreKit listener + reconciliation path (never a local grant), and Plans refreshes
+   * from the backend exactly like after a purchase.
+   */
+  const handleRedeemOfferCode = async () => {
+    if (busy !== null || !isOfferCodeRedemptionAvailable()) return;
+    setBusy('redeem');
+    const actionTicket = actionIdentity.begin();
+    try {
+      // Same identity rule as Subscribe: the reconciliation that binds the redemption needs a Youmi account (or the
+      // isolated guest-IAP identity) to exist before Apple's sheet opens.
+      const identity = await boundedPaymentTask(resolvePurchaseIdentity, PAYMENT_UI_WAIT_TIMEOUT_MS, 'redeem_identity');
+      if (!actionIdentity.owns(actionTicket)) return;
+      if (!identity) {
+        Alert.alert(t('plans.purchaseUnavailableTitle'), t('plans.guestPurchaseUnavailable'));
+        return;
+      }
+      const sheet = await subscriptionService.presentOfferCodeRedemption();
+      if (!actionIdentity.owns(actionTicket)) return;
+      if (sheet !== 'presented') {
+        Alert.alert(t('plans.appStoreUnavailable'), t('plans.redeemCodeFailed'));
+        return;
+      }
+      await subscriptionReconciliation.request('offer_code_redeemed');
+      if (!actionIdentity.owns(actionTicket)) return;
+      await refreshPaymentStatus();
+    } catch {
+      if (!actionIdentity.owns(actionTicket)) return;
+      Alert.alert(t('plans.appStoreUnavailable'), t('plans.redeemCodeFailed'));
+    } finally {
+      if (actionIdentity.owns(actionTicket)) setBusy(null);
+    }
+  };
   const handleManageSubscription = async () => {
     try {
       await subscriptionService.manageSubscriptions();
@@ -591,6 +626,14 @@ export default function PlansScreen() {
                   onPress={() => void handleRefreshAccess()}
                   disabled={busy !== null}
                 />
+                {isOfferCodeRedemptionAvailable() ? (
+                  <SecondaryButton
+                    label={busy === 'redeem' ? t('plans.redeemCodeBusy') : t('plans.redeemCode')}
+                    icon="pricetag-outline"
+                    onPress={() => void handleRedeemOfferCode()}
+                    disabled={busy !== null}
+                  />
+                ) : null}
                 {activeEntitlement && isSubscriptionProductId(activeEntitlement.productId) ? (
                   <SecondaryButton
                     label={t('plans.manageSubscription')}

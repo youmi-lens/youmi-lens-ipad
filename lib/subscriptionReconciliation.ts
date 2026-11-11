@@ -6,7 +6,7 @@ import { subscriptionService, type SubscriptionRestoreResult } from './subscript
 /** Retry schedule for one reconciliation episode. */
 export const RETRY_DELAYS_MS = [5000, 15000, 30000, 60000, 120000, 300000] as const;
 type Credentials = { accessToken: string; accountId: string };
-type Trigger = 'auth_session' | 'foreground' | 'plans_mount' | 'activation_pending' | 'retry';
+type Trigger = 'auth_session' | 'foreground' | 'plans_mount' | 'activation_pending' | 'offer_code_redeemed' | 'retry';
 type AccessChange = { subject: string };
 type ReconciliationService = Pick<typeof subscriptionService, 'reconcileSilently' | 'getEntitlement'> &
   Partial<Pick<typeof subscriptionService, 'subscribeActivationPending'>>;
@@ -79,6 +79,9 @@ export class SubscriptionReconciliation {
 
   request(trigger: Trigger): Promise<SubscriptionRestoreResult | null> {
     if (!this.credentials && !this.guest) return Promise.resolve(null);
+    // After Apple's offer-code sheet closes, the redeemed transaction may reach StoreKit history (or the backend) a
+    // little later. Treat it like an expected delivery so a first `no_purchase` keeps the bounded retry episode going.
+    if (trigger === 'offer_code_redeemed') { this.pendingDelivery = true; if (this.flight) this.queued = true; }
     // A genuinely new trigger starts a fresh bounded episode; the timer's own 'retry' continues the current one.
     if (trigger !== 'retry') this.retryStep = 0;
     if (this.flight) {

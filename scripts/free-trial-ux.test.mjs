@@ -144,13 +144,23 @@ check('FT14: the requestPurchase call is byte-for-byte the same shape Build 44 s
   assert.equal(call, expected.slice(expected.indexOf('requestPurchase({')));
 });
 
-check('FT15: no promotional offer / win-back / offer-code / eligibility-override logic was introduced', () => {
+check('FT15: no promotional offer / win-back / eligibility-override logic; offer codes only via Apple\'s own sheet', () => {
   for (const source of [subscriptions, plans, subscriptionCore]) {
     assert.doesNotMatch(source, /promotionalOfferJWS/);
     assert.doesNotMatch(source, /winBackOffer/i);
-    assert.doesNotMatch(source, /offerCode/i);
     assert.doesNotMatch(source, /introductoryOfferEligibility/, 'must not override eligibility — let StoreKit decide, per §8');
   }
+  // Deliberate change (offer-code campaign, bot/ipad/offer-code-redeem): this guard used to forbid the string
+  // "offerCode" anywhere. Offer codes are now allowed in exactly ONE shape — presenting Apple's native redemption
+  // sheet (presentCodeRedemptionSheetIOS). Apple validates the code, prices it and charges; the app never handles a
+  // code, never builds an offer into requestPurchase (FT14 still pins that call byte-for-byte), and never grants
+  // locally. Behavior is covered in scripts/offer-code-redemption.test.mjs.
+  assert.doesNotMatch(subscriptionCore, /offerCode/i, 'pure trial/pricing core stays offer-code free');
+  assert.doesNotMatch(subscriptions.slice(subscriptions.indexOf('async purchase('), subscriptions.indexOf('private async verify')), /offerCode|offer:/i,
+    'the purchase path never carries an offer');
+  const offerMentions = subscriptions.match(/offerCode/gi) ?? [];
+  assert.ok(offerMentions.length > 0 && /presentCodeRedemptionSheetIOS\(\)/.test(subscriptions), 'offer codes only through Apple\'s sheet');
+  assert.doesNotMatch(plans, /presentCodeRedemptionSheetIOS|requestPurchase/, 'Plans never talks to StoreKit directly');
 });
 
 console.log(`\nfree-trial-ux: ${passed} checks passed`);

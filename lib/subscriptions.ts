@@ -8,6 +8,7 @@ import {
   getAvailablePurchases,
   initConnection,
   isEligibleForIntroOfferIOS,
+  presentCodeRedemptionSheetIOS,
   purchaseErrorListener,
   purchaseUpdatedListener,
   requestPurchase,
@@ -73,6 +74,15 @@ export type SubscriptionResult = {
   activationPending?: boolean;
 };
 
+/**
+ * Outcome of asking Apple to show its native subscription offer-code redemption sheet. The sheet itself is the whole
+ * redemption UI: Apple validates the code, shows the discounted price, and charges. Youmi never sees or stores the
+ * typed code. The resulting transaction reaches this app through the same purchaseUpdatedListener / StoreKit history
+ * that every other purchase uses (see reconcileLateTransaction + subscriptionReconciliation), so there is no second
+ * entitlement path here.
+ */
+export type OfferCodeSheetResult = 'presented' | 'unsupported' | 'presentation_unavailable' | 'storekit_error';
+
 export type SubscriptionRestoreResult = SubscriptionResult & {
   restoredCount?: number;
   outcomes?: RestoreItemOutcome[];
@@ -111,6 +121,10 @@ const STOREKIT_SYNC_BACKSTOP_MS = 180_000;
 // queue and replays on next launch (see expo-iap finishTransaction docs) or
 // gets swept up by a later restore — it is never silently dropped.
 const FINISH_TRANSACTION_TIMEOUT_MS = 10_000;
+// The offer-code sheet waits on the person; only foreground-active time counts (the app is `inactive` while Apple's
+// sheet is up). The wall-clock backstop only frees the button; it never cancels Apple's sheet.
+const OFFER_CODE_SHEET_ACTIVE_BUDGET_MS = 60_000;
+const OFFER_CODE_SHEET_BACKSTOP_MS = 600_000;
 // A backend ownership rejection (`iap_already_linked` / `iap_deleted_account_binding`) is a permanent verdict for that
 // Apple transaction lineage and THIS Youmi account. If StoreKit hands the same transaction back on a later attempt, the
 // client already knows the outcome, so it must end that attempt with the remembered result instead of waiting for the
@@ -764,6 +778,37 @@ class SubscriptionService {
       logDiag('entitlement_refresh_failed');
       logIap('IAP_ENTITLEMENT_REFRESH', isBoundedFetchTimeout(error) ? 'timeout' : 'error');
       return null;
+    }
+  }
+
+  /**
+   * Presents Apple's offer-code redemption sheet (iOS only). Bounded by foreground-active time only, because the sheet
+   * waits on the person (iOS reports `inactive` while it is up). Running past the bound is NOT an error: the sheet may
+   * still be open, and any redemption still arrives through the transaction listener. Never resolves a purchase
+   * attempt, never touches `pending`, and never grants anything locally.
+   */
+  async presentOfferCodeRedemption(): Promise<OfferCodeSheetResult> {
+    if (Platform.OS !== 'ios') return 'unsupported';
+    if (this.purchaseInFlight || this.restoreInFlight) return 'presentation_unavailable';
+    if (AppState.currentState !== 'active') {
+      logDiag('offer_code_sheet_result', { result: 'presentation_unavailable' });
+      return 'presentation_unavailable';
+    }
+    try {
+      await this.connect();
+      logDiag('offer_code_sheet_requested');
+      await boundedActiveTimeTask(() => presentCodeRedemptionSheetIOS(), OFFER_CODE_SHEET_ACTIVE_BUDGET_MS,
+        OFFER_CODE_SHEET_BACKSTOP_MS, 'offer_code_sheet', AppState);
+      logDiag('offer_code_sheet_result', { result: 'presented' });
+      return 'presented';
+    } catch (error) {
+      if (error instanceof PaymentTaskTimeoutError && error.stage === 'offer_code_sheet') {
+        logDiag('offer_code_sheet_result', { result: 'presented_unbounded' });
+        return 'presented';
+      }
+      logDiag('offer_code_sheet_result', { result: 'storekit_error' });
+      logIap('IAP_OFFER_CODE_SHEET_FAILED', error instanceof Error ? error.name : 'unknown');
+      return 'storekit_error';
     }
   }
 

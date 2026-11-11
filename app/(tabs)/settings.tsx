@@ -23,6 +23,7 @@ import { fetchPlanStatus, PlanStatus, safeAccessLabel } from '@/lib/planStatus';
 import { usePaymentStatusExpiry } from '@/lib/usePaymentStatusExpiry';
 import { BillingRequestIdentity } from '@/lib/billingRequestIdentity';
 import { subscriptionService } from '@/lib/subscriptions';
+import { isOfferCodeRedemptionAvailable } from '@/lib/offerCodes';
 import { subscriptionReconciliation } from '@/lib/subscriptionReconciliation';
 import { boundedPaymentTask, PAYMENT_UI_WAIT_TIMEOUT_MS } from '@/lib/boundedPaymentTask';
 import { logDiag } from '@/lib/iapDiag';
@@ -134,17 +135,21 @@ export default function SettingsScreen() {
   const [usernameSaving, setUsernameSaving] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
   const [restoringPurchases, setRestoringPurchases] = useState(false);
+  const [redeemingCode, setRedeemingCode] = useState(false);
 
   const screenIdentity = isGuest ? 'guest' : user?.id ?? null;
   const statusIdentity = useRef(new BillingRequestIdentity()).current;
   const restoreIdentity = useRef(new BillingRequestIdentity()).current;
+  // Separate from restoreIdentity so the offer-code sheet and Restore Purchases never invalidate each other's ticket.
+  const redeemIdentity = useRef(new BillingRequestIdentity()).current;
   statusIdentity.setIdentity(screenIdentity);
   restoreIdentity.setIdentity(screenIdentity);
+  redeemIdentity.setIdentity(screenIdentity);
   const [statusAccountId, setStatusAccountId] = useState<string | null>(null);
   const cachedPlanStatus = statusAccountId === screenIdentity && !isGuest ? storedPlanStatus : null;
   const cachedGuestPlanStatus = statusAccountId === screenIdentity && isGuest ? storedGuestPlanStatus : null;
   useEffect(() => {
-    setPlanStatus(null); setGuestPlanStatus(null); setStatusAccountId(null); setPlanError(null); setRestoringPurchases(false);
+    setPlanStatus(null); setGuestPlanStatus(null); setStatusAccountId(null); setPlanError(null); setRestoringPurchases(false); setRedeemingCode(false);
   }, [screenIdentity]);
 
   const loadPlan = useCallback(async () => {
@@ -263,6 +268,28 @@ export default function SettingsScreen() {
         setRestoringPurchases(false);
         logDiag('restore_busy_cleared');
       }
+    }
+  };
+  // Signed-in only (this card is hidden for Guests, who redeem from Plans). Apple's sheet does the redemption; access
+  // updates only through the shared StoreKit reconciliation + backend status read, never a local grant.
+  const handleRedeemOfferCode = async () => {
+    if (redeemingCode || restoringPurchases || !session?.access_token || !isOfferCodeRedemptionAvailable()) return;
+    setRedeemingCode(true);
+    const ticket = redeemIdentity.begin();
+    try {
+      const sheet = await subscriptionService.presentOfferCodeRedemption();
+      if (!redeemIdentity.owns(ticket)) return;
+      if (sheet !== 'presented') {
+        Alert.alert(t('plans.appStoreUnavailable'), t('plans.redeemCodeFailed'));
+        return;
+      }
+      await subscriptionReconciliation.request('offer_code_redeemed');
+      if (!redeemIdentity.owns(ticket)) return;
+      await boundedPaymentTask(loadPlan, PAYMENT_UI_WAIT_TIMEOUT_MS, 'entitlement_refresh').catch(() => null);
+    } catch {
+      if (redeemIdentity.owns(ticket)) Alert.alert(t('plans.appStoreUnavailable'), t('plans.redeemCodeFailed'));
+    } finally {
+      if (redeemIdentity.owns(ticket)) setRedeemingCode(false);
     }
   };
   const handleClearData = () => Alert.alert(t('settings.alerts.clearTitle'), t('settings.alerts.clearBody'), [
@@ -430,6 +457,9 @@ export default function SettingsScreen() {
                     </PressableScale>
                   )}
                   <SettingRow icon="sparkles-outline" label={t('settings.plan.studentBasicRow')} detail={t('settings.plan.studentBasicDetail')} value={planStatus?.entitlement?.active ? t('settings.plan.view') : t('settings.plan.explore')} onPress={() => router.push('/plans')} />
+                  {isOfferCodeRedemptionAvailable() ? (
+                    <SettingRow icon="pricetag-outline" label={redeemingCode ? t('plans.redeemCodeBusy') : t('plans.redeemCode')} onPress={redeemingCode || restoringPurchases ? undefined : () => void handleRedeemOfferCode()} />
+                  ) : null}
                   <SettingRow icon="refresh-outline" label={restoringPurchases ? t('settings.plan.refreshing') : t('settings.plan.refresh')} onPress={restoringPurchases ? undefined : () => void handleRestorePurchases()} last />
                 </GlassCard>
               ) : null}
