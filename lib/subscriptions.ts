@@ -54,6 +54,7 @@ export type SubscriptionResultCode =
   | 'purchase_in_progress'
   | 'product_unavailable'
   | 'sign_in_required'
+  | 'offer_requires_account'
   | 'backend_verification_failed'
   | 'already_linked'
   | 'expired'
@@ -203,6 +204,7 @@ function result(code: SubscriptionResultCode, message?: string): SubscriptionRes
     purchase_in_progress: 'A purchase is already in progress.',
     product_unavailable: 'This subscription is not available from the App Store right now.',
     sign_in_required: 'Sign in before subscribing.',
+    offer_requires_account: 'Sign in to your Youmi Lens account before redeeming an offer code.',
     backend_verification_failed: 'The purchase could not be verified. Restore Purchases before trying again.',
     already_linked: 'This Apple subscription is linked to another Youmi Lens account.',
     expired: 'The subscription has expired.',
@@ -650,6 +652,9 @@ class SubscriptionService {
     // The account this verification belongs to (set when the purchase attempt started, or captured for late reconciliation).
     const verifyingAccountId = accountId;
     if (payload.reason === 'sales_closed' || payload.error === 'sales_closed') return result('sales_closed');
+    // A token-less offer code was presented without a Youmi account. Not an ownership verdict: the transaction stays
+    // unfinished so it binds once the person signs in and reconciliation runs again.
+    if (payload.error === 'iap_account_required') return result('offer_requires_account');
     if (payload.error === 'iap_already_linked') {
       const rejection = result('already_linked');
       if (verifyingAccountId) this.rememberOwnershipRejection(purchase, verifyingAccountId, rejection);
@@ -743,6 +748,7 @@ class SubscriptionService {
       }
       const denied = payload.outcomes?.find((item) => !item.safeToFinish && !item.granted);
       if (denied?.code === 'sales_closed') return { ...result('sales_closed'), outcomes: payload.outcomes };
+      if (denied?.code === 'iap_account_required') return { ...result('offer_requires_account'), outcomes: payload.outcomes, retryable: false };
       if (payload.outcomes?.some((item) => item.retryable)) return { ...result('backend_verification_failed'), outcomes: payload.outcomes };
       if (denied && !['expired', 'revoked', 'refunded', 'iap_already_linked', 'iap_deleted_account_binding'].includes(denied.code)) return { ...result('backend_verification_failed'), outcomes: payload.outcomes, retryable: false };
       if (payload.entitlement?.active) {

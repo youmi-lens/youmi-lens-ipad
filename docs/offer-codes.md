@@ -14,52 +14,26 @@ Branch: `bot/ipad/offer-code-redeem`. Status: **client ready, gated OFF**. Backe
   triggers `offer_code_redeemed`, which keeps the bounded retry episode going if the transaction lands a few seconds late. Access is
   only ever read back from the backend. Nothing is granted locally.
 
-## Blocker: the backend rejects token-less subscriptions (production monorepo, not changed here)
+## Backend contract (youmi-lens/youmi-lens#59)
 
-Apple's redemption sheet (and the App Store redemption URL) **cannot attach an `appAccountToken`**. The backend currently requires one:
+Apple's redemption sheet (and the App Store redemption URL) **cannot attach an `appAccountToken`**. Backend PR
+https://github.com/youmi-lens/youmi-lens/pull/59 (migration `20261112090000_offer_code_redemptions.sql`) handles this:
 
-- `server/iapSubscriptions.mjs` `assertSubscriptionIdentity()` throws `SubscriptionAccountTokenError` when it is missing.
-- `persist_verified_subscription` (migration `20261004021500_early_renewal_entitlement.sql`) rejects a null token and requires
-  `token = user_id`.
+- A verified `offerType = 3` transaction with no token and **no existing binding** is bound to the signed-in caller of
+  verify/restore. The server then calls Apple's **Set App Account Token** (best-effort, non-blocking).
+- If the chain is already bound to another account, the result is `iap_already_linked`, as before.
+- A **Guest** (anonymous) caller gets **403 `iap_account_required`**. A guest binding could never move to a real account. The app
+  therefore asks Guests to sign in ("请先登录再兑换优惠码") **before** Apple's sheet opens. If the code still comes back (for
+  example from a later restore), the client maps it to `offer_requires_account`, shows the same prompt, and leaves the
+  transaction unfinished so it binds after sign-in.
+- Every offer-code transaction is recorded in `public.app_store_offer_redemptions` (`user_id, original_transaction_id,
+  transaction_id unique, product_id, offer_identifier, offer_type, environment, redeemed_at, created_at`). RLS: service role
+  writes; signed-in users can read only their own rows.
 
-**Result today:** someone who redeems YOUMIDY30 and similar codes is charged the discounted price, but restore does not grant Student
-Access. This applies to codes shared on social media too, with or without this button.
+**Until #59 is merged, migrated and deployed**, redeeming a code charges the person without granting Student Access, so keep
+`EXPO_PUBLIC_OFFER_CODES_LIVE` off.
 
-What the backend needs (proposal, for the backend owner):
-
-1. In restore/verify, when an auto-renewable transaction is Apple-verified, has `offerType = 3`, **no** `appAccountToken` and **no**
-   existing binding, bind it to the authenticated caller and call Apple's **Set App Account Token** endpoint
-   (`PUT /inApps/v1/transactions/{originalTransactionId}/appAccountToken`, body `{"appAccountToken": "<user uuid>"}`).
-   Then re-fetch the transaction and persist it through the normal path. Future renewals carry the token.
-   Keep the existing rule that never takes over a foreign binding.
-2. Persist the offer fields. `iapApple.mjs` decodes `offerType` and `offerDiscountType` but drops them. It also does not decode
-   `offerIdentifier` or `offerPeriod`, and `rawTransaction` is `null` for subscriptions. None of today's tables
-   (`app_store_subscription_states`, `app_store_subscription_bindings`, `apple_iap_transactions`) has an offer column, so
-   **per-code attribution is not queryable yet**.
-
-Proposed migration (not applied):
-
-```sql
-create table if not exists public.app_store_offer_redemptions (
-  transaction_id          text primary key,
-  original_transaction_id text not null,
-  user_id                 uuid not null references auth.users(id) on delete cascade,
-  product_id              text not null,
-  offer_type              int  not null,          -- 3 = subscription offer code
-  offer_identifier        text,                   -- offer reference name/ID from App Store Connect
-  offer_discount_type     text,                   -- PAY_AS_YOU_GO / PAY_UP_FRONT / FREE_TRIAL
-  offer_period            text,                   -- ISO 8601, e.g. P3M / P1Y
-  price_milli             bigint,
-  currency                text,
-  storefront              text,
-  environment             text not null,
-  purchased_at            timestamptz not null,
-  created_at              timestamptz not null default now()
-);
-alter table public.app_store_offer_redemptions enable row level security; -- service role writes only
-```
-
-## Attribution SQL (after the table above exists)
+## Attribution SQL
 
 `offerIdentifier` identifies the **offer**, not the custom code someone typed. Attribution per platform therefore works only when
 each platform code is its own offer in App Store Connect. The six codes were created that way: YOUMIDY30/40, YOUMIXHS30/40 and
@@ -75,27 +49,27 @@ select
   end                                        as platform,
   r.offer_identifier,
   r.product_id,
-  count(*)                                   as redemptions,
+  count(distinct r.original_transaction_id)  as redemptions,     -- one row per offer-period transaction
   count(distinct r.user_id)                  as users,
   count(distinct r.user_id) filter (
     where s.status in ('active','grace_period','cancelled_but_active_until_expiry')
       and s.expires_at > now())              as currently_active,
-  min(r.purchased_at)                        as first_redeemed,
-  max(r.purchased_at)                        as last_redeemed
+  min(r.redeemed_at)                        as first_redeemed,
+  max(r.redeemed_at)                        as last_redeemed
 from public.app_store_offer_redemptions r
 left join public.app_store_subscription_states s
-  on s.original_transaction_id = r.original_transaction_id
+  on s.original_transaction_id = r.original_transaction_id and s.user_id = r.user_id
 where r.offer_type = 3
   and r.environment = 'Production'
 group by 1, 2, 3
 order by redemptions desc;
 ```
 
-Until then, use App Store Connect → Sales and Trends (offer code reports by reference name) for redemption counts.
+Before the backend change is live, use App Store Connect → Sales and Trends (offer code reports by reference name) for redemption counts.
 
 ## Turning it on
 
-1. Ship the backend change above (bind + Set App Account Token + offer persistence).
+1. Merge, migrate and deploy backend #59 (bind + Set App Account Token + offer persistence).
 2. Set `EXPO_PUBLIC_OFFER_CODES_LIVE=true` in the EAS production environment.
 3. Make a **new App Store build**. It is a JS + env change only, with no native diff, so an EAS Update could also deliver it if the
    project uses updates. This repo ships through store builds.

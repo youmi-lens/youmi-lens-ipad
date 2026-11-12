@@ -193,3 +193,101 @@ test('OC13: Settings redeem (signed-in) → sheet → shared reconciliation → 
   assert.equal(busy, false);
   assert.equal(h.state.alerts.length, 0);
 });
+
+/** Plans scope wired to the REAL promptOfferCodeSignIn + handleSignIn, recording navigation. */
+function plansSignInScope(h, nav) {
+  const handleSignIn = h.handler('app/plans.tsx', 'handleSignIn', { exitGuest: async () => { nav.push('exitGuest'); },
+    router: { replace: (path) => nav.push(`replace:${path}`) } });
+  return { promptOfferCodeSignIn: h.handler('app/plans.tsx', 'promptOfferCodeSignIn', { ...h.common, handleSignIn }) };
+}
+const pressAlertButton = async (alert, label) => { alert[2].find((b) => b.text === label).onPress(); await flush(); };
+
+test('OC14: a Guest is asked to sign in before Apple\'s sheet opens, and Sign In routes to auth', async () => {
+  const h = paymentHarness();
+  const nav = [];
+  const triggers = [];
+  await h.plansAction('handleRedeemOfferCode', { ...plansSignInScope(h, nav), isGuest: true,
+    isOfferCodeRedemptionAvailable: () => true,
+    subscriptionReconciliation: { request: async (trigger) => { triggers.push(trigger); return null; } },
+    subscriptionService: { presentOfferCodeRedemption: async () => { h.state.sheetCalls = (h.state.sheetCalls ?? 0) + 1; return 'presented'; } },
+  });
+  assert.equal(h.state.sheetCalls ?? 0, 0, 'Apple never charges a Guest who cannot be bound');
+  assert.deepEqual(triggers, []);
+  assert.equal(h.state.busy, null);
+  const alert = h.state.alerts.at(-1);
+  assert.deepEqual(alert.slice(0, 2), ['plans.redeemCodeSignInTitle', 'plans.redeemCodeSignInRequired']);
+  assert.deepEqual(alert[2].map((b) => b.text), ['common.cancel', 'common.signIn']);
+  await pressAlertButton(alert, 'common.signIn');
+  assert.deepEqual(nav, ['exitGuest', 'replace:/auth']);
+});
+
+test('OC15: no session is treated like a Guest (no sheet, sign-in prompt)', async () => {
+  const h = paymentHarness();
+  await h.plansAction('handleRedeemOfferCode', { ...plansSignInScope(h, []), session: null,
+    isOfferCodeRedemptionAvailable: () => true,
+    subscriptionService: { presentOfferCodeRedemption: async () => { h.state.sheetCalls = 1; return 'presented'; } },
+  });
+  assert.equal(h.state.sheetCalls ?? 0, 0);
+  assert.equal(h.state.alerts.at(-1)[1], 'plans.redeemCodeSignInRequired');
+});
+
+test('OC16: a backend iap_account_required after the sheet shows the sign-in prompt instead of a refresh', async () => {
+  const h = paymentHarness();
+  const before = h.state.refreshes ?? 0;
+  await h.plansAction('handleRedeemOfferCode', { ...plansSignInScope(h, []),
+    isOfferCodeRedemptionAvailable: () => true,
+    subscriptionReconciliation: { request: async () => ({ ok: false, code: 'offer_requires_account', message: '' }) },
+    subscriptionService: { presentOfferCodeRedemption: async () => 'presented' },
+  });
+  assert.equal(h.state.alerts.at(-1)[1], 'plans.redeemCodeSignInRequired');
+  assert.equal(h.state.refreshes ?? 0, before);
+  assert.equal(h.state.busy, null);
+});
+
+test('OC17: verify 403 iap_account_required → offer_requires_account, transaction left unfinished and not remembered', async () => {
+  const h = paymentHarness();
+  const normal = h.state.fetch;
+  let reject = true;
+  h.state.fetch = async (url, init) => (reject && url.endsWith('/verify')
+    ? h.response({ ok: false, error: 'iap_account_required', message: 'Sign in' }, 403) : normal(url, init));
+  const attempt = h.service.purchase('monthly', 'external-test-token', ACCOUNT);
+  await flush();
+  const tx = h.transaction(MONTHLY, 'offer-needs-account');
+  h.emit(tx);
+  const outcome = await attempt;
+  assert.equal(outcome.code, 'offer_requires_account');
+  assert.match(outcome.message, /Sign in/);
+  assert.equal(h.state.finishes.length, 0, 'kept for binding after sign-in');
+  assert.equal(h.state.active, false);
+  // Not an ownership verdict: once the account exists the same transaction is verified again and granted.
+  reject = false;
+  h.state.purchases = [tx];
+  const restored = await h.service.restore('external-test-token', ACCOUNT, { silent: true });
+  assert.equal(restored.code, 'success');
+  assert.equal(h.state.finishes.length, 1);
+});
+
+test('OC18: restore outcome iap_account_required → offer_requires_account and nothing finished', async () => {
+  const h = paymentHarness();
+  h.state.fetch = async (url, init) => {
+    if (!url.endsWith('/restore')) return h.response({ ok: true });
+    const purchases = JSON.parse(init.body).purchases;
+    return h.response({ ok: true, entitlement: null, restoredCount: purchases.length, verifiedTransactionIds: [],
+      outcomes: purchases.map((p) => ({ transactionId: p.transactionId, code: 'iap_account_required', granted: false, safeToFinish: false, retryable: false })) });
+  };
+  h.state.purchases = [{ ...h.transaction(MONTHLY, 'guest-offer-tx'), appAccountToken: null }];
+  const restored = await h.service.restore('external-test-token', ACCOUNT, { silent: true });
+  assert.equal(restored.code, 'offer_requires_account');
+  assert.equal(h.state.finishes.length, 0);
+});
+
+test('OC19: sign-in copy exists in all 6 locales, translated, with the exact Chinese prompt', async () => {
+  const { DICTIONARIES } = await import('../lib/i18nCore.mjs');
+  for (const key of ['plans.redeemCodeSignInTitle', 'plans.redeemCodeSignInRequired']) {
+    for (const locale of ['zh-Hans', 'ja', 'fr', 'es', 'ko']) {
+      assert.ok(DICTIONARIES[locale][key], `${locale} ${key}`);
+      assert.notEqual(DICTIONARIES[locale][key], DICTIONARIES.en[key], `${locale} ${key} is untranslated`);
+    }
+  }
+  assert.equal(DICTIONARIES['zh-Hans']['plans.redeemCodeSignInRequired'], '请先登录再兑换优惠码');
+});

@@ -283,8 +283,15 @@ export default function SettingsScreen() {
         Alert.alert(t('plans.appStoreUnavailable'), t('plans.redeemCodeFailed'));
         return;
       }
-      await subscriptionReconciliation.request('offer_code_redeemed');
+      const reconciled = await subscriptionReconciliation.request('offer_code_redeemed');
       if (!redeemIdentity.owns(ticket)) return;
+      if (reconciled?.code === 'offer_requires_account') {
+        Alert.alert(t('plans.redeemCodeSignInTitle'), t('plans.redeemCodeSignInRequired'), [
+          { text: t('common.cancel'), style: 'cancel' },
+          { text: t('common.signIn'), onPress: () => void handleGuestSignIn() },
+        ]);
+        return;
+      }
       await boundedPaymentTask(loadPlan, PAYMENT_UI_WAIT_TIMEOUT_MS, 'entitlement_refresh').catch(() => null);
     } catch {
       if (redeemIdentity.owns(ticket)) Alert.alert(t('plans.appStoreUnavailable'), t('plans.redeemCodeFailed'));

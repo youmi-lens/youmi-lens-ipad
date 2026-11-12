@@ -429,11 +429,15 @@ export default function PlansScreen() {
    */
   const handleRedeemOfferCode = async () => {
     if (busy !== null || !isOfferCodeRedemptionAvailable()) return;
+    // Codes redeemed in Apple's sheet carry no appAccountToken, so the backend binds them only to a signed-in Youmi
+    // account (a guest binding could never move to a real account). Ask Guests to sign in before Apple charges them.
+    if (isGuest || !session?.access_token) {
+      promptOfferCodeSignIn();
+      return;
+    }
     setBusy('redeem');
     const actionTicket = actionIdentity.begin();
     try {
-      // Same identity rule as Subscribe: the reconciliation that binds the redemption needs a Youmi account (or the
-      // isolated guest-IAP identity) to exist before Apple's sheet opens.
       const identity = await boundedPaymentTask(resolvePurchaseIdentity, PAYMENT_UI_WAIT_TIMEOUT_MS, 'redeem_identity');
       if (!actionIdentity.owns(actionTicket)) return;
       if (!identity) {
@@ -446,8 +450,12 @@ export default function PlansScreen() {
         Alert.alert(t('plans.appStoreUnavailable'), t('plans.redeemCodeFailed'));
         return;
       }
-      await subscriptionReconciliation.request('offer_code_redeemed');
+      const reconciled = await subscriptionReconciliation.request('offer_code_redeemed');
       if (!actionIdentity.owns(actionTicket)) return;
+      if (reconciled?.code === 'offer_requires_account') {
+        promptOfferCodeSignIn();
+        return;
+      }
       await refreshPaymentStatus();
     } catch {
       if (!actionIdentity.owns(actionTicket)) return;
@@ -464,6 +472,10 @@ export default function PlansScreen() {
     }
   };
   const handleSignIn = async () => { await exitGuest(); router.replace('/auth'); };
+  const promptOfferCodeSignIn = () => Alert.alert(t('plans.redeemCodeSignInTitle'), t('plans.redeemCodeSignInRequired'), [
+    { text: t('common.cancel'), style: 'cancel' },
+    { text: t('common.signIn'), onPress: () => void handleSignIn() },
+  ]);
 
   return (
     <SafeAreaView style={styles.root} edges={['top', 'left', 'right', 'bottom']}>
