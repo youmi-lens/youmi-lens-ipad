@@ -1,6 +1,7 @@
 {
   "cli": {
-    "version": ">= 16.0.0"
+    "version": ">= 16.0.0",
+    "appVersionSource": "local"
   },
   "build": {
     "development": {
@@ -70,7 +71,9 @@
       "env": {
         "EXPO_PUBLIC_USE_REAL_IAP": "true",
         "EXPO_PUBLIC_RECORDING_DEFAULT_ENGINE": "nativeDurable"
-      }
+      },
+      "environment": "production",
+      "autoIncrement": true
     },
     "production-dev-container": {
       "distribution": "internal",
